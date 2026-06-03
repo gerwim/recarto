@@ -151,3 +151,95 @@ func TestRecallMissIncrementsCounter(t *testing.T) {
 		t.Errorf("recall_misses = %d, want 1", misses)
 	}
 }
+
+// TestRecallPinnedSurvivesKindFilter guards C1: a kind-filtered recall must
+// still surface pinned do_not_repeat memories (spec §9.2 — pins are always
+// included), even though their kind differs from the requested kind.
+func TestRecallPinnedSurvivesKindFilter(t *testing.T) {
+	e := newTestEngine(t, clock.NewFake(time.UnixMilli(30_000_000)))
+	ctx := context.Background()
+
+	pinID, _, err := e.Record(ctx, NewMemory{Kind: KindDoNotRepeat,
+		Body: "never disable the busy_timeout pragma on the store connection"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := e.Record(ctx, NewMemory{Kind: KindBug,
+		Body: "nil deref in the recall budgeter when scored is empty",
+		Refs: []Ref{{Type: RefFile, Value: "internal/memory/recall.go"}}}); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := e.Recall(ctx, RecallQuery{
+		Kind:  KindBug, // restrict to bugs ...
+		Files: []string{"internal/memory/recall.go"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sawPin bool
+	for _, r := range res {
+		if r.Record.ID == pinID { // ... the pin must still appear
+			sawPin = true
+		}
+	}
+	if !sawPin {
+		t.Error("pinned do_not_repeat must survive a kind-filtered recall (spec §9.2)")
+	}
+}
+
+// TestRecallMissWhenBudgetExcludesAll guards I2: recall_misses must count a
+// recall that found candidates but returned nothing because the budget excluded
+// them — not only the empty-candidate case.
+func TestRecallMissWhenBudgetExcludesAll(t *testing.T) {
+	e := newTestEngine(t, clock.NewFake(time.UnixMilli(31_000_000)))
+	ctx := context.Background()
+
+	big := "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi omicron pi"
+	if _, _, err := e.Record(ctx, NewMemory{Kind: KindLearning, Body: big,
+		Refs: []Ref{{Type: RefFile, Value: "internal/memory/recall.go"}}}); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := e.Recall(ctx, RecallQuery{
+		Files:       []string{"internal/memory/recall.go"},
+		TokenBudget: 1, // far below the candidate's token cost
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res) != 0 {
+		t.Fatalf("expected empty result under budget=1, got %d", len(res))
+	}
+	misses, _ := ledger.New(e.st).Get(ctx, "lifetime", "recall_misses")
+	if misses != 1 {
+		t.Errorf("recall_misses = %d, want 1 (candidate existed but budget excluded it)", misses)
+	}
+}
+
+// TestRecallSynonymBridging locks in §9.3: a query using an abbreviation ("db")
+// recalls a memory whose body used the full word ("database"), because write-
+// time synonym expansion indexed both forms into search_text.
+func TestRecallSynonymBridging(t *testing.T) {
+	e := newTestEngine(t, clock.NewFake(time.UnixMilli(32_000_000)))
+	ctx := context.Background()
+	id, _, err := e.Record(ctx, NewMemory{Kind: KindLearning,
+		Title: "pooling",
+		Body:  "reuse the database connection pool instead of dialing per request"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := e.Recall(ctx, RecallQuery{TaskHint: "db"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, r := range res {
+		if r.Record.ID == id {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("query 'db' should recall a 'database' memory via synonym expansion")
+	}
+}

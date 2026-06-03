@@ -81,7 +81,7 @@ func (e *Engine) Recall(ctx context.Context, q RecallQuery) ([]RecallResult, err
 		idset[id] = true
 	}
 
-	recs, err := e.loadByIDs(ctx, idset, q.Kind)
+	recs, err := e.loadByIDs(ctx, idset)
 	if err != nil {
 		return nil, err
 	}
@@ -90,6 +90,13 @@ func (e *Engine) Recall(ctx context.Context, q RecallQuery) ([]RecallResult, err
 	scored := make([]RecallResult, 0, len(recs))
 	for _, r := range recs {
 		if r.Status != "active" {
+			continue
+		}
+		// The kind filter applies to lexical/structural candidates, but a pinned
+		// do_not_repeat is ALWAYS eligible (spec §9.2) and must never be filtered
+		// out by q.Kind.
+		isPin := r.Kind == KindDoNotRepeat && r.Pinned
+		if q.Kind != "" && r.Kind != q.Kind && !isPin {
 			continue
 		}
 		sig := map[string]float64{
@@ -108,21 +115,29 @@ func (e *Engine) Recall(ctx context.Context, q RecallQuery) ([]RecallResult, err
 		scored = append(scored, RecallResult{Record: r, Score: score, Signals: sig})
 	}
 
-	if len(scored) == 0 {
-		_ = e.led.Incr(ctx, "lifetime", "recall_misses", 1)
-		return nil, nil
-	}
 	budget := q.TokenBudget
 	if budget <= 0 {
 		budget = defaultTokenBudget
 	}
-	return e.selectWithinBudget(ctx, scored, budget), nil
+	out, used := selectWithinBudget(scored, budget)
+	if len(out) == 0 {
+		// A recall that surfaces nothing above threshold — whether no candidates
+		// matched or the budget excluded them all — is a miss. This counter is the
+		// evidence that justifies (or not) the deferred embeddings path (§9.2/§10).
+		_ = e.led.Incr(ctx, "lifetime", "recall_misses", 1)
+		return nil, nil
+	}
+	_ = e.led.Incr(ctx, "lifetime", "memories_recalled", int64(len(out)))
+	_ = e.led.Incr(ctx, "lifetime", "recall_tokens_injected", int64(used))
+	return out, nil
 }
 
 // selectWithinBudget always includes pinned do_not_repeat (a dedicated, budget-
 // exempt slice), then greedily adds the highest-scoring remaining records until
-// the token budget is exhausted. It records the recall counters.
-func (e *Engine) selectWithinBudget(ctx context.Context, scored []RecallResult, budget int) []RecallResult {
+// the token budget is exhausted. It returns the selection and its estimated
+// token cost. It is a pure function (no side effects) so the caller owns the
+// ledger accounting and the empty-result (miss) decision.
+func selectWithinBudget(scored []RecallResult, budget int) (out []RecallResult, used int) {
 	var pinned, rest []RecallResult
 	for _, s := range scored {
 		if s.Record.Kind == KindDoNotRepeat && s.Record.Pinned {
@@ -135,8 +150,6 @@ func (e *Engine) selectWithinBudget(ctx context.Context, scored []RecallResult, 
 	sort.Slice(rest, func(i, j int) bool { return rest[i].Score > rest[j].Score })
 
 	tokensOf := func(r *Record) int { return ledger.EstimateTokens(r.Title + " " + r.Body) }
-	var out []RecallResult
-	used := 0
 	for _, s := range pinned { // pins are always included, budget-exempt
 		out = append(out, s)
 		used += tokensOf(s.Record)
@@ -149,10 +162,7 @@ func (e *Engine) selectWithinBudget(ctx context.Context, scored []RecallResult, 
 		out = append(out, s)
 		used += t
 	}
-
-	_ = e.led.Incr(ctx, "lifetime", "memories_recalled", int64(len(out)))
-	_ = e.led.Incr(ctx, "lifetime", "recall_tokens_injected", int64(used))
-	return out
+	return out, used
 }
 
 // lexicalQueryText assembles the BM25 query from the task hint, file basenames,
@@ -237,22 +247,20 @@ func (e *Engine) pinnedIDs(ctx context.Context, branch string) ([]string, error)
 	return out, rows.Err()
 }
 
-// loadByIDs loads records (with refs) for the id set, optionally filtered by kind.
-func (e *Engine) loadByIDs(ctx context.Context, idset map[string]bool, kind Kind) ([]*Record, error) {
+// loadByIDs loads records (with refs) for the id set. Kind filtering is applied
+// by the caller (Recall's scoring loop) so that pinned do_not_repeat can be
+// exempted from it.
+func (e *Engine) loadByIDs(ctx context.Context, idset map[string]bool) ([]*Record, error) {
 	if len(idset) == 0 {
 		return nil, nil
 	}
-	args := make([]any, 0, len(idset)+1)
+	args := make([]any, 0, len(idset))
 	ph := make([]string, 0, len(idset))
 	for id := range idset {
 		args = append(args, id)
 		ph = append(ph, "?")
 	}
 	query := selectMemoriesSQL + ` WHERE id IN (` + strings.Join(ph, ",") + `)`
-	if kind != "" {
-		query += ` AND kind = ?`
-		args = append(args, string(kind))
-	}
 	rows, err := e.st.DB.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err

@@ -72,6 +72,12 @@ func (e *Engine) insert(ctx context.Context, c store.Conn, id string, nm NewMemo
 			  WHERE id=? AND status='active'`, id, now, nm.SupersedesID); err != nil {
 			return err
 		}
+		// Drop the superseded row from the FTS index so it stops surfacing as a
+		// lexical candidate (recall filters it by status anyway, but this keeps
+		// the candidate pool clean).
+		if err := e.lex.Delete(ctx, c, nm.SupersedesID); err != nil {
+			return err
+		}
 	}
 	return e.lex.Index(ctx, c, id, searchText)
 }
@@ -281,6 +287,11 @@ func (e *Engine) findNearDup(ctx context.Context, c store.Conn, kind Kind,
 // reinforce bumps an existing memory's reinforcement_count and confidence,
 // refreshes updated_at, and unions in any new refs. It runs on the caller's
 // transaction connection c.
+//
+// The winning row's body/search_text and its FTS index are intentionally NOT
+// rewritten here: lexical content from a reinforcing restatement is dropped
+// (Phase 1C may revisit), but the unioned refs keep the structural signal —
+// the recall workhorse — current.
 func (e *Engine) reinforce(ctx context.Context, c store.Conn, id string, nm NewMemory, now int64) error {
 	if _, err := c.ExecContext(ctx,
 		`UPDATE memories
