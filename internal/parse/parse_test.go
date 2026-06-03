@@ -102,3 +102,29 @@ func TestParseCSharp(t *testing.T) {
 		t.Errorf("calls = %v, want Do", calls)
 	}
 }
+
+func TestParseTypeScript(t *testing.T) {
+	r, err := NewRegistry()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	for _, lang := range []string{"typescript", "tsx"} {
+		src := []byte(`import { x } from "./x";
+class Widget { render() { draw(); } }
+function mount() { const w = new Widget(); w.render(); }`)
+		res, err := r.ParseFile(lang, "w."+lang, src)
+		if err != nil {
+			t.Fatalf("%s: %v", lang, err)
+		}
+		if !slices.Contains(names(res.Symbols, "class"), "Widget") {
+			t.Errorf("%s: missing class Widget; classes=%v", lang, names(res.Symbols, "class"))
+		}
+		if !slices.Contains(names(res.Symbols, "function"), "mount") {
+			t.Errorf("%s: missing function mount", lang)
+		}
+		if !slices.Contains(names(res.Symbols, "method"), "render") {
+			t.Errorf("%s: missing method render", lang)
+		}
+	}
+}
