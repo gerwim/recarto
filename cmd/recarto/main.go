@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 
+	"git.gerwim.nl/gerwim/recarto/internal/cli"
 	"git.gerwim.nl/gerwim/recarto/internal/ledger"
 	"git.gerwim.nl/gerwim/recarto/internal/store"
 	"git.gerwim.nl/gerwim/recarto/internal/version"
@@ -14,8 +15,11 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "recarto: no command (Phase 1A scaffold)")
-		os.Exit(0)
+		if err := cli.Run(nil, os.Stdout); err != nil {
+			fmt.Fprintln(os.Stderr, "recarto:", err)
+			os.Exit(1)
+		}
+		return
 	}
 	switch os.Args[1] {
 	case "version", "--version":
@@ -26,8 +30,10 @@ func main() {
 			os.Exit(1)
 		}
 	default:
-		fmt.Fprintln(os.Stderr, "recarto: unknown command", os.Args[1])
-		os.Exit(2)
+		if err := cli.Run(os.Args[1:], os.Stdout); err != nil {
+			fmt.Fprintln(os.Stderr, "recarto:", err)
+			os.Exit(1)
+		}
 	}
 }
 
