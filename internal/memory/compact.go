@@ -524,6 +524,129 @@ func (e *Engine) gcArchived(ctx context.Context, epoch int64, dryRun bool) (int,
 	return len(ids), nil
 }
 
+// errCompactSkip is the sentinel used to roll back the gate transaction when a
+// pass must not run (interval gate not elapsed, or another pass holds the lease).
+var errCompactSkip = errors.New("memory: compaction skipped")
+
+// CompactOptions configures a compaction pass.
+type CompactOptions struct {
+	Force        bool // skip the min-interval gate (still respects the lease)
+	DryRun       bool // compute the report without writing; bypasses gate + lease (read-only)
+	BudgetTokens int  // 0 -> DefaultBudgetTokens
+}
+
+// CompactReport summarizes a pass.
+type CompactReport struct {
+	Ran              bool
+	Epoch            int64
+	SupersededGCd    int
+	Archived         int
+	Deduped          int
+	ArchiveGCd       int
+	LiveTokensBefore int
+	LiveTokensAfter  int
+	Budget           int
+}
+
+// Compact runs one bounded compaction pass: superseded-GC, budget-triggered
+// decay eviction, a bounded dedup sweep, and archive-GC. It is gated to once per
+// minInterval (unless Force) and serialized across worktrees by a single-flight
+// lease in meta. A skipped pass returns CompactReport{Ran:false}, nil.
+func (e *Engine) Compact(ctx context.Context, opts CompactOptions) (CompactReport, error) {
+	now := e.clk.Now().UnixMilli()
+	budget := opts.BudgetTokens
+	if budget <= 0 {
+		budget = DefaultBudgetTokens
+	}
+	rep := CompactReport{Budget: budget}
+
+	if opts.DryRun {
+		epoch, err := e.Epoch(ctx)
+		if err != nil {
+			return rep, err
+		}
+		return e.runSteps(ctx, epoch, budget, true)
+	}
+
+	// Gate + lease + epoch advance, atomically. Rolling back on errCompactSkip
+	// leaves the epoch and lease untouched.
+	var epoch int64
+	err := e.st.WriteTx(ctx, func(c store.Conn) error {
+		last, err := getMetaInt(ctx, c, metaLastRunAt, 0)
+		if err != nil {
+			return err
+		}
+		if !opts.Force && now-last < minIntervalMs {
+			return errCompactSkip
+		}
+		leaseUntil, err := getMetaInt(ctx, c, metaLease, 0)
+		if err != nil {
+			return err
+		}
+		if now < leaseUntil {
+			return errCompactSkip // another pass is in flight
+		}
+		cur, err := getMetaInt(ctx, c, metaActivityEpoch, 1)
+		if err != nil {
+			return err
+		}
+		epoch = cur + 1
+		if err := setMetaInt(ctx, c, metaActivityEpoch, epoch); err != nil {
+			return err
+		}
+		if err := setMetaInt(ctx, c, metaLastRunAt, now); err != nil {
+			return err
+		}
+		return setMetaInt(ctx, c, metaLease, now+leaseTTLMs)
+	})
+	if errors.Is(err, errCompactSkip) {
+		return CompactReport{Ran: false}, nil
+	}
+	if err != nil {
+		return rep, err
+	}
+	defer func() { _ = e.clearLease(ctx) }()
+
+	rep, err = e.runSteps(ctx, epoch, budget, false)
+	if err != nil {
+		return rep, err
+	}
+
+	// Best-effort lifetime counters (OUTSIDE the step transactions).
+	_ = e.led.Incr(ctx, "lifetime", "compactions", 1)
+	_ = e.led.Incr(ctx, "lifetime", "memories_archived", int64(rep.Archived))
+	_ = e.led.Incr(ctx, "lifetime", "memories_deduped", int64(rep.Deduped))
+	_ = e.led.Incr(ctx, "lifetime", "memories_gc", int64(rep.SupersededGCd+rep.ArchiveGCd))
+	return rep, nil
+}
+
+// runSteps executes the four pass steps in order and assembles the report.
+func (e *Engine) runSteps(ctx context.Context, epoch int64, budget int, dryRun bool) (CompactReport, error) {
+	rep := CompactReport{Ran: true, Epoch: epoch, Budget: budget}
+	var err error
+	if rep.SupersededGCd, err = e.gcSuperseded(ctx, dryRun); err != nil {
+		return rep, err
+	}
+	if rep.Archived, rep.LiveTokensBefore, rep.LiveTokensAfter, err = e.evictToBudget(ctx, epoch, budget, dryRun); err != nil {
+		return rep, err
+	}
+	if rep.Deduped, err = e.dedupSweep(ctx, dryRun, defaultDedupBuckets); err != nil {
+		return rep, err
+	}
+	if rep.ArchiveGCd, err = e.gcArchived(ctx, epoch, dryRun); err != nil {
+		return rep, err
+	}
+	return rep, nil
+}
+
+// clearLease releases the single-flight lease so the next session is not blocked
+// for the full TTL after a fast pass. Best-effort.
+func (e *Engine) clearLease(ctx context.Context) error {
+	return e.st.WriteTx(ctx, func(c store.Conn) error {
+		return setMetaInt(ctx, c, metaLease, 0)
+	})
+}
+
 // stampRecalled bumps last_used_epoch to the current activity epoch and
 // increments recall_count for the surfaced rows, in ONE batched UPDATE. It is
 // the decay subsystem's "time since last used" signal. Best-effort: callers

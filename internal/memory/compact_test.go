@@ -275,6 +275,68 @@ func TestDedupSweepRespectsKind(t *testing.T) {
 	}
 }
 
+func TestCompactAdvancesEpochWhenForced(t *testing.T) {
+	e := newTestEngine(t, clock.NewFake(time.UnixMilli(1_700_000_000_000)))
+	ctx := context.Background()
+	rep, err := e.Compact(ctx, CompactOptions{Force: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !rep.Ran || rep.Epoch != 2 { // fresh epoch is 1; one pass -> 2
+		t.Fatalf("ran=%v epoch=%d, want ran=true epoch=2", rep.Ran, rep.Epoch)
+	}
+}
+
+func TestCompactSkipsWithinInterval(t *testing.T) {
+	e := newTestEngine(t, clock.NewFake(time.UnixMilli(1_700_000_000_000)))
+	ctx := context.Background()
+	first, err := e.Compact(ctx, CompactOptions{}) // first run sets last_run
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !first.Ran {
+		t.Fatal("first compaction on a fresh store should run (gate not yet set)")
+	}
+	rep, err := e.Compact(ctx, CompactOptions{}) // immediately again: gated
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Ran {
+		t.Error("second compaction within minInterval should be skipped")
+	}
+	// --force overrides the gate.
+	rep, err = e.Compact(ctx, CompactOptions{Force: true})
+	if err != nil || !rep.Ran {
+		t.Fatalf("forced compaction should run; ran=%v err=%v", rep.Ran, err)
+	}
+}
+
+func TestCompactDryRunDoesNotWrite(t *testing.T) {
+	e := newTestEngine(t, clock.NewFake(time.UnixMilli(1_700_000_000_000)))
+	ctx := context.Background()
+	// Seed a superseded row.
+	oldID, _, _ := e.Record(ctx, NewMemory{Kind: KindDecision, Body: "old decision text here"})
+	e.Record(ctx, NewMemory{Kind: KindDecision, Body: "a wholly different decision now", SupersedesID: oldID})
+
+	before, _ := e.Epoch(ctx)
+	rep, err := e.Compact(ctx, CompactOptions{Force: true, DryRun: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.SupersededGCd != 1 {
+		t.Errorf("dry-run report SupersededGCd = %d, want 1", rep.SupersededGCd)
+	}
+	after, _ := e.Epoch(ctx)
+	if after != before {
+		t.Errorf("dry-run advanced the epoch %d -> %d", before, after)
+	}
+	var superseded int
+	e.st.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM memories WHERE status='superseded'`).Scan(&superseded)
+	if superseded != 1 {
+		t.Error("dry-run must not delete superseded rows")
+	}
+}
+
 func TestArchiveGCRespectsGrace(t *testing.T) {
 	e := newTestEngine(t, clock.NewFake(time.UnixMilli(16_000_000)))
 	ctx := context.Background()
