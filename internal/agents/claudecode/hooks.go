@@ -123,13 +123,21 @@ func PostRead(ctx context.Context, a *app.App, in io.Reader, out io.Writer) erro
 	if err != nil {
 		return err
 	}
-	if n <= 1 {
-		return nil // first read this session: nothing to warn about
+
+	var msgs []string
+	if n > 1 {
+		_ = a.Ledger.Incr(ctx, "lifetime", "repeated_reads_blocked", 1)
+		msgs = append(msgs, fmt.Sprintf("You have already read %s in this session (%d times, ~%d tokens each). "+
+			"Rely on the earlier read instead of reading it again.", file, n, tokens))
 	}
-	_ = a.Ledger.Incr(ctx, "lifetime", "repeated_reads_blocked", 1)
-	msg := fmt.Sprintf("You have already read %s in this session (%d times, ~%d tokens each). "+
-		"Rely on the earlier read instead of reading it again.", file, n, tokens)
-	return writeHookContext(out, "PostToolUse", msg)
+	rel := memory.RelFileRef(a.Git.Worktree, file)
+	if found, err := a.Engine.BugsForCode(ctx, a.Git.Branch, []string{rel}, nil); err == nil && len(found) > 0 {
+		msgs = append(msgs, formatBugWarnings(rel, found))
+	}
+	if len(msgs) == 0 {
+		return nil
+	}
+	return writeHookContext(out, "PostToolUse", strings.Join(msgs, "\n"))
 }
 
 // stopInput is the subset of the Claude Code Stop payload we use.
@@ -179,6 +187,19 @@ func writeHookContext(out io.Writer, event, additionalContext string) error {
 		},
 	}
 	return json.NewEncoder(out).Encode(payload)
+}
+
+// formatBugWarnings renders prior bugs tied to a code location as advisory lines.
+func formatBugWarnings(loc string, bugs []*memory.Record) string {
+	lines := make([]string, 0, len(bugs))
+	for _, r := range bugs {
+		if fix, _ := r.Extra["fix"].(string); fix != "" {
+			lines = append(lines, fmt.Sprintf("⚠ prior bug in %s: %s — fix: %s", loc, r.Title, fix))
+		} else {
+			lines = append(lines, fmt.Sprintf("⚠ prior bug in %s: %s", loc, r.Title))
+		}
+	}
+	return strings.Join(lines, "\n")
 }
 
 // formatSessionContext renders the tiered session-start block: pinned do_not_repeat

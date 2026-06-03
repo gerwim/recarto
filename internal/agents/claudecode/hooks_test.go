@@ -221,3 +221,25 @@ func TestFormatSessionContextDropsEntryUnderTinyBudget(t *testing.T) {
 		t.Errorf("results were non-empty; must not claim none exist:\n%s", s)
 	}
 }
+
+func TestPostReadSurfacesBugForFile(t *testing.T) {
+	a := newTestApp(t, "main") // worktree "/repo"
+	ctx := context.Background()
+	if _, _, err := a.Engine.Record(ctx, memory.NewMemory{
+		Kind: memory.KindBug, Title: "nil deref here", Body: "nil deref — fix: guard",
+		Refs: []memory.Ref{{Type: memory.RefFile, Value: "internal/store/store.go"}},
+		Source: "cli", Extra: map[string]any{"fix": "guard"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Claude reports an ABSOLUTE path; normalization must still match the rel ref.
+	payload := `{"session_id":"s1","tool_input":{"file_path":"/repo/internal/store/store.go"},"tool_result":"package store"}`
+	var out bytes.Buffer
+	if err := PostRead(ctx, a, strings.NewReader(payload), &out); err != nil {
+		t.Fatal(err)
+	}
+	s := out.String()
+	if !strings.Contains(s, "prior bug") || !strings.Contains(s, "nil deref here") {
+		t.Errorf("post-read should surface the prior bug:\n%s", s)
+	}
+}
