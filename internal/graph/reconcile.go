@@ -77,6 +77,13 @@ func (e *Engine) Reconcile(ctx context.Context, worktree string, src Source) err
 // token stored at the last reconcile. An empty token (non-git worktree) always
 // reconciles. On a successful reconcile it records the new token. This makes
 // query-time freshness cheap: an unchanged worktree skips the file walk entirely.
+//
+// Known limitation: the git token (HEAD + `git status --porcelain`) does not
+// change when an ALREADY-dirty file is edited again (its porcelain line stays
+// "M <path>"), so a repeated external edit of the same dirty file is not caught
+// here. Agent edits are indexed directly by the PostEdit hook (bypassing this
+// gate), and each new session re-tokens at SessionStart, so the gap is limited to
+// external re-edits of an already-modified file within one session.
 func (e *Engine) ReconcileIfStale(ctx context.Context, worktree string, src Source, token string) error {
 	const keyPrefix = "graph_token:"
 	if token != "" {
