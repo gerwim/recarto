@@ -113,3 +113,72 @@ func TestRecallMemoryHandler(t *testing.T) {
 		t.Errorf("top recall = %q, want WAL setup", out.Memories[0].Title)
 	}
 }
+
+func TestRecordBugThenSearch(t *testing.T) {
+	a := newTestApp(t, "main")
+	ctx := context.Background()
+
+	add, err := recordBug(ctx, a, RecordBugInput{
+		ErrorMessage: "nil pointer in session refresh",
+		RootCause:    "missing nil guard",
+		Fix:          "add a nil check before deref",
+		File:         "internal/auth/session.go",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if add.ID == "" {
+		t.Fatal("record_bug returned no id")
+	}
+
+	out, err := searchBugs(ctx, a, SearchBugsInput{Query: "session refresh"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Count == 0 {
+		t.Fatalf("search_bugs found nothing: %+v", out)
+	}
+	if out.Bugs[0].Title != "nil pointer in session refresh" {
+		t.Errorf("top bug = %q", out.Bugs[0].Title)
+	}
+}
+
+func TestRecordBugRequiresError(t *testing.T) {
+	a := newTestApp(t, "main")
+	if _, err := recordBug(context.Background(), a, RecordBugInput{}); err == nil {
+		t.Error("expected error when error_message is empty")
+	}
+}
+
+func TestGetAndListMemory(t *testing.T) {
+	a := newTestApp(t, "main")
+	ctx := context.Background()
+	rec, err := recordMemory(ctx, a, RecordMemoryInput{Kind: "decision", Title: "sqlite is source of truth", Body: "markdown is render-only"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := getMemory(ctx, a, GetMemoryInput{ID: rec.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Found || got.Memory == nil || got.Memory.Title != "sqlite is source of truth" {
+		t.Errorf("get_memory = %+v", got)
+	}
+
+	missing, err := getMemory(ctx, a, GetMemoryInput{ID: "nope"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if missing.Found {
+		t.Error("get_memory for a missing id should report Found=false")
+	}
+
+	list, err := listMemory(ctx, a, ListMemoryInput{Kind: "decision"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if list.Count != 1 || list.Memories[0].Kind != "decision" {
+		t.Errorf("list_memory(kind=decision) = %+v", list)
+	}
+}

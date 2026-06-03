@@ -141,3 +141,138 @@ func viewOf(r *memory.Record) MemoryView {
 		ReinforcementCount: r.ReinforcementCount,
 	}
 }
+
+// RecordBugInput are the arguments to the record_bug convenience tool.
+type RecordBugInput struct {
+	ErrorMessage string   `json:"error_message" jsonschema:"the error text or user complaint"`
+	RootCause    string   `json:"root_cause,omitempty" jsonschema:"why it broke"`
+	Fix          string   `json:"fix,omitempty" jsonschema:"what fixed it"`
+	File         string   `json:"file,omitempty" jsonschema:"the file that was fixed"`
+	Tags         []string `json:"tags,omitempty" jsonschema:"freeform tags"`
+}
+
+// RecordBugOutput is the result of the record_bug tool.
+type RecordBugOutput struct {
+	ID         string `json:"id"`
+	Reinforced bool   `json:"reinforced"`
+}
+
+func recordBug(ctx context.Context, a *app.App, in RecordBugInput) (RecordBugOutput, error) {
+	if in.ErrorMessage == "" {
+		return RecordBugOutput{}, fmt.Errorf("error_message is required")
+	}
+	extra := map[string]any{
+		"error_message": in.ErrorMessage,
+		"root_cause":    in.RootCause,
+		"fix":           in.Fix,
+		"file":          in.File,
+	}
+	if len(in.Tags) > 0 {
+		extra["tags"] = in.Tags
+	}
+	var refs []memory.Ref
+	if in.File != "" {
+		refs = append(refs, memory.Ref{Type: memory.RefFile, Value: in.File})
+	}
+	// The body carries error + fix so the lexical index can match either.
+	body := in.ErrorMessage
+	if in.Fix != "" {
+		body = in.ErrorMessage + " — fix: " + in.Fix
+	}
+	id, reinforced, err := a.Engine.Record(ctx, memory.NewMemory{
+		Kind:     memory.KindBug,
+		Title:    in.ErrorMessage,
+		Body:     body,
+		Refs:     refs,
+		Branch:   a.Git.Branch,
+		Worktree: a.Git.Worktree,
+		Author:   "mcp",
+		Source:   "mcp",
+		Extra:    extra,
+	})
+	if err != nil {
+		return RecordBugOutput{}, err
+	}
+	return RecordBugOutput{ID: id, Reinforced: reinforced}, nil
+}
+
+// SearchBugsInput is the argument to the search_bugs tool.
+type SearchBugsInput struct {
+	Query string `json:"query" jsonschema:"keywords to search bug memories before fixing"`
+}
+
+// SearchBugsOutput is the result of the search_bugs tool.
+type SearchBugsOutput struct {
+	Count int          `json:"count"`
+	Bugs  []MemoryView `json:"bugs"`
+}
+
+func searchBugs(ctx context.Context, a *app.App, in SearchBugsInput) (SearchBugsOutput, error) {
+	results, err := a.Engine.Recall(ctx, memory.RecallQuery{
+		TaskHint: in.Query,
+		Kind:     memory.KindBug,
+		Branch:   a.Git.Branch,
+	})
+	if err != nil {
+		return SearchBugsOutput{}, err
+	}
+	out := SearchBugsOutput{Count: len(results), Bugs: make([]MemoryView, 0, len(results))}
+	for _, r := range results {
+		v := viewOf(r.Record)
+		v.Score = r.Score
+		out.Bugs = append(out.Bugs, v)
+	}
+	return out, nil
+}
+
+// GetMemoryInput is the argument to the get_memory tool.
+type GetMemoryInput struct {
+	ID string `json:"id" jsonschema:"the memory id"`
+}
+
+// GetMemoryOutput is the result of the get_memory tool.
+type GetMemoryOutput struct {
+	Found  bool        `json:"found"`
+	Memory *MemoryView `json:"memory,omitempty"`
+}
+
+func getMemory(ctx context.Context, a *app.App, in GetMemoryInput) (GetMemoryOutput, error) {
+	rec, err := a.Engine.GetByID(ctx, in.ID)
+	if err != nil {
+		return GetMemoryOutput{}, err
+	}
+	if rec == nil {
+		return GetMemoryOutput{Found: false}, nil
+	}
+	v := viewOf(rec)
+	return GetMemoryOutput{Found: true, Memory: &v}, nil
+}
+
+// ListMemoryInput are the arguments to the list_memory tool (all optional).
+type ListMemoryInput struct {
+	Kind   string `json:"kind,omitempty" jsonschema:"restrict to a single kind"`
+	Branch string `json:"branch,omitempty" jsonschema:"restrict to a branch (default: all branches)"`
+	Limit  int    `json:"limit,omitempty" jsonschema:"max rows to return"`
+}
+
+// ListMemoryOutput is the result of the list_memory tool.
+type ListMemoryOutput struct {
+	Count    int          `json:"count"`
+	Memories []MemoryView `json:"memories"`
+}
+
+func listMemory(ctx context.Context, a *app.App, in ListMemoryInput) (ListMemoryOutput, error) {
+	recs, err := a.Engine.List(ctx, memory.ListFilter{
+		Kind:   memory.Kind(in.Kind),
+		Branch: in.Branch,
+		Limit:  in.Limit,
+	})
+	if err != nil {
+		return ListMemoryOutput{}, err
+	}
+	out := ListMemoryOutput{Count: len(recs), Memories: make([]MemoryView, 0, len(recs))}
+	for _, r := range recs {
+		out.Memories = append(out.Memories, viewOf(r))
+	}
+	return out, nil
+}
