@@ -7,7 +7,7 @@ import (
 )
 
 // schemaVersion is the number of applied migrations.
-const schemaVersion = 1
+const schemaVersion = 2
 
 // migrations are applied in order; index+1 becomes user_version.
 var migrations = []string{
@@ -74,6 +74,17 @@ CREATE TABLE sessions (
   worktree   TEXT,
   started_at INTEGER NOT NULL,
   ended_at   INTEGER
+);
+`,
+	// v2: FTS5 full-text index over search_text (Phase 1B). memory_id is
+	// UNINDEXED so it is stored and returned but not tokenized. Rows are synced
+	// manually from the memory write path — no external-content linkage, because
+	// memories.id is a TEXT UUID, not the INTEGER rowid FTS5 external content
+	// requires.
+	`
+CREATE VIRTUAL TABLE memories_fts USING fts5(
+  memory_id UNINDEXED,
+  search_text
 );
 `,
 }

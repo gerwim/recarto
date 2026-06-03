@@ -68,3 +68,27 @@ func TestMemoriesKindConstraint(t *testing.T) {
 		t.Fatal("expected CHECK constraint to reject invalid kind")
 	}
 }
+
+func TestMigrateCreatesFTS(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "store.db")
+	st, err := Open(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	var name string
+	err = st.DB.QueryRow(
+		`SELECT name FROM sqlite_master WHERE type='table' AND name='memories_fts'`).Scan(&name)
+	if err != nil {
+		t.Fatalf("memories_fts not created: %v", err)
+	}
+
+	var uv int
+	if err := st.DB.QueryRow(`PRAGMA user_version`).Scan(&uv); err != nil {
+		t.Fatal(err)
+	}
+	if uv != 2 {
+		t.Fatalf("user_version = %d, want 2", uv)
+	}
+}
