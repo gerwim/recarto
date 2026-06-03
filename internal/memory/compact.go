@@ -5,9 +5,11 @@ import (
 	"database/sql"
 	"errors"
 	"math"
+	"sort"
 	"strconv"
 	"strings"
 
+	"git.gerwim.nl/gerwim/recarto/internal/ledger"
 	"git.gerwim.nl/gerwim/recarto/internal/store"
 )
 
@@ -177,6 +179,111 @@ func (e *Engine) gcSuperseded(ctx context.Context, dryRun bool) (int, error) {
 		return 0, err
 	}
 	return len(ids), nil
+}
+
+// candidate is an in-memory snapshot of an active row used for budgeting/eviction.
+type candidate struct {
+	id            string
+	kind          Kind
+	tokens        int
+	lastUsedEpoch int64
+	reinforcement int
+	confidence    float64
+}
+
+// loadActive scans every active row once, returning each as a candidate and the
+// total live-set token count. Token cost mirrors recall's tokensOf exactly
+// (EstimateTokens(title + " " + body)).
+func (e *Engine) loadActive(ctx context.Context) (cands []candidate, liveTokens int, err error) {
+	rows, err := e.st.DB.QueryContext(ctx,
+		`SELECT id, kind, title, body, last_used_epoch, reinforcement_count, confidence
+		   FROM memories WHERE status='active'`)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var c candidate
+		var kind, title, body string
+		if err := rows.Scan(&c.id, &kind, &title, &body, &c.lastUsedEpoch,
+			&c.reinforcement, &c.confidence); err != nil {
+			return nil, 0, err
+		}
+		c.kind = Kind(kind)
+		c.tokens = ledger.EstimateTokens(title + " " + body)
+		liveTokens += c.tokens
+		cands = append(cands, c)
+	}
+	return cands, liveTokens, rows.Err()
+}
+
+// LiveTokens is the estimated token size of the active memory set.
+func (e *Engine) LiveTokens(ctx context.Context) (int, error) {
+	_, n, err := e.loadActive(ctx)
+	return n, err
+}
+
+// archiveRows flips ids to status='archived', stamps archived_epoch, and drops
+// their FTS entries (so they stop being lexical candidates).
+func (e *Engine) archiveRows(ctx context.Context, c store.Conn, ids []string, epoch, now int64) error {
+	for _, id := range ids {
+		if _, err := c.ExecContext(ctx,
+			`UPDATE memories SET status='archived', archived_epoch=?, updated_at=?
+			  WHERE id=? AND status='active'`, epoch, now, id); err != nil {
+			return err
+		}
+		if err := e.lex.Delete(ctx, c, id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// evictToBudget archives the lowest-relevance evictable rows until the live set
+// is within budget. If already within budget it archives nothing (the quiet-repo
+// invariant): eviction is budget-triggered, never age-triggered. Returns the
+// number archived and live tokens before/after.
+func (e *Engine) evictToBudget(ctx context.Context, epoch int64, budget int, dryRun bool) (archived, before, after int, err error) {
+	cands, live, err := e.loadActive(ctx)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	before, after = live, live
+	if live <= budget {
+		return 0, before, after, nil // under budget: never evict
+	}
+
+	// Eviction-eligible candidates, ranked by relevance ascending (worst first).
+	var elig []candidate
+	for _, c := range cands {
+		if evictable(c.kind) {
+			elig = append(elig, c)
+		}
+	}
+	sort.Slice(elig, func(i, j int) bool {
+		ri := relevance(elig[i].kind, float64(epoch-elig[i].lastUsedEpoch), elig[i].reinforcement, elig[i].confidence)
+		rj := relevance(elig[j].kind, float64(epoch-elig[j].lastUsedEpoch), elig[j].reinforcement, elig[j].confidence)
+		return ri < rj
+	})
+
+	var toArchive []string
+	for _, c := range elig {
+		if after <= budget {
+			break
+		}
+		toArchive = append(toArchive, c.id)
+		after -= c.tokens
+	}
+	if dryRun || len(toArchive) == 0 {
+		return len(toArchive), before, after, nil
+	}
+	now := e.clk.Now().UnixMilli()
+	if err := e.st.WriteTx(ctx, func(c store.Conn) error {
+		return e.archiveRows(ctx, c, toArchive, epoch, now)
+	}); err != nil {
+		return 0, before, before, err
+	}
+	return len(toArchive), before, after, nil
 }
 
 // stampRecalled bumps last_used_epoch to the current activity epoch and
