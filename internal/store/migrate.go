@@ -7,7 +7,7 @@ import (
 )
 
 // schemaVersion is the number of applied migrations.
-const schemaVersion = 2
+const schemaVersion = 3
 
 // migrations are applied in order; index+1 becomes user_version.
 var migrations = []string{
@@ -85,6 +85,58 @@ CREATE TABLE sessions (
 CREATE VIRTUAL TABLE memories_fts USING fts5(
   memory_id UNINDEXED,
   search_text
+);
+`,
+	// v3 (Phase 2): worktree-aware code graph. files is the reconcile diff
+	// target; nodes/edges inherit worktree via file_id. nodes_fts is manually
+	// synced (FTS5 has no external-content link to TEXT-uuid rowids).
+	`
+CREATE TABLE files (
+  id              TEXT PRIMARY KEY,
+  worktree        TEXT NOT NULL,
+  path            TEXT NOT NULL,
+  language        TEXT NOT NULL,
+  content_hash    TEXT NOT NULL,
+  mtime           INTEGER NOT NULL,
+  size            INTEGER NOT NULL,
+  last_indexed_at INTEGER NOT NULL,
+  UNIQUE (worktree, path)
+);
+CREATE INDEX idx_files_worktree ON files(worktree);
+
+CREATE TABLE nodes (
+  id             TEXT PRIMARY KEY,
+  file_id        TEXT NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+  kind           TEXT NOT NULL,
+  name           TEXT NOT NULL,
+  qualified_name TEXT NOT NULL DEFAULT '',
+  signature      TEXT NOT NULL DEFAULT '',
+  start_byte     INTEGER NOT NULL,
+  end_byte       INTEGER NOT NULL,
+  start_line     INTEGER NOT NULL,
+  end_line       INTEGER NOT NULL
+);
+CREATE INDEX idx_nodes_file ON nodes(file_id);
+CREATE INDEX idx_nodes_name ON nodes(name);
+CREATE INDEX idx_nodes_qname ON nodes(qualified_name);
+
+CREATE TABLE edges (
+  id          TEXT PRIMARY KEY,
+  src_node_id TEXT REFERENCES nodes(id) ON DELETE CASCADE,
+  dst_node_id TEXT REFERENCES nodes(id) ON DELETE SET NULL,
+  dst_name    TEXT NOT NULL DEFAULT '',
+  kind        TEXT NOT NULL,
+  file_id     TEXT NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+  line        INTEGER NOT NULL
+);
+CREATE INDEX idx_edges_src ON edges(src_node_id, kind);
+CREATE INDEX idx_edges_dst ON edges(dst_node_id);
+CREATE INDEX idx_edges_dstname ON edges(dst_name);
+
+CREATE VIRTUAL TABLE nodes_fts USING fts5(
+  node_id UNINDEXED,
+  name,
+  qualified_name
 );
 `,
 }
