@@ -286,6 +286,211 @@ func (e *Engine) evictToBudget(ctx context.Context, epoch int64, budget int, dry
 	return len(toArchive), before, after, nil
 }
 
+// bucket identifies a MinHash collision bucket.
+type bucket struct {
+	band int
+	hash int64
+}
+
+// parseCursor decodes the "band,hash" dedup cursor; the zero value (-1, min)
+// selects every bucket as "after the cursor".
+func parseCursor(s string) bucket {
+	def := bucket{band: -1, hash: -1 << 62}
+	parts := strings.SplitN(s, ",", 2)
+	if len(parts) != 2 {
+		return def
+	}
+	bd, err1 := strconv.Atoi(parts[0])
+	h, err2 := strconv.ParseInt(parts[1], 10, 64)
+	if err1 != nil || err2 != nil {
+		return def // corrupt cursor: restart from the beginning rather than mid-band
+	}
+	return bucket{band: bd, hash: h}
+}
+
+func formatCursor(b bucket) string {
+	return strconv.Itoa(b.band) + "," + strconv.FormatInt(b.hash, 10)
+}
+
+// dedupMember is an active row sharing a collision bucket.
+type dedupMember struct {
+	id            string
+	body          string
+	reinforcement int
+	confidence    float64
+	createdAt     int64
+}
+
+// dedupSweep walks up to maxBuckets MinHash collision buckets (resuming from the
+// stored cursor), and within each merges same-kind active near-duplicates
+// (Jaccard >= dedupThreshold) into the highest-reinforced canonical, marking the
+// rest superseded. Returns the number of rows superseded by merging.
+func (e *Engine) dedupSweep(ctx context.Context, dryRun bool, maxBuckets int) (merged int, err error) {
+	cursorStr, err := getMetaStr(ctx, e.st.DB, metaDedupCursor, "")
+	if err != nil {
+		return 0, err
+	}
+	cur := parseCursor(cursorStr)
+
+	// Gather candidate buckets via the pooled DB (read-only) so the write mutex
+	// is not held across the GROUP BY scan.
+	rows, err := e.st.DB.QueryContext(ctx,
+		`SELECT mh.band, mh.hash FROM memory_minhash mh
+		   JOIN memories m ON m.id = mh.memory_id
+		  WHERE m.status = 'active' AND (mh.band, mh.hash) > (?, ?)
+		  GROUP BY mh.band, mh.hash HAVING COUNT(*) > 1
+		  ORDER BY mh.band, mh.hash LIMIT ?`, cur.band, cur.hash, maxBuckets)
+	if err != nil {
+		return 0, err
+	}
+	var buckets []bucket
+	for rows.Next() {
+		var b bucket
+		if err := rows.Scan(&b.band, &b.hash); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		buckets = append(buckets, b)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+
+	now := e.clk.Now().UnixMilli()
+	last := cur
+	wrap := len(buckets) < maxBuckets // fewer than the budget => reached the end
+
+	for _, bk := range buckets {
+		n, err := e.mergeBucket(ctx, bk, now, dryRun)
+		if err != nil {
+			return merged, err
+		}
+		merged += n
+		last = bk
+	}
+
+	if dryRun {
+		return merged, nil
+	}
+	next := formatCursor(last)
+	if wrap {
+		next = "" // start over next pass
+	}
+	if err := e.st.WriteTx(ctx, func(c store.Conn) error {
+		return setMetaStr(ctx, c, metaDedupCursor, next)
+	}); err != nil {
+		return merged, err
+	}
+	return merged, nil
+}
+
+// mergeBucket merges same-kind active near-dups within one collision bucket.
+func (e *Engine) mergeBucket(ctx context.Context, bk bucket, now int64, dryRun bool) (int, error) {
+	// Members are grouped by kind: a bucket can hold rows of several kinds.
+	byKind := map[Kind][]dedupMember{}
+	rows, err := e.st.DB.QueryContext(ctx,
+		`SELECT m.id, m.kind, m.body, m.reinforcement_count, m.confidence, m.created_at
+		   FROM memory_minhash mh JOIN memories m ON m.id = mh.memory_id
+		  WHERE mh.band=? AND mh.hash=? AND m.status='active'`, bk.band, bk.hash)
+	if err != nil {
+		return 0, err
+	}
+	for rows.Next() {
+		var mem dedupMember
+		var kind string
+		if err := rows.Scan(&mem.id, &kind, &mem.body, &mem.reinforcement, &mem.confidence, &mem.createdAt); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		byKind[Kind(kind)] = append(byKind[Kind(kind)], mem)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+
+	merged := 0
+	for _, members := range byKind {
+		if len(members) < 2 {
+			continue
+		}
+		// Greedy clustering: each member joins the first canonical it matches.
+		type cluster struct {
+			canon dedupMember
+			set   map[string]struct{}
+			dups  []dedupMember
+		}
+		var clusters []*cluster
+		for _, mem := range members {
+			set := shingleSet(mem.body)
+			joined := false
+			for _, cl := range clusters {
+				if jaccard(set, cl.set) >= dedupThreshold {
+					// Keep the better-reinforced row as canonical.
+					if betterCanonical(mem, cl.canon) {
+						cl.dups = append(cl.dups, cl.canon)
+						cl.canon = mem
+						cl.set = set
+					} else {
+						cl.dups = append(cl.dups, mem)
+					}
+					joined = true
+					break
+				}
+			}
+			if !joined {
+				clusters = append(clusters, &cluster{canon: mem, set: set})
+			}
+		}
+		for _, cl := range clusters {
+			if len(cl.dups) == 0 {
+				continue
+			}
+			merged += len(cl.dups)
+			if dryRun {
+				continue
+			}
+			if err := e.applyMerge(ctx, cl.canon.id, cl.dups, now); err != nil {
+				return merged, err
+			}
+		}
+	}
+	return merged, nil
+}
+
+// betterCanonical reports whether a should be canonical over b: more
+// reinforcement, then higher confidence, then newer.
+func betterCanonical(a, b dedupMember) bool {
+	if a.reinforcement != b.reinforcement {
+		return a.reinforcement > b.reinforcement
+	}
+	if a.confidence != b.confidence {
+		return a.confidence > b.confidence
+	}
+	return a.createdAt > b.createdAt
+}
+
+// applyMerge supersedes dups into canon and bumps canon's reinforcement_count.
+func (e *Engine) applyMerge(ctx context.Context, canonID string, dups []dedupMember, now int64) error {
+	return e.st.WriteTx(ctx, func(c store.Conn) error {
+		for _, d := range dups {
+			if _, err := c.ExecContext(ctx,
+				`UPDATE memories SET status='superseded', superseded_by=?, updated_at=?
+				  WHERE id=? AND status='active'`, canonID, now, d.id); err != nil {
+				return err
+			}
+			if err := e.lex.Delete(ctx, c, d.id); err != nil {
+				return err
+			}
+		}
+		_, err := c.ExecContext(ctx,
+			`UPDATE memories SET reinforcement_count = reinforcement_count + ?, updated_at=?
+			  WHERE id=? AND status='active'`, len(dups), now, canonID)
+		return err
+	})
+}
+
 // stampRecalled bumps last_used_epoch to the current activity epoch and
 // increments recall_count for the surfaced rows, in ONE batched UPDATE. It is
 // the decay subsystem's "time since last used" signal. Best-effort: callers

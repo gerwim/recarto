@@ -227,3 +227,50 @@ func TestEvictDryRunDoesNotArchive(t *testing.T) {
 		t.Error("dry-run must not actually archive the row")
 	}
 }
+
+func TestDedupSweepMergesNearDuplicates(t *testing.T) {
+	e := newTestEngine(t, clock.NewFake(time.UnixMilli(15_000_000)))
+	ctx := context.Background()
+	// Two IDENTICAL-body same-kind rows inserted directly (Record would have
+	// deduped them at write time). They share all MinHash bands -> collide.
+	a := insertActive(t, e, KindLearning, "set busy timeout so writers wait instead of erroring", 5)
+	b := insertActive(t, e, KindLearning, "set busy timeout so writers wait instead of erroring", 5)
+
+	merged, err := e.dedupSweep(ctx, false, defaultDedupBuckets)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if merged != 1 {
+		t.Fatalf("merged %d, want 1", merged)
+	}
+	// Exactly one of {a,b} is now superseded; the other is the active canonical
+	// with a bumped reinforcement_count.
+	sa, sb := statusOf(t, e, a), statusOf(t, e, b)
+	if !((sa == "superseded") != (sb == "superseded")) {
+		t.Fatalf("expected exactly one superseded; got a=%s b=%s", sa, sb)
+	}
+	var rc int
+	e.st.DB.QueryRowContext(ctx,
+		`SELECT reinforcement_count FROM memories WHERE status='active'`).Scan(&rc)
+	if rc < 1 {
+		t.Errorf("canonical reinforcement_count = %d, want >= 1", rc)
+	}
+}
+
+func TestDedupSweepRespectsKind(t *testing.T) {
+	e := newTestEngine(t, clock.NewFake(time.UnixMilli(15_100_000)))
+	ctx := context.Background()
+	a := insertActive(t, e, KindLearning, "identical body across two different kinds here", 5)
+	b := insertActive(t, e, KindPreference, "identical body across two different kinds here", 5)
+
+	merged, err := e.dedupSweep(ctx, false, defaultDedupBuckets)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if merged != 0 {
+		t.Errorf("merged %d across kinds, want 0", merged)
+	}
+	if statusOf(t, e, a) != "active" || statusOf(t, e, b) != "active" {
+		t.Error("rows of different kinds must not be merged")
+	}
+}
