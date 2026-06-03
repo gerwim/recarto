@@ -274,3 +274,37 @@ func TestDedupSweepRespectsKind(t *testing.T) {
 		t.Error("rows of different kinds must not be merged")
 	}
 }
+
+func TestArchiveGCRespectsGrace(t *testing.T) {
+	e := newTestEngine(t, clock.NewFake(time.UnixMilli(16_000_000)))
+	ctx := context.Background()
+	id := insertActive(t, e, KindLearning, "a memory archived long ago in epoch terms", 1)
+	// Archive it at epoch 1.
+	if err := e.st.WriteTx(ctx, func(c store.Conn) error {
+		return e.archiveRows(ctx, c, []string{id}, 1, 16_000_000)
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// At epoch within grace: not collected.
+	n, err := e.gcArchived(ctx, 1+archiveGraceEpochs-1, false)
+	if err != nil || n != 0 {
+		t.Fatalf("within grace gc'd %d (err %v), want 0", n, err)
+	}
+	// At the exact grace boundary (delta == archiveGraceEpochs): the strict `>`
+	// means the row survives. This pins the boundary semantics.
+	n, err = e.gcArchived(ctx, 1+archiveGraceEpochs, false)
+	if err != nil || n != 0 {
+		t.Fatalf("at grace boundary gc'd %d (err %v), want 0", n, err)
+	}
+	// At epoch past grace: collected.
+	n, err = e.gcArchived(ctx, 1+archiveGraceEpochs+1, false)
+	if err != nil || n != 1 {
+		t.Fatalf("past grace gc'd %d (err %v), want 1", n, err)
+	}
+	var total int
+	e.st.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM memories WHERE id=?`, id).Scan(&total)
+	if total != 0 {
+		t.Error("archived row past grace should be hard-deleted")
+	}
+}

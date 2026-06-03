@@ -491,6 +491,39 @@ func (e *Engine) applyMerge(ctx context.Context, canonID string, dups []dedupMem
 	})
 }
 
+// gcArchived hard-deletes archived rows older than archiveGraceEpochs (measured
+// in epochs against the supplied current epoch). Returns the count removed.
+func (e *Engine) gcArchived(ctx context.Context, epoch int64, dryRun bool) (int, error) {
+	rows, err := e.st.DB.QueryContext(ctx,
+		`SELECT id FROM memories
+		  WHERE status='archived' AND (? - archived_epoch) > ?`, epoch, archiveGraceEpochs)
+	if err != nil {
+		return 0, err
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		ids = append(ids, id)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	if dryRun || len(ids) == 0 {
+		return len(ids), nil
+	}
+	if err := e.st.WriteTx(ctx, func(c store.Conn) error {
+		return e.deleteMemoryRows(ctx, c, ids)
+	}); err != nil {
+		return 0, err
+	}
+	return len(ids), nil
+}
+
 // stampRecalled bumps last_used_epoch to the current activity epoch and
 // increments recall_count for the surfaced rows, in ONE batched UPDATE. It is
 // the decay subsystem's "time since last used" signal. Best-effort: callers
