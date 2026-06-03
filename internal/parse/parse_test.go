@@ -128,3 +128,33 @@ function mount() { const w = new Widget(); w.render(); }`)
 		}
 	}
 }
+
+func TestParseJavaScript(t *testing.T) {
+	r, err := NewRegistry()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	src := []byte(`import React from "react";
+class Box { draw() {} }
+function App() { render(); return <div/>; }`)
+	res, err := r.ParseFile("javascript", "app.jsx", src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(names(res.Symbols, "function"), "App") {
+		t.Errorf("missing function App; functions=%v", names(res.Symbols, "function"))
+	}
+	if !slices.Contains(names(res.Symbols, "class"), "Box") {
+		t.Errorf("missing class Box")
+	}
+	var calls []string
+	for _, e := range res.Edges {
+		if e.Kind == "calls" {
+			calls = append(calls, e.DstName)
+		}
+	}
+	if !slices.Contains(calls, "render") {
+		t.Errorf("calls = %v, want render", calls)
+	}
+}
