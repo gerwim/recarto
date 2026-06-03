@@ -5,3 +5,5 @@
 (namespace_declaration name: (_) @name) @definition.namespace
 (invocation_expression function: (member_access_expression name: (identifier) @name)) @reference.call
 (invocation_expression function: (identifier) @name) @reference.call
+(base_list (identifier) @name) @reference.extends
+(base_list (generic_name (identifier) @name)) @reference.extends
