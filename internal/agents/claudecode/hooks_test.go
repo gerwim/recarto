@@ -10,6 +10,7 @@ import (
 
 	"git.gerwim.nl/gerwim/recarto/internal/app"
 	"git.gerwim.nl/gerwim/recarto/internal/clock"
+	"git.gerwim.nl/gerwim/recarto/internal/graph"
 	"git.gerwim.nl/gerwim/recarto/internal/memory"
 )
 
@@ -153,5 +154,57 @@ func TestStopFinalizesSession(t *testing.T) {
 	}
 	if ended == nil {
 		t.Error("ended_at not set on stop")
+	}
+}
+
+func TestSessionStartInjectsCerebrumAndRecentBugs(t *testing.T) {
+	a := newTestApp(t, "main")
+	ctx := context.Background()
+	if _, _, err := a.Engine.Record(ctx, memory.NewMemory{Kind: memory.KindDecision, Title: "Use SQLite", Body: "chose sqlite with wal", Source: "cli"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := a.Engine.Record(ctx, memory.NewMemory{Kind: memory.KindLearning, Title: "Store outside tree", Body: "db lives outside the worktree", Source: "cli"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := a.Engine.Record(ctx, memory.NewMemory{Kind: memory.KindBug, Title: "panic in handler", Body: "panic in handler — fix: guard", Source: "cli", Extra: map[string]any{"fix": "guard"}}); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := SessionStart(ctx, a, strings.NewReader(`{"session_id":"s1","source":"startup"}`), &out); err != nil {
+		t.Fatal(err)
+	}
+	s := out.String()
+	for _, want := range []string{"Use SQLite", "Store outside tree", "panic in handler", "record_memory"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("session-start output missing %q:\n%s", want, s)
+		}
+	}
+}
+
+func TestSessionBudgetEnvOverride(t *testing.T) {
+	t.Setenv("RECARTO_SESSION_BUDGET", "50")
+	if got := sessionBudget(); got != 50 {
+		t.Errorf("sessionBudget() = %d, want 50", got)
+	}
+	t.Setenv("RECARTO_SESSION_BUDGET", "")
+	if got := sessionBudget(); got != sessionStartBudget {
+		t.Errorf("sessionBudget() default = %d, want %d", got, sessionStartBudget)
+	}
+}
+
+func TestFormatSessionContextDegradesToTitles(t *testing.T) {
+	results := []memory.RecallResult{
+		{Record: &memory.Record{Kind: memory.KindLearning, Title: "AAA", Body: "short body"}},
+		{Record: &memory.Record{Kind: memory.KindLearning, Title: "BBB", Body: strings.Repeat("x", 2000)}},
+	}
+	s := formatSessionContext(results, graph.Architecture{}, nil, 60)
+	if !strings.Contains(s, "AAA") || !strings.Contains(s, "short body") {
+		t.Errorf("first entry should render with its body:\n%s", s)
+	}
+	if !strings.Contains(s, "BBB") {
+		t.Errorf("second entry title should still appear:\n%s", s)
+	}
+	if strings.Contains(s, strings.Repeat("x", 100)) {
+		t.Errorf("second entry body should be dropped under tight budget:\n%s", s)
 	}
 }
