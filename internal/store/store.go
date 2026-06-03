@@ -5,9 +5,12 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
+	"time"
 
 	_ "modernc.org/sqlite" // pure-Go SQLite driver (driver name: "sqlite")
 )
@@ -28,15 +31,19 @@ type Store struct {
 
 // Open creates (if needed) and opens the store at path, applies PRAGMAs on
 // every connection, and runs migrations.
-func Open(path string) (*Store, error) {
+func Open(path string) (*Store, error) { return open(path, 5000) }
+
+// open is Open with a configurable busy_timeout (ms), so tests can force
+// SQLITE_BUSY quickly to exercise the WriteTx retry layer.
+func open(path string, busyTimeoutMs int) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, fmt.Errorf("create cache dir: %w", err)
 	}
-	dsn := "file:" + path +
-		"?_pragma=busy_timeout(5000)" +
-		"&_pragma=journal_mode(WAL)" +
-		"&_pragma=synchronous(NORMAL)" +
-		"&_pragma=foreign_keys(ON)"
+	dsn := fmt.Sprintf("file:%s"+
+		"?_pragma=busy_timeout(%d)"+
+		"&_pragma=journal_mode(WAL)"+
+		"&_pragma=synchronous(NORMAL)"+
+		"&_pragma=foreign_keys(ON)", path, busyTimeoutMs)
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
@@ -59,10 +66,39 @@ func Open(path string) (*Store, error) {
 // Close closes the underlying pool.
 func (s *Store) Close() error { return s.DB.Close() }
 
+// maxWriteRetries bounds how many extra times WriteTx restarts a transaction
+// that could not acquire the write lock. busy_timeout already blocks each
+// attempt (up to 5s in production); this layer covers the rare case where even
+// that is exceeded under extreme concurrent cold-start. Exhausting the retries
+// surfaces the underlying SQLITE_BUSY so genuine, persistent locking is not
+// hidden from callers.
+const maxWriteRetries = 6
+
 // WriteTx runs fn inside a serialized `BEGIN IMMEDIATE` transaction. The
 // in-process mutex plus IMMEDIATE + busy_timeout guarantee that concurrent
-// writers (this process and others) never corrupt state or lose updates.
+// writers (this process and others) never corrupt state or lose updates. A
+// `BEGIN IMMEDIATE` that loses the race for the write lock makes no changes, so
+// the whole transaction is safely retried with bounded backoff on SQLITE_BUSY.
 func (s *Store) WriteTx(ctx context.Context, fn func(c Conn) error) error {
+	for attempt := 0; ; attempt++ {
+		err := s.writeTxOnce(ctx, fn)
+		if err == nil || !isBusy(err) || attempt >= maxWriteRetries {
+			return err
+		}
+		// The lock is held by another writer; back off (releasing wmu so other
+		// in-process work can proceed) and retry.
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(busyBackoff(attempt)):
+		}
+	}
+}
+
+// writeTxOnce performs a single attempt of the serialized transaction. wmu is
+// held only for the duration of one attempt so backoff between retries does not
+// block other in-process writers.
+func (s *Store) writeTxOnce(ctx context.Context, fn func(c Conn) error) error {
 	s.wmu.Lock()
 	defer s.wmu.Unlock()
 
@@ -73,7 +109,7 @@ func (s *Store) WriteTx(ctx context.Context, fn func(c Conn) error) error {
 	defer conn.Close()
 
 	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
-		return err
+		return err // no transaction open yet; nothing to roll back
 	}
 	if err := fn(conn); err != nil {
 		_, _ = conn.ExecContext(ctx, "ROLLBACK")
@@ -84,4 +120,27 @@ func (s *Store) WriteTx(ctx context.Context, fn func(c Conn) error) error {
 		return err
 	}
 	return nil
+}
+
+// isBusy reports whether err is a transient SQLite lock contention error, the
+// only class of WriteTx failure that is safe to retry.
+func isBusy(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "SQLITE_BUSY") ||
+		strings.Contains(msg, "database is locked") ||
+		strings.Contains(msg, "database table is locked")
+}
+
+// busyBackoff returns the wait before retry attempt n: 10ms, 20ms, 40ms, ...
+// capped at 200ms, plus up to 50% jitter to avoid a multi-process thundering
+// herd all retrying in lockstep.
+func busyBackoff(attempt int) time.Duration {
+	base := 10 * time.Millisecond << attempt
+	if base > 200*time.Millisecond || base <= 0 {
+		base = 200 * time.Millisecond
+	}
+	return base + time.Duration(rand.Int64N(int64(base/2)+1))
 }
