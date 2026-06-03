@@ -12,7 +12,7 @@ import (
 // known reports whether cmd is a CLI command that needs an open App.
 func known(cmd string) bool {
 	switch cmd {
-	case "status", "doctor", "remember", "recall", "bug", "memory", "serve", "hook":
+	case "status", "doctor", "remember", "recall", "bug", "memory", "serve", "hook", "index", "graph":
 		return true
 	}
 	return false
@@ -42,7 +42,7 @@ func Run(args []string, out io.Writer) error {
 	}
 
 	if !known(cmd) {
-		return fmt.Errorf("unknown command %q (try: init serve hook status doctor remember recall bug memory)", cmd)
+		return fmt.Errorf("unknown command %q (try: init serve hook status doctor remember recall bug memory index graph)", cmd)
 	}
 
 	a, err := app.Open(app.Config{})
@@ -77,6 +77,10 @@ func Run(args []string, out io.Writer) error {
 			fmt.Fprintln(os.Stderr, "recarto hook:", err)
 		}
 		return nil // hooks never block
+	case "index":
+		return Index(ctx, a, out, rest)
+	case "graph":
+		return Graph(ctx, a, out, rest)
 	}
 	return nil // unreachable: known() gates the switch
 }
@@ -101,5 +105,7 @@ func usage(w io.Writer) error {
 	fmt.Fprintln(w, "  recall [hint]     ranked, budgeted recall (--files --symbols --kind --limit --budget)")
 	fmt.Fprintln(w, "  bug add|search    record or search bug memories")
 	fmt.Fprintln(w, "  memory show       render all active memory as markdown (--branch)")
+	fmt.Fprintln(w, "  index             build/refresh the code graph for this worktree")
+	fmt.Fprintln(w, "  graph <sub>       query the code graph (search|callers|callees|arch|query|snippet)")
 	return nil
 }
