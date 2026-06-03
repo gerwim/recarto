@@ -227,7 +227,7 @@ func TestPostReadSurfacesBugForFile(t *testing.T) {
 	ctx := context.Background()
 	if _, _, err := a.Engine.Record(ctx, memory.NewMemory{
 		Kind: memory.KindBug, Title: "nil deref here", Body: "nil deref — fix: guard",
-		Refs: []memory.Ref{{Type: memory.RefFile, Value: "internal/store/store.go"}},
+		Refs:   []memory.Ref{{Type: memory.RefFile, Value: "internal/store/store.go"}},
 		Source: "cli", Extra: map[string]any{"fix": "guard"},
 	}); err != nil {
 		t.Fatal(err)

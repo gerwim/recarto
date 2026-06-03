@@ -41,11 +41,13 @@ func splitCSV(s string) []string {
 }
 
 // refsFromFlags builds structural refs from the comma-separated --files/--symbols
-// /--tags flag values.
-func refsFromFlags(files, symbols, tags string) []memory.Ref {
+// /--tags flag values. File refs are normalized to repo-relative form (via
+// worktree) so they match hook-reported absolute paths, consistent with bug add
+// and the MCP record paths.
+func refsFromFlags(worktree, files, symbols, tags string) []memory.Ref {
 	var refs []memory.Ref
 	for _, f := range splitCSV(files) {
-		refs = append(refs, memory.Ref{Type: memory.RefFile, Value: f})
+		refs = append(refs, memory.Ref{Type: memory.RefFile, Value: memory.RelFileRef(worktree, f)})
 	}
 	for _, s := range splitCSV(symbols) {
 		refs = append(refs, memory.Ref{Type: memory.RefSymbol, Value: s})

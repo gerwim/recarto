@@ -53,7 +53,7 @@ func TestPostEditSurfacesBugForEditedFile(t *testing.T) {
 	ctx := context.Background()
 	if _, _, err := a.Engine.Record(ctx, memory.NewMemory{
 		Kind: memory.KindBug, Title: "edge case in F", Body: "edge case in F — fix: clamp",
-		Refs: []memory.Ref{{Type: memory.RefFile, Value: "a.go"}},
+		Refs:   []memory.Ref{{Type: memory.RefFile, Value: "a.go"}},
 		Source: "cli", Extra: map[string]any{"fix": "clamp"},
 	}); err != nil {
 		t.Fatal(err)

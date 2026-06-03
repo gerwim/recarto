@@ -14,7 +14,7 @@ func TestBugsForCodeMatchesByFileRef(t *testing.T) {
 	ctx := context.Background()
 	if _, _, err := e.Record(ctx, NewMemory{
 		Kind: KindBug, Title: "nil deref", Body: "nil deref in parser — fix: guard",
-		Refs: []Ref{{Type: RefFile, Value: "internal/parse/parse.go"}},
+		Refs:   []Ref{{Type: RefFile, Value: "internal/parse/parse.go"}},
 		Branch: "main", Source: "cli", Extra: map[string]any{"fix": "guard"},
 	}); err != nil {
 		t.Fatal(err)

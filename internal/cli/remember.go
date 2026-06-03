@@ -43,7 +43,7 @@ func Remember(ctx context.Context, a *app.App, w io.Writer, args []string) error
 		Kind:     kind,
 		Title:    *title,
 		Body:     *body,
-		Refs:     refsFromFlags(*files, *symbols, *tags),
+		Refs:     refsFromFlags(a.Git.Worktree, *files, *symbols, *tags),
 		Branch:   branchFor(a, *global),
 		Worktree: a.Git.Worktree,
 		Author:   "cli",
