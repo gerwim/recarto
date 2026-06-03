@@ -32,49 +32,48 @@ SELECT id, kind, title, body, search_text, created_at, updated_at,
   FROM memories`
 
 // insert writes a brand-new memory row + refs + minhash bands + FTS entry,
-// optionally superseding a prior record, all in one transaction.
-func (e *Engine) insert(ctx context.Context, id string, nm NewMemory,
+// optionally superseding a prior record. It runs on the caller's transaction
+// connection c so that the write (and the preceding near-dup check) is atomic.
+func (e *Engine) insert(ctx context.Context, c store.Conn, id string, nm NewMemory,
 	searchText string, sim uint64, bands [lshBands]uint64, now int64) error {
 	extraJSON, err := marshalExtra(nm.Extra)
 	if err != nil {
 		return err
 	}
-	return e.st.WriteTx(ctx, func(c store.Conn) error {
+	if _, err := c.ExecContext(ctx,
+		`INSERT INTO memories
+		   (id, kind, title, body, search_text, created_at, updated_at,
+		    branch, worktree, author, source, confidence, reinforcement_count,
+		    pinned, status, superseded_by, simhash, extra)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		id, string(nm.Kind), nm.Title, nm.Body, searchText, now, now,
+		nullStr(nm.Branch), nm.Worktree, nm.Author, nm.Source, 1.0, 0,
+		boolToInt(nm.Pinned), "active", nil, int64(sim), extraJSON,
+	); err != nil {
+		return err
+	}
+	for _, r := range nm.Refs {
 		if _, err := c.ExecContext(ctx,
-			`INSERT INTO memories
-			   (id, kind, title, body, search_text, created_at, updated_at,
-			    branch, worktree, author, source, confidence, reinforcement_count,
-			    pinned, status, superseded_by, simhash, extra)
-			 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-			id, string(nm.Kind), nm.Title, nm.Body, searchText, now, now,
-			nullStr(nm.Branch), nm.Worktree, nm.Author, nm.Source, 1.0, 0,
-			boolToInt(nm.Pinned), "active", nil, int64(sim), extraJSON,
-		); err != nil {
+			`INSERT OR IGNORE INTO memory_refs(memory_id, ref_type, ref_value)
+			 VALUES (?,?,?)`, id, string(r.Type), r.Value); err != nil {
 			return err
 		}
-		for _, r := range nm.Refs {
-			if _, err := c.ExecContext(ctx,
-				`INSERT OR IGNORE INTO memory_refs(memory_id, ref_type, ref_value)
-				 VALUES (?,?,?)`, id, string(r.Type), r.Value); err != nil {
-				return err
-			}
+	}
+	for b := 0; b < lshBands; b++ {
+		if _, err := c.ExecContext(ctx,
+			`INSERT INTO memory_minhash(memory_id, band, hash) VALUES (?,?,?)`,
+			id, b, int64(bands[b])); err != nil {
+			return err
 		}
-		for b := 0; b < lshBands; b++ {
-			if _, err := c.ExecContext(ctx,
-				`INSERT INTO memory_minhash(memory_id, band, hash) VALUES (?,?,?)`,
-				id, b, int64(bands[b])); err != nil {
-				return err
-			}
+	}
+	if nm.SupersedesID != "" {
+		if _, err := c.ExecContext(ctx,
+			`UPDATE memories SET status='superseded', superseded_by=?, updated_at=?
+			  WHERE id=? AND status='active'`, id, now, nm.SupersedesID); err != nil {
+			return err
 		}
-		if nm.SupersedesID != "" {
-			if _, err := c.ExecContext(ctx,
-				`UPDATE memories SET status='superseded', superseded_by=?, updated_at=?
-				  WHERE id=? AND status='active'`, id, now, nm.SupersedesID); err != nil {
-				return err
-			}
-		}
-		return e.lex.Index(ctx, c, id, searchText)
-	})
+	}
+	return e.lex.Index(ctx, c, id, searchText)
 }
 
 // GetByID returns a stored record (with refs) by id, or (nil, nil) if absent.
@@ -186,6 +185,12 @@ const dedupThreshold = 0.55
 
 // Record inserts nm, or reinforces a near-duplicate same-kind active memory.
 // It returns the affected row id and whether it was a reinforcement.
+//
+// The near-dup check and the insert/reinforce run inside a SINGLE write
+// transaction (BEGIN IMMEDIATE), so the check-and-act is atomic across
+// goroutines and processes: a concurrent racer reads the winner's just-
+// committed row inside its own immediate transaction and reinforces instead of
+// inserting a duplicate — the §7.9 convergence guarantee.
 func (e *Engine) Record(ctx context.Context, nm NewMemory) (id string, reinforced bool, err error) {
 	if !nm.Kind.Valid() {
 		return "", false, errInvalidKind
@@ -199,35 +204,39 @@ func (e *Engine) Record(ctx context.Context, nm NewMemory) (id string, reinforce
 	sim := simHash64(set)
 	now := e.clk.Now().UnixMilli()
 
-	candID, found, err := e.findNearDup(ctx, nm.Kind, bands, set)
-	if err != nil {
-		return "", false, err
-	}
-	if found {
-		if err := e.reinforce(ctx, candID, nm, now); err != nil {
-			return "", false, err
+	if txErr := e.st.WriteTx(ctx, func(c store.Conn) error {
+		candID, found, ferr := e.findNearDup(ctx, c, nm.Kind, bands, set)
+		if ferr != nil {
+			return ferr
 		}
-		_ = e.led.Incr(ctx, "lifetime", "memories_recorded", 1)
-		return candID, true, nil
+		if found {
+			id, reinforced = candID, true
+			return e.reinforce(ctx, c, candID, nm, now)
+		}
+		id, reinforced = ids.New(), false
+		return e.insert(ctx, c, id, nm, searchText, sim, bands, now)
+	}); txErr != nil {
+		return "", false, txErr
 	}
 
-	newID := ids.New()
-	if err := e.insert(ctx, newID, nm, searchText, sim, bands, now); err != nil {
-		return "", false, err
-	}
+	// Best-effort counter bump. It MUST run outside the WriteTx above: the
+	// store's write mutex is non-reentrant, so calling led.Incr (which opens
+	// its own WriteTx) while holding it would deadlock. A failed stat must not
+	// fail an already-committed Record, so the error is intentionally ignored.
 	_ = e.led.Incr(ctx, "lifetime", "memories_recorded", 1)
-	return newID, false, nil
+	return id, reinforced, nil
 }
 
 // findNearDup returns the id of an active same-kind memory whose body has
 // Jaccard >= dedupThreshold with set, using MinHash-LSH bands to gather
-// candidates and exact shingle Jaccard to confirm.
-func (e *Engine) findNearDup(ctx context.Context, kind Kind,
+// candidates and exact shingle Jaccard to confirm. It reads on the caller's
+// transaction connection c so the check is consistent with the ensuing write.
+func (e *Engine) findNearDup(ctx context.Context, c store.Conn, kind Kind,
 	bands [lshBands]uint64, set map[string]struct{}) (string, bool, error) {
 	seen := map[string]bool{}
 	var candidates []string
 	for b := 0; b < lshBands; b++ {
-		rows, err := e.st.DB.QueryContext(ctx,
+		rows, err := c.QueryContext(ctx,
 			`SELECT mh.memory_id
 			   FROM memory_minhash mh
 			   JOIN memories m ON m.id = mh.memory_id
@@ -255,7 +264,7 @@ func (e *Engine) findNearDup(ctx context.Context, kind Kind,
 	}
 	for _, id := range candidates {
 		var body string
-		if err := e.st.DB.QueryRowContext(ctx,
+		if err := c.QueryRowContext(ctx,
 			`SELECT body FROM memories WHERE id = ?`, id).Scan(&body); err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				continue
@@ -270,24 +279,23 @@ func (e *Engine) findNearDup(ctx context.Context, kind Kind,
 }
 
 // reinforce bumps an existing memory's reinforcement_count and confidence,
-// refreshes updated_at, and unions in any new refs.
-func (e *Engine) reinforce(ctx context.Context, id string, nm NewMemory, now int64) error {
-	return e.st.WriteTx(ctx, func(c store.Conn) error {
+// refreshes updated_at, and unions in any new refs. It runs on the caller's
+// transaction connection c.
+func (e *Engine) reinforce(ctx context.Context, c store.Conn, id string, nm NewMemory, now int64) error {
+	if _, err := c.ExecContext(ctx,
+		`UPDATE memories
+		    SET reinforcement_count = reinforcement_count + 1,
+		        updated_at = ?,
+		        confidence = MIN(1.0, confidence + 0.1)
+		  WHERE id = ?`, now, id); err != nil {
+		return err
+	}
+	for _, r := range nm.Refs {
 		if _, err := c.ExecContext(ctx,
-			`UPDATE memories
-			    SET reinforcement_count = reinforcement_count + 1,
-			        updated_at = ?,
-			        confidence = MIN(1.0, confidence + 0.1)
-			  WHERE id = ?`, now, id); err != nil {
+			`INSERT OR IGNORE INTO memory_refs(memory_id, ref_type, ref_value)
+			 VALUES (?,?,?)`, id, string(r.Type), r.Value); err != nil {
 			return err
 		}
-		for _, r := range nm.Refs {
-			if _, err := c.ExecContext(ctx,
-				`INSERT OR IGNORE INTO memory_refs(memory_id, ref_type, ref_value)
-				 VALUES (?,?,?)`, id, string(r.Type), r.Value); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
+	}
+	return nil
 }

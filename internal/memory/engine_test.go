@@ -2,11 +2,13 @@ package memory
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
 	"git.gerwim.nl/gerwim/recarto/internal/clock"
 	"git.gerwim.nl/gerwim/recarto/internal/ledger"
+	"git.gerwim.nl/gerwim/recarto/internal/store"
 )
 
 func newTestEngine(t *testing.T, clk clock.Clock) *Engine {
@@ -31,8 +33,11 @@ func TestInsertAndGetByID(t *testing.T) {
 	}
 	st := BuildSearchText(nm.Title, nm.Body, nm.Refs)
 	set := shingleSet(nm.Body)
-	if err := e.insert(ctx, id, nm, st, simHash64(set), bandHashes(minHashSignature(set)),
-		clk.Now().UnixMilli()); err != nil {
+	// insert runs on a transaction connection; wrap it in a WriteTx like Record does.
+	if err := e.st.WriteTx(ctx, func(c store.Conn) error {
+		return e.insert(ctx, c, id, nm, st, simHash64(set), bandHashes(minHashSignature(set)),
+			clk.Now().UnixMilli())
+	}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -146,5 +151,51 @@ func TestRecordPinsDoNotRepeat(t *testing.T) {
 	got, _ := e.GetByID(ctx, id)
 	if !got.Pinned {
 		t.Error("do_not_repeat must be pinned")
+	}
+}
+
+// TestRecordConcurrentDedupConverges proves the dedup check-and-act is atomic:
+// many goroutines recording identical content converge to ONE row (with the
+// rest reinforcing) instead of racing to insert duplicates (spec §7.9). Under
+// the old design (near-dup read on the pool, outside the write tx) this would
+// produce multiple rows. Run with -race.
+func TestRecordConcurrentDedupConverges(t *testing.T) {
+	e := newTestEngine(t, clock.NewFake(time.UnixMilli(5_000_000)))
+	ctx := context.Background()
+
+	const n = 8
+	nm := NewMemory{
+		Kind:   KindLearning,
+		Body:   "the auth token refresh path leaks a goroutine on error return",
+		Source: "cli",
+	}
+	var wg sync.WaitGroup
+	errs := make(chan error, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, _, err := e.Record(ctx, nm); err != nil {
+				errs <- err
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatalf("concurrent Record failed: %v", err)
+	}
+
+	var rows, reinf int
+	if err := e.st.DB.QueryRow(
+		`SELECT count(*), COALESCE(MAX(reinforcement_count), 0) FROM memories`).
+		Scan(&rows, &reinf); err != nil {
+		t.Fatal(err)
+	}
+	if rows != 1 {
+		t.Errorf("memories rows = %d, want 1 (concurrent identical records must converge)", rows)
+	}
+	if reinf != n-1 {
+		t.Errorf("reinforcement_count = %d, want %d", reinf, n-1)
 	}
 }
