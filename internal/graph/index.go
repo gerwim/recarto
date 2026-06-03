@@ -100,5 +100,23 @@ func (e *Engine) writeFileGraph(ctx context.Context, c store.Conn, worktree, pat
 			return err
 		}
 	}
+
+	// Structural containment edges: each symbol nested inside another emits a
+	// `contains` edge (parent -> child). Both endpoints are nodes in this same
+	// file, so they are linked directly by id (no name resolution). spans is in
+	// lockstep with res.Symbols, so spans[i] corresponds to res.Symbols[i].
+	for i, child := range spans {
+		pid := containingParent(spans, child)
+		if pid == "" {
+			continue
+		}
+		if _, err := c.ExecContext(ctx,
+			`INSERT INTO edges(id,src_node_id,dst_node_id,dst_name,kind,file_id,line)
+			 VALUES (?,?,?,?,?,?,?)`,
+			ids.New(), pid, child.id, "", "contains",
+			fileID, int64(res.Symbols[i].StartLine)); err != nil {
+			return err
+		}
+	}
 	return nil
 }

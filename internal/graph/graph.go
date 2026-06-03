@@ -61,6 +61,26 @@ func enclosing(spans []span, b uint) string {
 	return best
 }
 
+// containingParent returns the id of the innermost span (other than child
+// itself) whose byte range fully contains child's range, or "". It gives child
+// its single direct structural parent: a method's parent is its class, the
+// class's parent its namespace, and so on — building a containment tree.
+func containingParent(spans []span, child span) string {
+	best := ""
+	var bestLen uint
+	for _, s := range spans {
+		if s.id == child.id {
+			continue
+		}
+		if s.start <= child.start && child.end <= s.end {
+			if l := s.end - s.start; best == "" || l < bestLen {
+				best, bestLen = s.id, l
+			}
+		}
+	}
+	return best
+}
+
 // nullStr maps "" -> SQL NULL.
 func nullStr(s string) any {
 	if s == "" {

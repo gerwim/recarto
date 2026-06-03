@@ -52,6 +52,31 @@ func TestIndexFileWritesNodesAndEdges(t *testing.T) {
 	}
 }
 
+func TestIndexFileEmitsContainsEdges(t *testing.T) {
+	e := newTestEngine(t)
+	ctx := context.Background()
+	// A TypeScript class with a method: the method is structurally nested inside
+	// the class, so a `contains` edge (class -> method) must be emitted, linking
+	// both nodes directly (intra-file, no name resolution needed).
+	src := []byte("class Foo {\n  bar() {}\n}")
+	if err := e.IndexFile(ctx, "/wt", "a.ts", src, 1, int64(len(src))); err != nil {
+		t.Fatal(err)
+	}
+	var parent, child string
+	err := e.st.DB.QueryRow(`
+		SELECT p.name, ch.name
+		  FROM edges ed
+		  JOIN nodes p  ON p.id  = ed.src_node_id
+		  JOIN nodes ch ON ch.id = ed.dst_node_id
+		 WHERE ed.kind='contains'`).Scan(&parent, &child)
+	if err != nil {
+		t.Fatalf("expected a contains edge class->method: %v", err)
+	}
+	if parent != "Foo" || child != "bar" {
+		t.Errorf("contains edge = %s -> %s, want Foo -> bar", parent, child)
+	}
+}
+
 func TestIndexFileReplacesOnReindex(t *testing.T) {
 	e := newTestEngine(t)
 	ctx := context.Background()
