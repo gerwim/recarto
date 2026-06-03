@@ -208,3 +208,16 @@ func TestFormatSessionContextDegradesToTitles(t *testing.T) {
 		t.Errorf("second entry body should be dropped under tight budget:\n%s", s)
 	}
 }
+
+func TestFormatSessionContextDropsEntryUnderTinyBudget(t *testing.T) {
+	results := []memory.RecallResult{
+		{Record: &memory.Record{Kind: memory.KindLearning, Title: "WontFitAtAll", Body: "body"}},
+	}
+	s := formatSessionContext(results, graph.Architecture{}, nil, 2)
+	if strings.Contains(s, "WontFitAtAll") {
+		t.Errorf("entry should be dropped entirely when even its title exceeds the budget:\n%s", s)
+	}
+	if strings.Contains(s, "no prior memories yet") {
+		t.Errorf("results were non-empty; must not claim none exist:\n%s", s)
+	}
+}

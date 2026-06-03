@@ -24,7 +24,7 @@ const (
 	recentBugLimit     = 5
 	archModuleLimit    = 8
 	archDepLimit       = 8
-	cerebrumReserve    = 200
+	cerebrumReserve    = 256 // headroom for the map (~165 tok) + recent-bugs (~60 tok) tiers
 	cerebrumBodyMax    = 160
 )
 
@@ -194,7 +194,6 @@ func formatSessionContext(results []memory.RecallResult, arch graph.Architecture
 		budgetCap = budget
 	}
 	used := 0
-	wroteAny := false
 	for _, r := range results {
 		title := r.Record.Title
 		if title == "" {
@@ -204,9 +203,10 @@ func formatSessionContext(results []memory.RecallResult, arch graph.Architecture
 			line := fmt.Sprintf("- [%s] %s\n  %s\n", r.Record.Kind, title, r.Record.Body)
 			b.WriteString(line)
 			used += ledger.EstimateTokens(line)
-			wroteAny = true
 			continue
 		}
+		// Gate on the RAW body cost so a large-bodied memory degrades to title-only,
+		// but emit (and account) the trimmed one-line display.
 		fullDisplay := fmt.Sprintf("- [%s] %s\n  %s\n", r.Record.Kind, title, trimOneLine(r.Record.Body))
 		fullCost := fmt.Sprintf("- [%s] %s\n  %s\n", r.Record.Kind, title, r.Record.Body)
 		titleOnly := fmt.Sprintf("- [%s] %s\n", r.Record.Kind, title)
@@ -214,14 +214,12 @@ func formatSessionContext(results []memory.RecallResult, arch graph.Architecture
 		case used+ledger.EstimateTokens(fullCost) <= budgetCap:
 			b.WriteString(fullDisplay)
 			used += ledger.EstimateTokens(fullDisplay)
-			wroteAny = true
 		case used+ledger.EstimateTokens(titleOnly) <= budgetCap:
 			b.WriteString(titleOnly)
 			used += ledger.EstimateTokens(titleOnly)
-			wroteAny = true
 		}
 	}
-	if !wroteAny {
+	if len(results) == 0 {
 		b.WriteString("(no prior memories yet)\n")
 	}
 
@@ -264,8 +262,8 @@ func trimOneLine(s string) string {
 	if i := strings.IndexByte(s, '\n'); i >= 0 {
 		s = s[:i]
 	}
-	if len(s) > cerebrumBodyMax {
-		s = s[:cerebrumBodyMax] + "…"
+	if r := []rune(s); len(r) > cerebrumBodyMax {
+		s = string(r[:cerebrumBodyMax]) + "…"
 	}
 	return s
 }
