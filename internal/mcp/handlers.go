@@ -62,7 +62,7 @@ func recordMemory(ctx context.Context, a *app.App, in RecordMemoryInput) (Record
 		Kind:         kind,
 		Title:        in.Title,
 		Body:         in.Body,
-		Refs:         refsFrom(in.Files, in.Symbols, in.Tags),
+		Refs:         refsFrom(a.Git.Worktree, in.Files, in.Symbols, in.Tags),
 		Branch:       branch,
 		Worktree:     a.Git.Worktree,
 		Author:       "mcp",
@@ -114,11 +114,12 @@ func recallMemory(ctx context.Context, a *app.App, in RecallMemoryInput) (Recall
 	return out, nil
 }
 
-// refsFrom builds structural refs from file/symbol/tag value lists.
-func refsFrom(files, symbols, tags []string) []memory.Ref {
+// refsFrom builds structural refs from file/symbol/tag value lists. File values
+// are normalized to repo-relative form so they match hook-reported absolute paths.
+func refsFrom(worktree string, files, symbols, tags []string) []memory.Ref {
 	var refs []memory.Ref
 	for _, f := range files {
-		refs = append(refs, memory.Ref{Type: memory.RefFile, Value: f})
+		refs = append(refs, memory.Ref{Type: memory.RefFile, Value: memory.RelFileRef(worktree, f)})
 	}
 	for _, s := range symbols {
 		refs = append(refs, memory.Ref{Type: memory.RefSymbol, Value: s})
@@ -148,6 +149,7 @@ type RecordBugInput struct {
 	RootCause    string   `json:"root_cause,omitempty" jsonschema:"why it broke"`
 	Fix          string   `json:"fix,omitempty" jsonschema:"what fixed it"`
 	File         string   `json:"file,omitempty" jsonschema:"the file that was fixed"`
+	Symbols      []string `json:"symbols,omitempty" jsonschema:"related symbol names"`
 	Tags         []string `json:"tags,omitempty" jsonschema:"freeform tags"`
 }
 
@@ -172,7 +174,10 @@ func recordBug(ctx context.Context, a *app.App, in RecordBugInput) (RecordBugOut
 	}
 	var refs []memory.Ref
 	if in.File != "" {
-		refs = append(refs, memory.Ref{Type: memory.RefFile, Value: in.File})
+		refs = append(refs, memory.Ref{Type: memory.RefFile, Value: memory.RelFileRef(a.Git.Worktree, in.File)})
+	}
+	for _, s := range in.Symbols {
+		refs = append(refs, memory.Ref{Type: memory.RefSymbol, Value: s})
 	}
 	// The body carries error + fix so the lexical index can match either.
 	body := in.ErrorMessage

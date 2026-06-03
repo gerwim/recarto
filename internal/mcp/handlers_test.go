@@ -150,6 +150,25 @@ func TestRecordBugRequiresError(t *testing.T) {
 	}
 }
 
+func TestRecordBugCapturesSymbols(t *testing.T) {
+	a := newTestApp(t, "main")
+	ctx := context.Background()
+	if _, err := recordBug(ctx, a, RecordBugInput{
+		ErrorMessage: "panic in Tokenize",
+		Fix:          "guard the slice",
+		Symbols:      []string{"Tokenize"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	bugs, err := a.Engine.BugsForCode(ctx, "main", nil, []string{"Tokenize"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bugs) != 1 || bugs[0].Title != "panic in Tokenize" {
+		t.Fatalf("want 1 bug by symbol, got %d: %+v", len(bugs), bugs)
+	}
+}
+
 func TestGetAndListMemory(t *testing.T) {
 	a := newTestApp(t, "main")
 	ctx := context.Background()
