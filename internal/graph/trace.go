@@ -35,8 +35,12 @@ func (e *Engine) TraceCallPath(ctx context.Context, worktree, symbol, direction 
 	var chains [][]CallNode
 	var walk func(cur CallNode, path []CallNode, visited map[string]bool, d int)
 	walk = func(cur CallNode, path []CallNode, visited map[string]bool, d int) {
+		if d == 0 {
+			chains = append(chains, path)
+			return // depth limit reached; don't issue a needless neighbor query
+		}
 		next, err := e.callNeighbors(ctx, worktree, cur, direction)
-		if err != nil || len(next) == 0 || d == 0 {
+		if err != nil || len(next) == 0 {
 			chains = append(chains, path)
 			return
 		}
