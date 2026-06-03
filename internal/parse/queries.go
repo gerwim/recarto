@@ -18,8 +18,10 @@ var javascriptQuery string
 // TypeScript query (the tsx grammar shares the same definition/reference nodes).
 func querySources() map[string]string {
 	return map[string]string{
-		"go": goQuery, "csharp": csharpQuery,
-		"typescript": typescriptQuery, "tsx": typescriptQuery,
+		"go":         goQuery,
+		"csharp":     csharpQuery,
+		"typescript": typescriptQuery,
+		"tsx":        typescriptQuery,
 		"javascript": javascriptQuery,
 	}
 }

@@ -37,6 +37,10 @@ func NewRegistry() (*Registry, error) {
 	for lang, src := range querySources() {
 		q, qErr := sitter.NewQuery(langs[lang], src)
 		if qErr != nil {
+			// Close any already-compiled queries before bailing (must-Close).
+			for _, already := range queries {
+				already.Close()
+			}
 			return nil, fmt.Errorf("parse: compile %s query: %v", lang, qErr)
 		}
 		queries[lang] = q
