@@ -33,6 +33,21 @@ func NewServer(a *app.App) *sdk.Server {
 	addTool(s, a, "list_memory",
 		"List stored memories, optionally filtered by kind and branch.",
 		listMemory)
+	addTool(s, a, "search_graph",
+		"Search the code graph for symbols by name or keywords (functions, methods, classes, types).",
+		searchGraph)
+	addTool(s, a, "trace_call_path",
+		"Trace call chains to/from a symbol (direction: callers or callees).",
+		traceCallPath)
+	addTool(s, a, "get_architecture",
+		"Summarize the codebase structure: modules with file and symbol counts.",
+		getArchitecture)
+	addTool(s, a, "query_graph",
+		"Run a structured query over the code graph (node filters + optional edge traversal).",
+		queryGraph)
+	addTool(s, a, "get_code_snippet",
+		"Return the exact source of a symbol by file + name, instead of reading the whole file.",
+		getCodeSnippet)
 	return s
 }
 

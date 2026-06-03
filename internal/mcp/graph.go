@@ -1,0 +1,156 @@
+package mcp
+
+import (
+	"context"
+
+	"git.gerwim.nl/gerwim/recarto/internal/app"
+	"git.gerwim.nl/gerwim/recarto/internal/graph"
+)
+
+// --- search_graph ---
+
+type SearchGraphInput struct {
+	Query    string `json:"query" jsonschema:"symbol name or keywords to search"`
+	Kind     string `json:"kind,omitempty" jsonschema:"restrict to a node kind (function, method, class, …)"`
+	Language string `json:"language,omitempty" jsonschema:"restrict to a language (go, csharp, typescript, tsx, javascript)"`
+	Limit    int    `json:"limit,omitempty" jsonschema:"max results"`
+}
+type GraphSymbol struct {
+	Name          string  `json:"name"`
+	QualifiedName string  `json:"qualified_name"`
+	Kind          string  `json:"kind"`
+	Path          string  `json:"path"`
+	Line          int     `json:"line"`
+	Score         float64 `json:"score,omitempty"`
+}
+type SearchGraphOutput struct {
+	Count   int           `json:"count"`
+	Results []GraphSymbol `json:"results"`
+}
+
+func searchGraph(ctx context.Context, a *app.App, in SearchGraphInput) (SearchGraphOutput, error) {
+	res, err := a.Graph.Search(ctx, a.Git.Worktree, in.Query, in.Kind, in.Language, in.Limit)
+	if err != nil {
+		return SearchGraphOutput{}, err
+	}
+	out := SearchGraphOutput{Count: len(res), Results: make([]GraphSymbol, 0, len(res))}
+	for _, r := range res {
+		out.Results = append(out.Results, GraphSymbol{
+			Name: r.Name, QualifiedName: r.QualifiedName, Kind: r.Kind,
+			Path: r.Path, Line: r.Line, Score: r.Score,
+		})
+	}
+	return out, nil
+}
+
+// --- trace_call_path ---
+
+type TraceCallPathInput struct {
+	Symbol    string `json:"symbol" jsonschema:"the symbol to trace from"`
+	Direction string `json:"direction,omitempty" jsonschema:"callers or callees (default callees)"`
+	Depth     int    `json:"depth,omitempty" jsonschema:"max chain depth (default 3)"`
+}
+type TraceCallPathOutput struct {
+	Chains [][]string `json:"chains"`
+}
+
+func traceCallPath(ctx context.Context, a *app.App, in TraceCallPathInput) (TraceCallPathOutput, error) {
+	dir := in.Direction
+	if dir == "" {
+		dir = "callees"
+	}
+	chains, err := a.Graph.TraceCallPath(ctx, a.Git.Worktree, in.Symbol, dir, in.Depth)
+	if err != nil {
+		return TraceCallPathOutput{}, err
+	}
+	out := TraceCallPathOutput{Chains: make([][]string, 0, len(chains))}
+	for _, ch := range chains {
+		names := make([]string, len(ch))
+		for i, n := range ch {
+			names[i] = n.Name
+		}
+		out.Chains = append(out.Chains, names)
+	}
+	return out, nil
+}
+
+// --- get_architecture ---
+
+type GetArchitectureInput struct {
+	Scope string `json:"scope,omitempty" jsonschema:"restrict to paths under this prefix"`
+}
+type ArchModule struct {
+	Name    string `json:"name"`
+	Files   int    `json:"files"`
+	Symbols int    `json:"symbols"`
+}
+type GetArchitectureOutput struct {
+	Modules []ArchModule `json:"modules"`
+}
+
+func getArchitecture(ctx context.Context, a *app.App, in GetArchitectureInput) (GetArchitectureOutput, error) {
+	arch, err := a.Graph.Architecture(ctx, a.Git.Worktree, in.Scope)
+	if err != nil {
+		return GetArchitectureOutput{}, err
+	}
+	out := GetArchitectureOutput{Modules: make([]ArchModule, 0, len(arch.Modules))}
+	for _, m := range arch.Modules {
+		out.Modules = append(out.Modules, ArchModule{Name: m.Name, Files: m.Files, Symbols: m.Symbols})
+	}
+	return out, nil
+}
+
+// --- query_graph ---
+
+type QueryGraphInput struct {
+	Kind          string `json:"kind,omitempty" jsonschema:"node kind filter"`
+	NameContains  string `json:"name_contains,omitempty" jsonschema:"substring match on name/qualified_name"`
+	Path          string `json:"path,omitempty" jsonschema:"exact file path filter"`
+	Language      string `json:"language,omitempty" jsonschema:"language filter"`
+	EdgeKind      string `json:"edge_kind,omitempty" jsonschema:"require an edge of this kind (e.g. calls, imports)"`
+	EdgeDirection string `json:"edge_direction,omitempty" jsonschema:"out (node is source) or in (node is target)"`
+	Limit         int    `json:"limit,omitempty" jsonschema:"max results"`
+}
+type QueryGraphOutput struct {
+	Count int           `json:"count"`
+	Nodes []GraphSymbol `json:"nodes"`
+}
+
+func queryGraph(ctx context.Context, a *app.App, in QueryGraphInput) (QueryGraphOutput, error) {
+	spec := graph.QuerySpec{
+		Kind: in.Kind, NameLike: in.NameContains, Path: in.Path,
+		Language: in.Language, Limit: in.Limit,
+	}
+	if in.EdgeKind != "" {
+		spec.Edge = &graph.EdgeFilter{Kind: in.EdgeKind, Direction: in.EdgeDirection}
+	}
+	nodes, err := a.Graph.Query(ctx, a.Git.Worktree, spec)
+	if err != nil {
+		return QueryGraphOutput{}, err
+	}
+	out := QueryGraphOutput{Count: len(nodes), Nodes: make([]GraphSymbol, 0, len(nodes))}
+	for _, n := range nodes {
+		out.Nodes = append(out.Nodes, GraphSymbol{
+			Name: n.Name, QualifiedName: n.QualifiedName, Kind: n.Kind, Path: n.Path, Line: n.Line,
+		})
+	}
+	return out, nil
+}
+
+// --- get_code_snippet ---
+
+type GetCodeSnippetInput struct {
+	File   string `json:"file" jsonschema:"repo-relative file path"`
+	Symbol string `json:"symbol" jsonschema:"symbol name or qualified name"`
+}
+type GetCodeSnippetOutput struct {
+	Snippet string `json:"snippet"`
+}
+
+func getCodeSnippet(ctx context.Context, a *app.App, in GetCodeSnippetInput) (GetCodeSnippetOutput, error) {
+	snip, err := a.Graph.Snippet(ctx, a.Git.Worktree, in.File, in.Symbol)
+	if err != nil {
+		return GetCodeSnippetOutput{}, err
+	}
+	return GetCodeSnippetOutput{Snippet: snip}, nil
+}
