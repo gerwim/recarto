@@ -7,6 +7,7 @@ import (
 	"errors"
 
 	"git.gerwim.nl/gerwim/recarto/internal/clock"
+	"git.gerwim.nl/gerwim/recarto/internal/ids"
 	"git.gerwim.nl/gerwim/recarto/internal/ledger"
 	"git.gerwim.nl/gerwim/recarto/internal/store"
 )
@@ -173,3 +174,117 @@ func marshalExtra(m map[string]any) (string, error) {
 
 // errInvalidKind is returned by Record for an unknown kind.
 var errInvalidKind = errors.New("memory: invalid kind")
+
+// dedupThreshold is the Jaccard similarity at/above which a new memory
+// reinforces an existing same-kind record instead of inserting a new row.
+// With 3-word shingles, bodies differing by ~1 word score ~0.8; bodies with
+// no shared context score 0.0, so 0.75 cleanly separates near-dups from distinct.
+const dedupThreshold = 0.75
+
+// Record inserts nm, or reinforces a near-duplicate same-kind active memory.
+// It returns the affected row id and whether it was a reinforcement.
+func (e *Engine) Record(ctx context.Context, nm NewMemory) (id string, reinforced bool, err error) {
+	if !nm.Kind.Valid() {
+		return "", false, errInvalidKind
+	}
+	if nm.Kind == KindDoNotRepeat {
+		nm.Pinned = true
+	}
+	searchText := BuildSearchText(nm.Title, nm.Body, nm.Refs)
+	set := shingleSet(nm.Body)
+	bands := bandHashes(minHashSignature(set))
+	sim := simHash64(set)
+	now := e.clk.Now().UnixMilli()
+
+	candID, found, err := e.findNearDup(ctx, nm.Kind, bands, set)
+	if err != nil {
+		return "", false, err
+	}
+	if found {
+		if err := e.reinforce(ctx, candID, nm, now); err != nil {
+			return "", false, err
+		}
+		_ = e.led.Incr(ctx, "lifetime", "memories_recorded", 1)
+		return candID, true, nil
+	}
+
+	newID := ids.New()
+	if err := e.insert(ctx, newID, nm, searchText, sim, bands, now); err != nil {
+		return "", false, err
+	}
+	_ = e.led.Incr(ctx, "lifetime", "memories_recorded", 1)
+	return newID, false, nil
+}
+
+// findNearDup returns the id of an active same-kind memory whose body has
+// Jaccard >= dedupThreshold with set, using MinHash-LSH bands to gather
+// candidates and exact shingle Jaccard to confirm.
+func (e *Engine) findNearDup(ctx context.Context, kind Kind,
+	bands [lshBands]uint64, set map[string]struct{}) (string, bool, error) {
+	seen := map[string]bool{}
+	var candidates []string
+	for b := 0; b < lshBands; b++ {
+		rows, err := e.st.DB.QueryContext(ctx,
+			`SELECT mh.memory_id
+			   FROM memory_minhash mh
+			   JOIN memories m ON m.id = mh.memory_id
+			  WHERE mh.band = ? AND mh.hash = ? AND m.kind = ? AND m.status = 'active'`,
+			b, int64(bands[b]), string(kind))
+		if err != nil {
+			return "", false, err
+		}
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				return "", false, err
+			}
+			if !seen[id] {
+				seen[id] = true
+				candidates = append(candidates, id)
+			}
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return "", false, err
+		}
+		rows.Close()
+	}
+	for _, id := range candidates {
+		var body string
+		if err := e.st.DB.QueryRowContext(ctx,
+			`SELECT body FROM memories WHERE id = ?`, id).Scan(&body); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				continue
+			}
+			return "", false, err
+		}
+		if jaccard(set, shingleSet(body)) >= dedupThreshold {
+			return id, true, nil
+		}
+	}
+	return "", false, nil
+}
+
+// reinforce bumps an existing memory's reinforcement_count and confidence,
+// refreshes updated_at, and unions in any new refs.
+func (e *Engine) reinforce(ctx context.Context, id string, nm NewMemory, now int64) error {
+	return e.st.WriteTx(ctx, func(c store.Conn) error {
+		if _, err := c.ExecContext(ctx,
+			`UPDATE memories
+			    SET reinforcement_count = reinforcement_count + 1,
+			        updated_at = ?,
+			        confidence = MIN(1.0, confidence + 0.1)
+			  WHERE id = ?`, now, id); err != nil {
+			return err
+		}
+		for _, r := range nm.Refs {
+			if _, err := c.ExecContext(ctx,
+				`INSERT OR IGNORE INTO memory_refs(memory_id, ref_type, ref_value)
+				 VALUES (?,?,?)`, id, string(r.Type), r.Value); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
