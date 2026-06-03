@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -368,5 +369,49 @@ func TestArchiveGCRespectsGrace(t *testing.T) {
 	e.st.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM memories WHERE id=?`, id).Scan(&total)
 	if total != 0 {
 		t.Error("archived row past grace should be hard-deleted")
+	}
+}
+
+func TestCompactSingleFlightIsConsistent(t *testing.T) {
+	e := newTestEngine(t, clock.NewFake(time.UnixMilli(1_700_000_000_000)))
+	ctx := context.Background()
+
+	const goroutines = 8
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	ran := 0
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			rep, err := e.Compact(ctx, CompactOptions{Force: true})
+			if err != nil {
+				t.Errorf("compact: %v", err)
+				return
+			}
+			if rep.Ran {
+				mu.Lock()
+				ran++
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+
+	// Invariant: the epoch advances exactly once per pass that actually ran.
+	epoch, err := e.Epoch(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if epoch != int64(1+ran) { // fresh epoch 1 + one bump per ran pass
+		t.Errorf("epoch = %d, want %d (1 + ran=%d)", epoch, 1+ran, ran)
+	}
+	if ran < 1 {
+		t.Error("at least one concurrent pass should have run")
+	}
+	var integrity string
+	e.st.DB.QueryRowContext(ctx, `PRAGMA integrity_check`).Scan(&integrity)
+	if integrity != "ok" {
+		t.Errorf("integrity_check = %q", integrity)
 	}
 }
