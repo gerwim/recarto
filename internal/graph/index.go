@@ -78,7 +78,7 @@ func (e *Engine) writeFileGraph(ctx context.Context, c store.Conn, worktree, pat
 			`INSERT INTO nodes(id,file_id,kind,name,qualified_name,signature,
 			   start_byte,end_byte,start_line,end_line)
 			 VALUES (?,?,?,?,?,?,?,?,?,?)`,
-			nid, fileID, s.Kind, s.Name, qn, "",
+			nid, fileID, s.Kind, s.Name, qn, "", // signature: reserved for a future version
 			int64(s.StartByte), int64(s.EndByte), int64(s.StartLine), int64(s.EndLine)); err != nil {
 			return err
 		}

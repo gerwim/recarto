@@ -69,3 +69,31 @@ func TestIndexFileReplacesOnReindex(t *testing.T) {
 		t.Errorf("nodes = %d, want 1 after reindex", got)
 	}
 }
+
+func TestIndexFileSkipsUnsupported(t *testing.T) {
+	e := newTestEngine(t)
+	if err := e.IndexFile(context.Background(), "/wt", "README.md", []byte("# hi"), 1, 4); err != nil {
+		t.Fatalf("unsupported file should be skipped, got %v", err)
+	}
+	if got := countRows(t, e, "files", "/wt"); got != 0 {
+		t.Errorf("files = %d, want 0 (unsupported extension skipped)", got)
+	}
+}
+
+func TestIndexFileFileScopeEdgeHasNullSrc(t *testing.T) {
+	e := newTestEngine(t)
+	// The import is at file scope (outside any symbol), so its edge has no
+	// enclosing node -> src_node_id must be NULL.
+	src := []byte("package p\nimport \"fmt\"\nfunc A() { fmt.Println() }")
+	if err := e.IndexFile(context.Background(), "/wt", "p.go", src, 1, int64(len(src))); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	if err := e.st.DB.QueryRow(
+		`SELECT COUNT(*) FROM edges WHERE kind='imports' AND src_node_id IS NULL`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Errorf("file-scope import edges with NULL src = %d, want 1", n)
+	}
+}
