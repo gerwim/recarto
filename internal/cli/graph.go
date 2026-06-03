@@ -16,6 +16,9 @@ func Graph(ctx context.Context, a *app.App, w io.Writer, args []string) error {
 		return fmt.Errorf("graph: subcommand required (search|callers|callees|arch|query|snippet)")
 	}
 	wt := a.Git.Worktree
+	// Lazy reconcile so query results reflect the current checkout (spec §11).
+	// Best-effort: a reconcile failure must not fail the query.
+	_ = a.Graph.Reconcile(ctx, wt, graph.FSSource{Root: wt})
 	sub, rest := args[0], args[1:]
 	switch sub {
 	case "search":

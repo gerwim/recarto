@@ -7,6 +7,13 @@ import (
 	"git.gerwim.nl/gerwim/recarto/internal/graph"
 )
 
+// ensureFresh lazily reconciles the worktree's graph so query results reflect the
+// current checkout (spec §11 query-time freshness). Best-effort: a reconcile
+// failure must not fail the query — stale results beat no results.
+func ensureFresh(ctx context.Context, a *app.App) {
+	_ = a.Graph.Reconcile(ctx, a.Git.Worktree, graph.FSSource{Root: a.Git.Worktree})
+}
+
 // --- search_graph ---
 
 type SearchGraphInput struct {
@@ -29,6 +36,7 @@ type SearchGraphOutput struct {
 }
 
 func searchGraph(ctx context.Context, a *app.App, in SearchGraphInput) (SearchGraphOutput, error) {
+	ensureFresh(ctx, a)
 	res, err := a.Graph.Search(ctx, a.Git.Worktree, in.Query, in.Kind, in.Language, in.Limit)
 	if err != nil {
 		return SearchGraphOutput{}, err
@@ -55,6 +63,7 @@ type TraceCallPathOutput struct {
 }
 
 func traceCallPath(ctx context.Context, a *app.App, in TraceCallPathInput) (TraceCallPathOutput, error) {
+	ensureFresh(ctx, a)
 	dir := in.Direction
 	if dir == "" {
 		dir = "callees"
@@ -89,6 +98,7 @@ type GetArchitectureOutput struct {
 }
 
 func getArchitecture(ctx context.Context, a *app.App, in GetArchitectureInput) (GetArchitectureOutput, error) {
+	ensureFresh(ctx, a)
 	arch, err := a.Graph.Architecture(ctx, a.Git.Worktree, in.Scope)
 	if err != nil {
 		return GetArchitectureOutput{}, err
@@ -117,6 +127,7 @@ type QueryGraphOutput struct {
 }
 
 func queryGraph(ctx context.Context, a *app.App, in QueryGraphInput) (QueryGraphOutput, error) {
+	ensureFresh(ctx, a)
 	spec := graph.QuerySpec{
 		Kind: in.Kind, NameLike: in.NameContains, Path: in.Path,
 		Language: in.Language, Limit: in.Limit,
@@ -148,6 +159,7 @@ type GetCodeSnippetOutput struct {
 }
 
 func getCodeSnippet(ctx context.Context, a *app.App, in GetCodeSnippetInput) (GetCodeSnippetOutput, error) {
+	ensureFresh(ctx, a)
 	snip, err := a.Graph.Snippet(ctx, a.Git.Worktree, in.File, in.Symbol)
 	if err != nil {
 		return GetCodeSnippetOutput{}, err

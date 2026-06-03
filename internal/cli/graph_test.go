@@ -31,3 +31,23 @@ func TestGraphRequiresSubcommand(t *testing.T) {
 		t.Error("expected error when no subcommand given")
 	}
 }
+
+// TestGraphSearchAutoReconciles proves the spec §11 query-time freshness: a graph
+// query reflects the current checkout WITHOUT a prior explicit `recarto index`.
+func TestGraphSearchAutoReconciles(t *testing.T) {
+	a := newTestApp(t, "main")
+	wt := t.TempDir()
+	a.Git.Worktree = wt
+	if err := os.WriteFile(filepath.Join(wt, "z.go"),
+		[]byte("package p\nfunc Zeta(){}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	// No explicit Index call — Graph must lazily reconcile first.
+	if err := Graph(context.Background(), a, &out, []string{"search", "Zeta"}); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(out.Bytes(), []byte("Zeta")) {
+		t.Errorf("graph search did not auto-reconcile; output = %q", out.String())
+	}
+}
