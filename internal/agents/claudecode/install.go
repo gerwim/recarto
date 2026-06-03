@@ -16,12 +16,14 @@ type Result struct {
 // hookSpec is one (event, matcher, command) hook the installer registers.
 type hookSpec struct{ event, matcher, command string }
 
-// hookSpecs are the Phase-1 Advisory hooks. SessionStart and Stop run
-// unconditionally (no matcher); post-read is scoped to the Read tool.
+// hookSpecs are the advisory hooks. SessionStart and Stop run unconditionally
+// (no matcher); post-read, post-edit, and augment are scoped to their tools.
 func hookSpecs(binary string) []hookSpec {
 	return []hookSpec{
 		{"SessionStart", "", binary + " hook session-start"},
 		{"PostToolUse", "Read", binary + " hook post-read"},
+		{"PostToolUse", "Edit|Write", binary + " hook post-edit"},
+		{"PostToolUse", "Grep|Glob", binary + " hook augment"},
 		{"Stop", "", binary + " hook stop"},
 	}
 }

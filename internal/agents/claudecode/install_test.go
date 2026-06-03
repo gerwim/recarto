@@ -40,6 +40,8 @@ func TestInstallCreatesConfigAndIsIdempotent(t *testing.T) {
 		"keep-me",
 		"recarto hook session-start",
 		"recarto hook post-read",
+		"recarto hook post-edit",
+		"recarto hook augment",
 		"recarto hook stop",
 	} {
 		if !strings.Contains(string(settings), want) {
