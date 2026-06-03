@@ -12,6 +12,7 @@ import (
 	"git.gerwim.nl/gerwim/recarto/internal/cache"
 	"git.gerwim.nl/gerwim/recarto/internal/clock"
 	"git.gerwim.nl/gerwim/recarto/internal/gitctx"
+	"git.gerwim.nl/gerwim/recarto/internal/graph"
 	"git.gerwim.nl/gerwim/recarto/internal/ledger"
 	"git.gerwim.nl/gerwim/recarto/internal/memory"
 	"git.gerwim.nl/gerwim/recarto/internal/store"
@@ -32,6 +33,7 @@ type App struct {
 	Store  *store.Store
 	Ledger *ledger.Ledger
 	Engine *memory.Engine
+	Graph  *graph.Engine
 	Clock  clock.Clock
 }
 
@@ -71,8 +73,13 @@ func Open(cfg Config) (*App, error) {
 	}
 	led := ledger.New(st)
 	eng := memory.New(st, led, clk)
+	gr, err := graph.New(st, led, clk)
+	if err != nil {
+		_ = st.Close()
+		return nil, err
+	}
 
-	a := &App{Git: gc, Store: st, Ledger: led, Engine: eng, Clock: clk}
+	a := &App{Git: gc, Store: st, Ledger: led, Engine: eng, Graph: gr, Clock: clk}
 	if err := a.writeMeta(context.Background()); err != nil {
 		_ = st.Close()
 		return nil, err
@@ -80,8 +87,13 @@ func Open(cfg Config) (*App, error) {
 	return a, nil
 }
 
-// Close releases the store.
-func (a *App) Close() error { return a.Store.Close() }
+// Close releases the graph engine's parser then the store.
+func (a *App) Close() error {
+	if a.Graph != nil {
+		a.Graph.Close()
+	}
+	return a.Store.Close()
+}
 
 // writeMeta upserts repo identity metadata. It is idempotent and safe under
 // concurrency (the store serializes writers; the UPSERT is atomic).

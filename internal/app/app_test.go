@@ -82,3 +82,10 @@ func TestOpenResolvesIdentityAndStore(t *testing.T) {
 func newLearning() memory.NewMemory {
 	return memory.NewMemory{Kind: memory.KindLearning, Branch: "main", Body: "use wal mode for cross process writers"}
 }
+
+func TestOpenBuildsGraphEngine(t *testing.T) {
+	a := newTestApp(t, "main")
+	if a.Graph == nil {
+		t.Fatal("App.Graph is nil")
+	}
+}
