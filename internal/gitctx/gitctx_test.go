@@ -26,9 +26,9 @@ func (f fakeRunner) Run(args ...string) (string, error) {
 func TestResolveNormalRepo(t *testing.T) {
 	r := fakeRunner{out: map[string]string{
 		"rev-parse --path-format=absolute --git-common-dir": "/home/u/proj/.git",
-		"symbolic-ref --short -q HEAD":                       "feature/login",
-		"rev-parse --show-toplevel":                          "/home/u/proj",
-		"rev-list --max-parents=0 HEAD":                      "abc123def456",
+		"symbolic-ref --short -q HEAD":                      "feature/login",
+		"rev-parse --show-toplevel":                         "/home/u/proj",
+		"rev-list --max-parents=0 HEAD":                     "abc123def456",
 	}}
 	ctx, err := Resolve(r, "/home/u/proj")
 	if err != nil {
@@ -59,7 +59,7 @@ func TestResolveSharedAcrossWorktrees(t *testing.T) {
 	// so they must resolve to the same RepoID.
 	base := map[string]string{
 		"rev-parse --path-format=absolute --git-common-dir": "/home/u/proj/.git",
-		"rev-list --max-parents=0 HEAD":                      "abc123",
+		"rev-list --max-parents=0 HEAD":                     "abc123",
 	}
 	wt1 := fakeRunner{out: mergeMap(base, map[string]string{
 		"symbolic-ref --short -q HEAD": "main",
@@ -83,9 +83,9 @@ func TestResolveDetachedHead(t *testing.T) {
 	r := fakeRunner{
 		out: map[string]string{
 			"rev-parse --path-format=absolute --git-common-dir": "/home/u/proj/.git",
-			"rev-parse --show-toplevel":                          "/home/u/proj",
-			"rev-list --max-parents=0 HEAD":                      "abc123",
-			"rev-parse --short HEAD":                             "deadbee",
+			"rev-parse --show-toplevel":                         "/home/u/proj",
+			"rev-list --max-parents=0 HEAD":                     "abc123",
+			"rev-parse --short HEAD":                            "deadbee",
 		},
 		err: map[string]error{
 			"symbolic-ref --short -q HEAD": errors.New("exit status 1"),
