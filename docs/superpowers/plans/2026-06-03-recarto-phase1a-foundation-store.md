@@ -16,7 +16,7 @@
 
 | File | Responsibility |
 |------|----------------|
-| `go.mod`, `go.sum` | Module def; `go 1.26.4` + `toolchain go1.26.4`; deps. |
+| `go.mod`, `go.sum` | Module def; `go 1.26.4` (pins/min-requires 1.26.4 and auto-downloads it; see Task 1 note); deps. |
 | `cmd/recarto/main.go` | Entry point; minimal cobra root with `version` + hidden `debug-stress` (expanded into full CLI in Phase 1C). |
 | `internal/version/version.go` | `Version` string + `version_test.go`. |
 | `internal/clock/clock.go` | `Clock` interface, `Real`, `Fake`. |
@@ -45,9 +45,9 @@
 module git.gerwim.nl/gerwim/recarto
 
 go 1.26.4
-
-toolchain go1.26.4
 ```
+
+> **Toolchain note:** Use the `go 1.26.4` directive **alone** — do NOT add a separate `toolchain go1.26.4` line. When the toolchain version equals the `go` directive it is redundant, and Go canonicalizes it away: `go mod tidy` removes it and `go build` then errors `updates to go.mod needed`. The `go 1.26.4` directive already requires ≥1.26.4 and, with the default `GOTOOLCHAIN=auto`, auto-downloads exactly 1.26.4 when the local toolchain is older. Verify with `go version` inside the module — it must print `go1.26.4`. (A separate `toolchain` line is only valid when it is *newer* than the `go` line, e.g. `go 1.26.0` + `toolchain go1.26.4`.)
 
 - [ ] **Step 2: Write the failing test**
 
