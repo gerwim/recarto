@@ -3,6 +3,7 @@ package graph
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -52,9 +53,13 @@ func (s gitSource) Read(path string) ([]byte, error) {
 	return os.ReadFile(filepath.Join(s.root, filepath.FromSlash(path)))
 }
 
-// WorktreeToken returns a cheap fingerprint of root's git state (HEAD + working-
-// tree dirtiness) used to skip reconcile when nothing changed. It returns "" when
-// root is not a git repo (callers then always reconcile).
+// WorktreeToken returns a cheap fingerprint of root's git state used to skip
+// reconcile when nothing changed. It mixes HEAD, `git status --porcelain`, and
+// the mtime+size of every dirty file. Folding in dirty-file mtime/size makes the
+// token exactly as precise as Reconcile's own mtime/size pre-check, so
+// re-editing an already-dirty file (whose porcelain line stays "M <path>") still
+// bumps the token. It returns "" when root is not a git repo (callers then
+// always reconcile).
 func WorktreeToken(root string) string {
 	if _, err := exec.Command("git", "-C", root, "rev-parse", "--git-dir").Output(); err != nil {
 		return "" // not a git repo
@@ -64,6 +69,39 @@ func WorktreeToken(root string) string {
 		head = []byte("no-head") // repo with no commits yet
 	}
 	status, _ := exec.Command("git", "-C", root, "status", "--porcelain").Output()
-	sum := sha256.Sum256(append(head, status...))
-	return hex.EncodeToString(sum[:])
+
+	h := sha256.New()
+	h.Write(head)
+	h.Write(status)
+	// Bounded by the number of dirty files. A stat that fails (deleted, or an
+	// oddly quoted path) is skipped, degrading gracefully to the porcelain-only
+	// token for that file.
+	for _, path := range dirtyPaths(string(status)) {
+		if info, err := os.Stat(filepath.Join(root, filepath.FromSlash(path))); err == nil {
+			fmt.Fprintf(h, "\x00%s\x00%d\x00%d", path, info.ModTime().UnixNano(), info.Size())
+		}
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// dirtyPaths extracts file paths from `git status --porcelain` output. Each line
+// is "XY <path>" (two status columns + a space, so the path starts at index 3);
+// a rename line "R  old -> new" yields the new path. Quoted paths (core.quotePath
+// for special characters) are returned verbatim and may fail to stat, which
+// WorktreeToken tolerates.
+func dirtyPaths(status string) []string {
+	var out []string
+	for _, line := range strings.Split(status, "\n") {
+		if len(line) < 4 {
+			continue
+		}
+		path := strings.TrimSpace(line[3:])
+		if i := strings.Index(path, " -> "); i >= 0 {
+			path = path[i+len(" -> "):]
+		}
+		if path != "" {
+			out = append(out, path)
+		}
+	}
+	return out
 }

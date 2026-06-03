@@ -1,10 +1,12 @@
 package graph
 
 import (
+	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
 	"testing"
+	"time"
 )
 
 func gitInit(t *testing.T, dir string) {
@@ -72,6 +74,41 @@ func TestWorktreeTokenChangesWithCommit(t *testing.T) {
 	tok2 := WorktreeToken(dir)
 	if tok1 == tok2 {
 		t.Error("token must change when working tree is dirtied")
+	}
+}
+
+func TestWorktreeTokenChangesOnReeditOfAlreadyDirtyFile(t *testing.T) {
+	dir := t.TempDir()
+	gitInit(t, dir)
+	writeFile(t, dir, "a.go", "package p\nfunc A(){}")
+	for _, args := range [][]string{{"add", "a.go"}, {"commit", "-m", "init"}} {
+		if out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+
+	// Dirty a.go: `git status --porcelain` now reports "M a.go".
+	writeFile(t, dir, "a.go", "package p\nfunc A(){ B() }")
+	p := filepath.Join(dir, "a.go")
+	old := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(p, old, old); err != nil {
+		t.Fatal(err)
+	}
+	tok1 := WorktreeToken(dir)
+
+	// Re-edit the ALREADY-dirty file with same-length content (B -> C) but a later
+	// mtime, exactly as a real second edit would. The porcelain line stays
+	// "M a.go" and the size is unchanged, so only the dirty file's mtime
+	// distinguishes the two states — the token must still change.
+	writeFile(t, dir, "a.go", "package p\nfunc A(){ C() }")
+	newer := time.Now()
+	if err := os.Chtimes(p, newer, newer); err != nil {
+		t.Fatal(err)
+	}
+	tok2 := WorktreeToken(dir)
+
+	if tok1 == tok2 {
+		t.Error("token must change when an already-dirty file is re-edited (mtime moved)")
 	}
 }
 

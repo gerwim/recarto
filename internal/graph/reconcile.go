@@ -78,12 +78,12 @@ func (e *Engine) Reconcile(ctx context.Context, worktree string, src Source) err
 // reconciles. On a successful reconcile it records the new token. This makes
 // query-time freshness cheap: an unchanged worktree skips the file walk entirely.
 //
-// Known limitation: the git token (HEAD + `git status --porcelain`) does not
-// change when an ALREADY-dirty file is edited again (its porcelain line stays
-// "M <path>"), so a repeated external edit of the same dirty file is not caught
-// here. Agent edits are indexed directly by the PostEdit hook (bypassing this
-// gate), and each new session re-tokens at SessionStart, so the gap is limited to
-// external re-edits of an already-modified file within one session.
+// The git token (see WorktreeToken) folds in the mtime+size of every dirty file,
+// making it exactly as precise as Reconcile's own mtime/size pre-check: even
+// re-editing an ALREADY-dirty file (whose porcelain line stays "M <path>") bumps
+// the token and triggers a reconcile. The only residual gap is a re-edit that
+// leaves both mtime and size byte-for-byte identical, which a real write does not
+// produce.
 func (e *Engine) ReconcileIfStale(ctx context.Context, worktree string, src Source, token string) error {
 	const keyPrefix = "graph_token:"
 	if token != "" {
