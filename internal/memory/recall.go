@@ -129,6 +129,9 @@ func (e *Engine) Recall(ctx context.Context, q RecallQuery) ([]RecallResult, err
 	}
 	_ = e.led.Incr(ctx, "lifetime", "memories_recalled", int64(len(out)))
 	_ = e.led.Incr(ctx, "lifetime", "recall_tokens_injected", int64(used))
+	// Stamp recall usage so decay can measure "epochs since last used"
+	// (Phase 3 compaction). Best-effort — must not fail the recall.
+	_ = e.stampRecalled(ctx, out)
 	return out, nil
 }
 

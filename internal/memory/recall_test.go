@@ -7,6 +7,7 @@ import (
 
 	"git.gerwim.nl/gerwim/recarto/internal/clock"
 	"git.gerwim.nl/gerwim/recarto/internal/ledger"
+	"git.gerwim.nl/gerwim/recarto/internal/store"
 )
 
 func TestRecallStructuralBeatsLexical(t *testing.T) {
@@ -241,5 +242,50 @@ func TestRecallSynonymBridging(t *testing.T) {
 	}
 	if !found {
 		t.Error("query 'db' should recall a 'database' memory via synonym expansion")
+	}
+}
+
+func TestRecallStampsLastUsedEpoch(t *testing.T) {
+	clk := clock.NewFake(time.UnixMilli(12_000_000))
+	e := newTestEngine(t, clk)
+	ctx := context.Background()
+
+	id, _, err := e.Record(ctx, NewMemory{
+		Kind:   KindLearning,
+		Title:  "store wal pragmas",
+		Body:   "open applies wal and busy timeout pragmas on every connection",
+		Refs:   []Ref{{Type: RefFile, Value: "internal/store/store.go"}},
+		Branch: "main",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Pretend we are at epoch 7.
+	if err := e.st.WriteTx(ctx, func(c store.Conn) error {
+		return setMetaInt(ctx, c, metaActivityEpoch, 7)
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := e.Recall(ctx, RecallQuery{
+		Files:       []string{"internal/store/store.go"},
+		Branch:      "main",
+		TokenBudget: 100000,
+	})
+	if err != nil || len(res) == 0 {
+		t.Fatalf("recall returned %d results, err=%v", len(res), err)
+	}
+
+	var epoch, count int64
+	if err := e.st.DB.QueryRowContext(ctx,
+		`SELECT last_used_epoch, recall_count FROM memories WHERE id=?`, id).
+		Scan(&epoch, &count); err != nil {
+		t.Fatal(err)
+	}
+	if epoch != 7 {
+		t.Errorf("last_used_epoch = %d, want 7", epoch)
+	}
+	if count != 1 {
+		t.Errorf("recall_count = %d, want 1", count)
 	}
 }

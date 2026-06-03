@@ -87,3 +87,32 @@ func setMetaStr(ctx context.Context, c store.Conn, key, v string) error {
 func (e *Engine) Epoch(ctx context.Context) (int64, error) {
 	return getMetaInt(ctx, e.st.DB, metaActivityEpoch, 1)
 }
+
+// stampRecalled bumps last_used_epoch to the current activity epoch and
+// increments recall_count for the surfaced rows, in ONE batched UPDATE. It is
+// the decay subsystem's "time since last used" signal. Best-effort: callers
+// ignore the error so a stamping failure never fails an otherwise-good recall.
+// It runs in its own WriteTx, OUTSIDE any enclosing transaction (the store's
+// write mutex is non-reentrant), alongside Recall's existing ledger writes.
+func (e *Engine) stampRecalled(ctx context.Context, results []RecallResult) error {
+	if len(results) == 0 {
+		return nil
+	}
+	epoch, err := e.Epoch(ctx)
+	if err != nil {
+		return err
+	}
+	ph := make([]string, 0, len(results))
+	args := make([]any, 0, len(results)+1)
+	args = append(args, epoch)
+	for _, r := range results {
+		ph = append(ph, "?")
+		args = append(args, r.Record.ID)
+	}
+	return e.st.WriteTx(ctx, func(c store.Conn) error {
+		_, err := c.ExecContext(ctx,
+			`UPDATE memories SET last_used_epoch = ?, recall_count = recall_count + 1
+			  WHERE id IN (`+strings.Join(ph, ",")+`)`, args...)
+		return err
+	})
+}
