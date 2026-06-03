@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func writeFile(t *testing.T, dir, rel, content string) {
@@ -47,5 +48,38 @@ func TestReconcileIndexesChangedAndRemovesDeleted(t *testing.T) {
 	}
 	if got := countRows(t, e, "nodes", wt); got != 2 { // A, C in a.go
 		t.Errorf("nodes = %d, want 2", got)
+	}
+}
+
+// TestReconcileSkipsUnchangedContentOnMtimeChange proves the content-hash
+// fast-path: when only mtime changes but content is identical, the file is NOT
+// re-indexed (its node ids stay stable, since IndexFile deletes+reinserts).
+func TestReconcileSkipsUnchangedContentOnMtimeChange(t *testing.T) {
+	e := newTestEngine(t)
+	ctx := context.Background()
+	wt := t.TempDir()
+	writeFile(t, wt, "a.go", "package p\nfunc A(){}")
+	src := FSSource{Root: wt}
+	if err := e.Reconcile(ctx, wt, src); err != nil {
+		t.Fatal(err)
+	}
+	var id1 string
+	if err := e.st.DB.QueryRow(`SELECT id FROM nodes WHERE name='A'`).Scan(&id1); err != nil {
+		t.Fatal(err)
+	}
+	// Bump only mtime (content unchanged) -> reconcile must skip re-indexing.
+	future := time.Now().Add(time.Hour)
+	if err := os.Chtimes(filepath.Join(wt, "a.go"), future, future); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.Reconcile(ctx, wt, src); err != nil {
+		t.Fatal(err)
+	}
+	var id2 string
+	if err := e.st.DB.QueryRow(`SELECT id FROM nodes WHERE name='A'`).Scan(&id2); err != nil {
+		t.Fatal(err)
+	}
+	if id1 != id2 {
+		t.Errorf("node re-indexed on mtime-only change (id %s -> %s); hash fast-path failed", id1, id2)
 	}
 }
