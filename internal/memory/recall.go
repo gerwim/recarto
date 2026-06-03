@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"git.gerwim.nl/gerwim/recarto/internal/ledger"
 )
 
 // Recall scoring weights (golden-tested defaults). Structural overlap is the
@@ -106,8 +108,51 @@ func (e *Engine) Recall(ctx context.Context, q RecallQuery) ([]RecallResult, err
 		scored = append(scored, RecallResult{Record: r, Score: score, Signals: sig})
 	}
 
-	sort.Slice(scored, func(i, j int) bool { return scored[i].Score > scored[j].Score })
-	return scored, nil
+	if len(scored) == 0 {
+		_ = e.led.Incr(ctx, "lifetime", "recall_misses", 1)
+		return nil, nil
+	}
+	budget := q.TokenBudget
+	if budget <= 0 {
+		budget = defaultTokenBudget
+	}
+	return e.selectWithinBudget(ctx, scored, budget), nil
+}
+
+// selectWithinBudget always includes pinned do_not_repeat (a dedicated, budget-
+// exempt slice), then greedily adds the highest-scoring remaining records until
+// the token budget is exhausted. It records the recall counters.
+func (e *Engine) selectWithinBudget(ctx context.Context, scored []RecallResult, budget int) []RecallResult {
+	var pinned, rest []RecallResult
+	for _, s := range scored {
+		if s.Record.Kind == KindDoNotRepeat && s.Record.Pinned {
+			pinned = append(pinned, s)
+		} else {
+			rest = append(rest, s)
+		}
+	}
+	sort.Slice(pinned, func(i, j int) bool { return pinned[i].Score > pinned[j].Score })
+	sort.Slice(rest, func(i, j int) bool { return rest[i].Score > rest[j].Score })
+
+	tokensOf := func(r *Record) int { return ledger.EstimateTokens(r.Title + " " + r.Body) }
+	var out []RecallResult
+	used := 0
+	for _, s := range pinned { // pins are always included, budget-exempt
+		out = append(out, s)
+		used += tokensOf(s.Record)
+	}
+	for _, s := range rest {
+		t := tokensOf(s.Record)
+		if used+t > budget {
+			continue
+		}
+		out = append(out, s)
+		used += t
+	}
+
+	_ = e.led.Incr(ctx, "lifetime", "memories_recalled", int64(len(out)))
+	_ = e.led.Incr(ctx, "lifetime", "recall_tokens_injected", int64(used))
+	return out
 }
 
 // lexicalQueryText assembles the BM25 query from the task hint, file basenames,

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"git.gerwim.nl/gerwim/recarto/internal/clock"
+	"git.gerwim.nl/gerwim/recarto/internal/ledger"
 )
 
 func TestRecallStructuralBeatsLexical(t *testing.T) {
@@ -78,5 +79,75 @@ func TestRecallDropsSuperseded(t *testing.T) {
 		if r.Record.ID == oldID {
 			t.Error("superseded record should not be recalled")
 		}
+	}
+}
+
+func TestRecallBudgetCapsAndPinsFirst(t *testing.T) {
+	e := newTestEngine(t, clock.NewFake(time.UnixMilli(20_000_000)))
+	ctx := context.Background()
+
+	// One pinned do_not_repeat (always included, budget-exempt).
+	dnrID, _, _ := e.Record(ctx, NewMemory{Kind: KindDoNotRepeat,
+		Body: "never add a redundant toolchain directive to go.mod it breaks builds",
+		Refs: []Ref{{Type: RefFile, Value: "go.mod"}}})
+
+	// Five DISTINCT same-file learnings (distinct bodies so dedup does not
+	// collapse them) — each ~20 tokens, so a tiny budget must exclude several.
+	bodies := []string{
+		"alpha concurrency wal busy timeout immediate writer pool serialized mutex per connection",
+		"bravo migration guarded user_version pragma idempotent first run lock serializes processes",
+		"charlie recall structural lexical recency reinforcement branch budget greedy selection order",
+		"delta synonym expansion identifier split camel snake kebab dotted token search text build",
+		"echo minhash lsh band signature jaccard shingle near duplicate reinforce threshold confirm",
+	}
+	for _, b := range bodies {
+		if _, _, err := e.Record(ctx, NewMemory{Kind: KindLearning,
+			Body: b,
+			Refs: []Ref{{Type: RefFile, Value: "go.mod"}}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	res, err := e.Recall(ctx, RecallQuery{
+		Files: []string{"go.mod"}, TokenBudget: 80})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Pin present despite the tiny budget; total recalled < 6 (some excluded).
+	var sawPin bool
+	for _, r := range res {
+		if r.Record.ID == dnrID {
+			sawPin = true
+		}
+	}
+	if !sawPin {
+		t.Error("pinned do_not_repeat must always be included")
+	}
+	if len(res) == 6 {
+		t.Error("budget should have excluded some non-pinned learnings")
+	}
+
+	// Counters were written.
+	recalled, _ := ledger.New(e.st).Get(ctx, "lifetime", "memories_recalled")
+	if recalled <= 0 {
+		t.Error("memories_recalled counter not incremented")
+	}
+}
+
+func TestRecallMissIncrementsCounter(t *testing.T) {
+	e := newTestEngine(t, clock.NewFake(time.UnixMilli(21_000_000)))
+	ctx := context.Background()
+	// Empty store + a query that matches nothing.
+	res, err := e.Recall(ctx, RecallQuery{TaskHint: "nonexistent zzz", Branch: "main"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res) != 0 {
+		t.Fatalf("expected no results, got %d", len(res))
+	}
+	misses, _ := ledger.New(e.st).Get(ctx, "lifetime", "recall_misses")
+	if misses != 1 {
+		t.Errorf("recall_misses = %d, want 1", misses)
 	}
 }
