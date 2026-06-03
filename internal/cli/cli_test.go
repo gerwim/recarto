@@ -3,6 +3,8 @@ package cli
 import (
 	"bytes"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -21,5 +23,30 @@ func TestRunNoArgsShowsUsage(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "recarto <command>") {
 		t.Errorf("expected usage banner, got: %q", buf.String())
+	}
+}
+
+func TestRunHelpListsNewCommands(t *testing.T) {
+	var buf bytes.Buffer
+	if err := Run([]string{"help"}, &buf); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"init", "serve", "hook"} {
+		if !strings.Contains(buf.String(), want) {
+			t.Errorf("usage missing %q:\n%s", want, buf.String())
+		}
+	}
+}
+
+func TestRunInitNeedsNoStore(t *testing.T) {
+	// init must work in a non-git temp dir and must not require a resolvable repo.
+	dir := t.TempDir()
+	t.Setenv("RECARTO_CACHE_DIR", t.TempDir())
+	t.Chdir(dir) // Go 1.24+: scopes os.Getwd to dir for this test
+	if err := Run([]string{"init"}, io.Discard); err != nil {
+		t.Fatalf("init failed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".mcp.json")); err != nil {
+		t.Errorf("init did not write .mcp.json: %v", err)
 	}
 }
