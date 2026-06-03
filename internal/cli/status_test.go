@@ -34,3 +34,17 @@ func TestStatusReportsIdentityCountsAndLedger(t *testing.T) {
 		t.Errorf("memories_recorded counter not > 0 in:\n%s", out)
 	}
 }
+
+func TestStatusShowsCompactionState(t *testing.T) {
+	a := newTestApp(t, "main")
+	ctx := context.Background()
+	var buf bytes.Buffer
+	if err := Status(ctx, a, &buf); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"epoch", "archived", "live tokens", "compactions"} {
+		if !strings.Contains(buf.String(), want) {
+			t.Errorf("status missing %q:\n%s", want, buf.String())
+		}
+	}
+}
