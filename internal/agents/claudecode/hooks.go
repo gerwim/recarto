@@ -91,7 +91,7 @@ func PostRead(ctx context.Context, a *app.App, in io.Reader, out io.Writer) erro
 		return nil // first read this session: nothing to warn about
 	}
 	_ = a.Ledger.Incr(ctx, "lifetime", "repeated_reads_blocked", 1)
-	msg := fmt.Sprintf("You have already read %s in this session (%d times, ~%d tokens). "+
+	msg := fmt.Sprintf("You have already read %s in this session (%d times, ~%d tokens each). "+
 		"Rely on the earlier read instead of reading it again.", file, n, tokens)
 	return writeHookContext(out, "PostToolUse", msg)
 }
