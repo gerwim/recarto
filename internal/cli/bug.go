@@ -34,6 +34,7 @@ func bugAdd(ctx context.Context, a *app.App, w io.Writer, args []string) error {
 	cause := fs.String("cause", "", "root cause")
 	fix := fs.String("fix", "", "what fixed it")
 	file := fs.String("file", "", "file that was fixed")
+	symbols := fs.String("symbols", "", "comma-separated related symbol names")
 	tags := fs.String("tags", "", "comma-separated tags")
 	if helped, err := parseFlags(fs, args); err != nil || helped {
 		return err
@@ -56,7 +57,10 @@ func bugAdd(ctx context.Context, a *app.App, w io.Writer, args []string) error {
 	// not structural RefTag entries, so they don't skew structural scoring.
 	var refs []memory.Ref
 	if *file != "" {
-		refs = append(refs, memory.Ref{Type: memory.RefFile, Value: *file})
+		refs = append(refs, memory.Ref{Type: memory.RefFile, Value: memory.RelFileRef(a.Git.Worktree, *file)})
+	}
+	for _, s := range splitCSV(*symbols) {
+		refs = append(refs, memory.Ref{Type: memory.RefSymbol, Value: s})
 	}
 	// The body carries error + fix so the lexical index can match either.
 	body := *msg

@@ -42,3 +42,23 @@ func TestBugRequiresSubcommand(t *testing.T) {
 		t.Error("expected error when no subcommand given")
 	}
 }
+
+func TestBugAddAcceptsSymbols(t *testing.T) {
+	a := newTestApp(t, "main")
+	ctx := context.Background()
+	if err := Bug(ctx, a, &bytes.Buffer{}, []string{"add",
+		"--error", "panic in Tokenize",
+		"--fix", "guard the slice",
+		"--symbols", "Tokenize,Lexer",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// The bug is now retrievable by one of its symbol refs.
+	bugs, err := a.Engine.BugsForCode(ctx, "main", nil, []string{"Tokenize"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bugs) != 1 || bugs[0].Title != "panic in Tokenize" {
+		t.Fatalf("want 1 bug by symbol Tokenize, got %d: %+v", len(bugs), bugs)
+	}
+}
