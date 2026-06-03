@@ -1,0 +1,121 @@
+package cli
+
+import (
+	"context"
+	"flag"
+	"fmt"
+	"io"
+	"strings"
+
+	"git.gerwim.nl/gerwim/recarto/internal/app"
+	"git.gerwim.nl/gerwim/recarto/internal/memory"
+)
+
+// Bug dispatches `bug add` and `bug search`.
+func Bug(ctx context.Context, a *app.App, w io.Writer, args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("bug: subcommand required (add|search)")
+	}
+	switch args[0] {
+	case "add":
+		return bugAdd(ctx, a, w, args[1:])
+	case "search":
+		return bugSearch(ctx, a, w, args[1:])
+	default:
+		return fmt.Errorf("bug: unknown subcommand %q (add|search)", args[0])
+	}
+}
+
+// bugAdd records a kind=bug memory with structured OpenWolf-style fields in Extra.
+func bugAdd(ctx context.Context, a *app.App, w io.Writer, args []string) error {
+	fs := flag.NewFlagSet("bug add", flag.ContinueOnError)
+	fs.SetOutput(w)
+	msg := fs.String("error", "", "error message or user complaint (required)")
+	cause := fs.String("cause", "", "root cause")
+	fix := fs.String("fix", "", "what fixed it")
+	file := fs.String("file", "", "file that was fixed")
+	tags := fs.String("tags", "", "comma-separated tags")
+	if helped, err := parseFlags(fs, args); err != nil || helped {
+		return err
+	}
+	if *msg == "" {
+		return fmt.Errorf("bug add: --error is required")
+	}
+
+	extra := map[string]any{
+		"error_message": *msg,
+		"root_cause":    *cause,
+		"fix":           *fix,
+		"file":          *file,
+	}
+	if tg := splitCSV(*tags); len(tg) > 0 {
+		extra["tags"] = tg
+	}
+	// Only --file becomes a structural ref (the recall dimension that resurfaces a
+	// bug when that file is touched). --tags are descriptive metadata kept in Extra,
+	// not structural RefTag entries, so they don't skew structural scoring.
+	var refs []memory.Ref
+	if *file != "" {
+		refs = append(refs, memory.Ref{Type: memory.RefFile, Value: *file})
+	}
+	// The body carries error + fix so the lexical index can match either.
+	body := *msg
+	if *fix != "" {
+		body = *msg + " — fix: " + *fix
+	}
+
+	id, reinforced, err := a.Engine.Record(ctx, memory.NewMemory{
+		Kind:     memory.KindBug,
+		Title:    *msg,
+		Body:     body,
+		Refs:     refs,
+		Branch:   a.Git.Branch,
+		Worktree: a.Git.Worktree,
+		Author:   "cli",
+		Source:   "cli",
+		Extra:    extra,
+	})
+	if err != nil {
+		return err
+	}
+	verb := "recorded"
+	if reinforced {
+		verb = "reinforced"
+	}
+	fmt.Fprintf(w, "%s bug %s\n", verb, id)
+	return nil
+}
+
+// bugSearch is OpenWolf "bug search" parity: a recall restricted to kind=bug.
+func bugSearch(ctx context.Context, a *app.App, w io.Writer, args []string) error {
+	fs := flag.NewFlagSet("bug search", flag.ContinueOnError)
+	fs.SetOutput(w)
+	if helped, err := parseFlags(fs, args); err != nil || helped {
+		return err
+	}
+	results, err := a.Engine.Recall(ctx, memory.RecallQuery{
+		TaskHint: strings.Join(fs.Args(), " "),
+		Kind:     memory.KindBug,
+		Branch:   a.Git.Branch,
+	})
+	if err != nil {
+		return err
+	}
+	if len(results) == 0 {
+		fmt.Fprintln(w, "(no matching bugs)")
+		return nil
+	}
+	for _, r := range results {
+		title := r.Record.Title
+		if title == "" {
+			title = "(untitled)"
+		}
+		// Include the kind: recall always includes pinned do_not_repeat memories
+		// (budget-exempt), so a result here isn't guaranteed to be a bug.
+		fmt.Fprintf(w, "• [%s] %s  (score %.3f)\n", r.Record.Kind, title, r.Score)
+		if fix, ok := r.Record.Extra["fix"].(string); ok && fix != "" {
+			fmt.Fprintf(w, "    fix: %s\n", fix)
+		}
+	}
+	return nil
+}
