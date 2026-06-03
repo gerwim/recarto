@@ -175,11 +175,14 @@ func marshalExtra(m map[string]any) (string, error) {
 // errInvalidKind is returned by Record for an unknown kind.
 var errInvalidKind = errors.New("memory: invalid kind")
 
-// dedupThreshold is the Jaccard similarity at/above which a new memory
-// reinforces an existing same-kind record instead of inserting a new row.
-// With 3-word shingles, bodies differing by ~1 word score ~0.8; bodies with
-// no shared context score 0.0, so 0.75 cleanly separates near-dups from distinct.
-const dedupThreshold = 0.75
+// dedupThreshold is the Jaccard similarity (over 2-word shingles) at/above which
+// a new memory reinforces an existing same-kind record instead of inserting a
+// new row. 0.55 sits mid-valley between the measured distinct-fact ceiling
+// (~0.29) and the realistic re-statement floor (~0.60), giving ~0.25 margin each
+// side. Research-backed (2-shingle Jaccard on short identifier-heavy bodies);
+// lexical dedup deliberately does NOT catch full paraphrase (that would need the
+// embeddings path rejected for v1).
+const dedupThreshold = 0.55
 
 // Record inserts nm, or reinforces a near-duplicate same-kind active memory.
 // It returns the affected row id and whether it was a reinforcement.

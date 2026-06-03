@@ -7,10 +7,20 @@ import (
 )
 
 const (
-	shingleSize = 3                    // words per shingle
-	numHashes   = 128                  // MinHash signature length
-	lshBands    = 16                   // LSH band count
-	lshRows     = numHashes / lshBands // rows per band (8)
+	// shingleSize = 2: research-backed for short, identifier-heavy memory bodies.
+	// 3-word shingles are too brittle here (a single reworded word on a ~10-word
+	// body drops Jaccard to ~0.80, and heavy rewording falls BELOW topically-
+	// related distinct facts — no threshold separates them). Bigrams keep enough
+	// word-order signal to separate realistic re-statements (>=0.60) from distinct
+	// same-kind facts (<=0.29). See dedupThreshold in engine.go.
+	shingleSize = 2 // words per shingle
+	numHashes   = 128
+	// lshBands = 32 (rows = 4): the LSH S-curve knee ((1/b)^(1/r)) must sit at or
+	// below dedupThreshold so true near-dups actually collide on a band at
+	// candidate-generation time. 16x8 has a knee ~0.71 → only ~24% recall at
+	// Jaccard 0.60; 32x4 has a knee ~0.42 → ~99% recall at 0.60.
+	lshBands = 32
+	lshRows  = numHashes / lshBands // rows per band (4)
 )
 
 // shingleSet returns the set of word-level k-shingles of text. Texts with fewer
