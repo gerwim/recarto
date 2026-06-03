@@ -5,11 +5,25 @@
 package cli
 
 import (
+	"errors"
+	"flag"
 	"strings"
 
 	"git.gerwim.nl/gerwim/recarto/internal/app"
 	"git.gerwim.nl/gerwim/recarto/internal/memory"
 )
+
+// parseFlags parses fs and reports whether the command should exit cleanly. It
+// treats -h/--help specially: flag has already printed usage to the FlagSet's
+// output and returns flag.ErrHelp, which is not a real error — the command should
+// return nil without doing further work. Genuine parse errors are returned as-is.
+func parseFlags(fs *flag.FlagSet, args []string) (helped bool, err error) {
+	err = fs.Parse(args)
+	if errors.Is(err, flag.ErrHelp) {
+		return true, nil
+	}
+	return false, err
+}
 
 // splitCSV splits a comma-separated flag value into trimmed, non-empty parts.
 func splitCSV(s string) []string {
