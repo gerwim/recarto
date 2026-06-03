@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -242,6 +243,120 @@ func TestRecallSynonymBridging(t *testing.T) {
 	}
 	if !found {
 		t.Error("query 'db' should recall a 'database' memory via synonym expansion")
+	}
+}
+
+func TestBaselineRecallSurfacesCerebrumKinds(t *testing.T) {
+	clk := clock.NewFake(time.UnixMilli(10_000_000))
+	e := newTestEngine(t, clk)
+	ctx := context.Background()
+	for _, nm := range []NewMemory{
+		{Kind: KindPreference, Title: "pref", Body: "use tabs not spaces here", Branch: "main", Source: "cli"},
+		{Kind: KindLearning, Title: "learn", Body: "store lives outside the worktree", Branch: "main", Source: "cli"},
+		{Kind: KindDecision, Title: "decide", Body: "chose sqlite over flat files", Branch: "main", Source: "cli"},
+		{Kind: KindAction, Title: "act", Body: "ran the formatter once today", Branch: "main", Source: "cli"},
+	} {
+		if _, _, err := e.Record(ctx, nm); err != nil {
+			t.Fatal(err)
+		}
+	}
+	res, err := e.Recall(ctx, RecallQuery{Branch: "main", Baseline: true, TokenBudget: 100000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[Kind]bool{}
+	for _, r := range res {
+		got[r.Record.Kind] = true
+	}
+	for _, k := range []Kind{KindPreference, KindLearning, KindDecision} {
+		if !got[k] {
+			t.Errorf("baseline recall missing kind %s", k)
+		}
+	}
+	if got[KindAction] {
+		t.Errorf("baseline recall must exclude action (ephemeral)")
+	}
+}
+
+func TestBaselineRecallExcludesBug(t *testing.T) {
+	clk := clock.NewFake(time.UnixMilli(10_000_000))
+	e := newTestEngine(t, clk)
+	ctx := context.Background()
+	if _, _, err := e.Record(ctx, NewMemory{Kind: KindLearning, Title: "keep", Body: "a durable learning fact", Branch: "main", Source: "cli"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := e.Record(ctx, NewMemory{Kind: KindBug, Title: "boom", Body: "npe in the request handler", Branch: "main", Source: "cli"}); err != nil {
+		t.Fatal(err)
+	}
+	res, err := e.Recall(ctx, RecallQuery{Branch: "main", Baseline: true, TokenBudget: 100000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range res {
+		if r.Record.Kind == KindBug {
+			t.Errorf("baseline recall must exclude bug, got %q", r.Record.Title)
+		}
+	}
+}
+
+func TestBaselineRecallBranchVisible(t *testing.T) {
+	clk := clock.NewFake(time.UnixMilli(10_000_000))
+	e := newTestEngine(t, clk)
+	ctx := context.Background()
+	if _, _, err := e.Record(ctx, NewMemory{Kind: KindLearning, Title: "global", Body: "alpha unique global one", Source: "cli"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := e.Record(ctx, NewMemory{Kind: KindLearning, Title: "onbranch", Body: "beta unique feature two", Branch: "feature", Source: "cli"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := e.Record(ctx, NewMemory{Kind: KindLearning, Title: "otherbranch", Body: "gamma unique main three", Branch: "main", Source: "cli"}); err != nil {
+		t.Fatal(err)
+	}
+	res, err := e.Recall(ctx, RecallQuery{Branch: "feature", Baseline: true, TokenBudget: 100000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	titles := map[string]bool{}
+	for _, r := range res {
+		titles[r.Record.Title] = true
+	}
+	if !titles["global"] || !titles["onbranch"] {
+		t.Errorf("want global+onbranch visible on feature branch; got %v", titles)
+	}
+	if titles["otherbranch"] {
+		t.Errorf("main-branch memory leaked onto feature branch")
+	}
+}
+
+func TestBaselineRecallRespectsBudgetAndPinsFirst(t *testing.T) {
+	clk := clock.NewFake(time.UnixMilli(10_000_000))
+	e := newTestEngine(t, clk)
+	ctx := context.Background()
+	pinID, _, err := e.Record(ctx, NewMemory{Kind: KindDoNotRepeat, Title: "never", Body: "never hardcode secrets in source", Branch: "main", Source: "cli"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 5; i++ {
+		body := fmt.Sprintf("decision number %d with a fairly long body to consume token budget quickly", i)
+		if _, _, err := e.Record(ctx, NewMemory{Kind: KindDecision, Title: fmt.Sprintf("d%d", i), Body: body, Branch: "main", Source: "cli"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	res, err := e.Recall(ctx, RecallQuery{Branch: "main", Baseline: true, TokenBudget: 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hasPin := false
+	for _, r := range res {
+		if r.Record.ID == pinID {
+			hasPin = true
+		}
+	}
+	if !hasPin {
+		t.Errorf("pinned do_not_repeat must be included regardless of budget")
+	}
+	if len(res) > 3 {
+		t.Errorf("budget not enforced: got %d results", len(res))
 	}
 }
 

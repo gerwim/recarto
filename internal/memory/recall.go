@@ -31,6 +31,7 @@ type RecallQuery struct {
 	Symbols     []string
 	Kind        Kind   // "" → any kind
 	Branch      string // current branch, for branch-affinity boost
+	Baseline    bool   // session-start: also seed candidates with recent cerebrum memories (no query needed)
 	Limit       int    // max lexical candidates (0 → default)
 	TokenBudget int    // 0 → default
 }
@@ -79,6 +80,16 @@ func (e *Engine) Recall(ctx context.Context, q RecallQuery) ([]RecallResult, err
 	}
 	for _, id := range pinned {
 		idset[id] = true
+	}
+
+	if q.Baseline {
+		base, err := e.baselineIDs(ctx, q.Branch, limit)
+		if err != nil {
+			return nil, err
+		}
+		for _, id := range base {
+			idset[id] = true
+		}
 	}
 
 	recs, err := e.loadByIDs(ctx, idset)
@@ -235,6 +246,34 @@ func (e *Engine) pinnedIDs(ctx context.Context, branch string) ([]string, error)
 		`SELECT id FROM memories
 		  WHERE pinned=1 AND status='active' AND kind='do_not_repeat'
 		    AND (branch IS NULL OR branch=?)`, branch)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
+// baselineIDs returns active, branch-visible "cerebrum" memories — preference,
+// learning, decision, and (unpinned) do_not_repeat — most-recently-updated first,
+// capped at limit. It seeds an empty-query session-start recall so durable
+// knowledge surfaces without a task hint. Ephemeral kinds (action) and bugs are
+// intentionally excluded: bugs surface just-in-time on code contact instead.
+func (e *Engine) baselineIDs(ctx context.Context, branch string, limit int) ([]string, error) {
+	rows, err := e.st.DB.QueryContext(ctx,
+		`SELECT id FROM memories
+		  WHERE status='active'
+		    AND kind IN ('preference','learning','decision','do_not_repeat')
+		    AND (branch IS NULL OR branch=?)
+		  ORDER BY updated_at DESC
+		  LIMIT ?`, branch, limit)
 	if err != nil {
 		return nil, err
 	}
