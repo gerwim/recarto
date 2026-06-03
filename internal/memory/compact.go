@@ -120,6 +120,65 @@ func relevance(k Kind, ageEpochs float64, reinforcement int, confidence float64)
 	return decay * (1 + math.Log1p(float64(reinforcement))) * confidence
 }
 
+// idsWithStatus returns the ids of rows in the given status (read on the pooled DB).
+func (e *Engine) idsWithStatus(ctx context.Context, status string) ([]string, error) {
+	rows, err := e.st.DB.QueryContext(ctx, `SELECT id FROM memories WHERE status=?`, status)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
+// deleteMemoryRows removes the lexical index entries for ids then deletes the
+// memory rows (CASCADE clears memory_refs + memory_minhash). Runs on the
+// caller's transaction connection.
+func (e *Engine) deleteMemoryRows(ctx context.Context, c store.Conn, ids []string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	for _, id := range ids {
+		if err := e.lex.Delete(ctx, c, id); err != nil {
+			return err
+		}
+	}
+	ph := make([]string, len(ids))
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		ph[i] = "?"
+		args[i] = id
+	}
+	_, err := c.ExecContext(ctx,
+		`DELETE FROM memories WHERE id IN (`+strings.Join(ph, ",")+`)`, args...)
+	return err
+}
+
+// gcSuperseded hard-deletes all superseded rows. Returns the count removed (or,
+// for dryRun, the count that would be removed).
+func (e *Engine) gcSuperseded(ctx context.Context, dryRun bool) (int, error) {
+	ids, err := e.idsWithStatus(ctx, "superseded")
+	if err != nil {
+		return 0, err
+	}
+	if dryRun || len(ids) == 0 {
+		return len(ids), nil
+	}
+	if err := e.st.WriteTx(ctx, func(c store.Conn) error {
+		return e.deleteMemoryRows(ctx, c, ids)
+	}); err != nil {
+		return 0, err
+	}
+	return len(ids), nil
+}
+
 // stampRecalled bumps last_used_epoch to the current activity epoch and
 // increments recall_count for the surfaced rows, in ONE batched UPDATE. It is
 // the decay subsystem's "time since last used" signal. Best-effort: callers
