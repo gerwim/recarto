@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"math"
 	"strconv"
 	"strings"
 
@@ -86,6 +87,37 @@ func setMetaStr(ctx context.Context, c store.Conn, key, v string) error {
 // "staleness" is measured in engagement rather than wall-clock time.
 func (e *Engine) Epoch(ctx context.Context) (int64, error) {
 	return getMetaInt(ctx, e.st.DB, metaActivityEpoch, 1)
+}
+
+// evictable reports whether a kind may be archived by decay. do_not_repeat is
+// pinned; decision and bug carry durable rationale/fix history and are exempt
+// (they can still be deduped). Only action/preference/learning decay.
+func evictable(k Kind) bool {
+	switch k {
+	case KindAction, KindPreference, KindLearning:
+		return true
+	}
+	return false
+}
+
+// halfLifeEpochs is the decay half-life (in activity epochs) for a kind.
+func halfLifeEpochs(k Kind) float64 {
+	if k == KindAction {
+		return halfLifeActionEpochs
+	}
+	return halfLifeStdEpochs // preference / learning
+}
+
+// relevance scores an eviction candidate; lower = more evictable. Decay is
+// exponential in epochs-since-last-used, boosted by reinforcement and scaled by
+// confidence. It only RANKS what to evict when over budget — it never by itself
+// triggers eviction.
+func relevance(k Kind, ageEpochs float64, reinforcement int, confidence float64) float64 {
+	if ageEpochs < 0 {
+		ageEpochs = 0
+	}
+	decay := math.Exp(-ageEpochs / halfLifeEpochs(k))
+	return decay * (1 + math.Log1p(float64(reinforcement))) * confidence
 }
 
 // stampRecalled bumps last_used_epoch to the current activity epoch and
