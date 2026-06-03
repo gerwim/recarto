@@ -70,3 +70,35 @@ func Run() {
 		}
 	}
 }
+
+func TestParseCSharp(t *testing.T) {
+	r, err := NewRegistry()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	src := []byte(`namespace App {
+  class Service {
+    public void Run() { Helper.Do(); }
+  }
+}`)
+	res, err := r.ParseFile("csharp", "Service.cs", src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(names(res.Symbols, "class"), "Service") {
+		t.Errorf("missing class Service; classes=%v", names(res.Symbols, "class"))
+	}
+	if !slices.Contains(names(res.Symbols, "method"), "Run") {
+		t.Errorf("missing method Run; methods=%v", names(res.Symbols, "method"))
+	}
+	var calls []string
+	for _, e := range res.Edges {
+		if e.Kind == "calls" {
+			calls = append(calls, e.DstName)
+		}
+	}
+	if !slices.Contains(calls, "Do") {
+		t.Errorf("calls = %v, want Do", calls)
+	}
+}
