@@ -48,7 +48,7 @@ func SessionStart(ctx context.Context, a *app.App, in io.Reader, out io.Writer) 
 	_ = a.Ledger.Incr(ctx, "lifetime", "sessions", 1)
 
 	// Warm the code graph for this worktree (best-effort, non-blocking).
-	_ = a.Graph.Reconcile(ctx, a.Git.Worktree, graph.FSSource{Root: a.Git.Worktree})
+	_ = a.Graph.ReconcileIfStale(ctx, a.Git.Worktree, graph.NewSource(a.Git.Worktree), graph.WorktreeToken(a.Git.Worktree))
 
 	results, err := a.Engine.Recall(ctx, memory.RecallQuery{
 		Branch:      a.Git.Branch,

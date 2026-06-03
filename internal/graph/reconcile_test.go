@@ -51,6 +51,46 @@ func TestReconcileIndexesChangedAndRemovesDeleted(t *testing.T) {
 	}
 }
 
+func TestReconcileIfStaleSkipsWhenTokenUnchanged(t *testing.T) {
+	e := newTestEngine(t)
+	ctx := context.Background()
+	src := &mutMemSource{files: map[string]string{"a.go": "package p\nfunc A(){}"}}
+	if err := e.ReconcileIfStale(ctx, "/wt", src, "tok-1"); err != nil {
+		t.Fatal(err)
+	}
+	if got := countRows(t, e, "nodes", "/wt"); got != 1 {
+		t.Fatalf("nodes = %d, want 1", got)
+	}
+	// Add a symbol but reuse the SAME token -> must skip (B not indexed).
+	src.files["a.go"] = "package p\nfunc A(){}\nfunc B(){}"
+	if err := e.ReconcileIfStale(ctx, "/wt", src, "tok-1"); err != nil {
+		t.Fatal(err)
+	}
+	if got := countRows(t, e, "nodes", "/wt"); got != 1 {
+		t.Errorf("nodes = %d, want 1 (stale-gate should have skipped)", got)
+	}
+	// New token -> reconciles, picks up B.
+	if err := e.ReconcileIfStale(ctx, "/wt", src, "tok-2"); err != nil {
+		t.Fatal(err)
+	}
+	if got := countRows(t, e, "nodes", "/wt"); got != 2 {
+		t.Errorf("nodes = %d, want 2 after token change", got)
+	}
+}
+
+// mutMemSource is a mutable in-memory Source (its files map can change between
+// reconciles to simulate edits).
+type mutMemSource struct{ files map[string]string }
+
+func (m *mutMemSource) List() ([]FileEntry, error) {
+	var out []FileEntry
+	for p, c := range m.files {
+		out = append(out, FileEntry{Path: p, Mtime: int64(len(c)), Size: int64(len(c))})
+	}
+	return out, nil
+}
+func (m *mutMemSource) Read(p string) ([]byte, error) { return []byte(m.files[p]), nil }
+
 // TestReconcileSkipsUnchangedContentOnMtimeChange proves the content-hash
 // fast-path: when only mtime changes but content is identical, the file is NOT
 // re-indexed (its node ids stay stable, since IndexFile deletes+reinserts).

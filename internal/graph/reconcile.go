@@ -2,6 +2,8 @@ package graph
 
 import (
 	"context"
+
+	"git.gerwim.nl/gerwim/recarto/internal/store"
 )
 
 // Reconcile makes the worktree's graph match src: it (re)indexes new and changed
@@ -69,4 +71,33 @@ func (e *Engine) Reconcile(ctx context.Context, worktree string, src Source) err
 		}
 	}
 	return e.Resolve(ctx, worktree)
+}
+
+// ReconcileIfStale reconciles only when the worktree's git token differs from the
+// token stored at the last reconcile. An empty token (non-git worktree) always
+// reconciles. On a successful reconcile it records the new token. This makes
+// query-time freshness cheap: an unchanged worktree skips the file walk entirely.
+func (e *Engine) ReconcileIfStale(ctx context.Context, worktree string, src Source, token string) error {
+	const keyPrefix = "graph_token:"
+	if token != "" {
+		var stored string
+		_ = e.st.DB.QueryRowContext(ctx,
+			`SELECT value FROM meta WHERE key=?`, keyPrefix+worktree).Scan(&stored)
+		if stored == token {
+			return nil
+		}
+	}
+	if err := e.Reconcile(ctx, worktree, src); err != nil {
+		return err
+	}
+	if token != "" {
+		return e.st.WriteTx(ctx, func(c store.Conn) error {
+			_, err := c.ExecContext(ctx,
+				`INSERT INTO meta(key, value) VALUES (?, ?)
+				 ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+				keyPrefix+worktree, token)
+			return err
+		})
+	}
+	return nil
 }

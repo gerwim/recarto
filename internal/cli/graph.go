@@ -18,7 +18,7 @@ func Graph(ctx context.Context, a *app.App, w io.Writer, args []string) error {
 	wt := a.Git.Worktree
 	// Lazy reconcile so query results reflect the current checkout (spec §11).
 	// Best-effort: a reconcile failure must not fail the query.
-	_ = a.Graph.Reconcile(ctx, wt, graph.FSSource{Root: wt})
+	_ = a.Graph.ReconcileIfStale(ctx, wt, graph.NewSource(wt), graph.WorktreeToken(wt))
 	sub, rest := args[0], args[1:]
 	switch sub {
 	case "search":

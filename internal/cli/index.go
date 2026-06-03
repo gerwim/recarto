@@ -12,7 +12,7 @@ import (
 // Index reconciles the code graph for the current worktree and prints a summary.
 func Index(ctx context.Context, a *app.App, w io.Writer, _ []string) error {
 	wt := a.Git.Worktree
-	if err := a.Graph.Reconcile(ctx, wt, graph.FSSource{Root: wt}); err != nil {
+	if err := a.Graph.ReconcileIfStale(ctx, wt, graph.NewSource(wt), graph.WorktreeToken(wt)); err != nil {
 		return err
 	}
 	var files, nodes int

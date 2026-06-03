@@ -11,7 +11,7 @@ import (
 // current checkout (spec §11 query-time freshness). Best-effort: a reconcile
 // failure must not fail the query — stale results beat no results.
 func ensureFresh(ctx context.Context, a *app.App) {
-	_ = a.Graph.Reconcile(ctx, a.Git.Worktree, graph.FSSource{Root: a.Git.Worktree})
+	_ = a.Graph.ReconcileIfStale(ctx, a.Git.Worktree, graph.NewSource(a.Git.Worktree), graph.WorktreeToken(a.Git.Worktree))
 }
 
 // --- search_graph ---
