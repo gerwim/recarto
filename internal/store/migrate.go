@@ -7,7 +7,7 @@ import (
 )
 
 // schemaVersion is the number of applied migrations.
-const schemaVersion = 3
+const schemaVersion = 4
 
 // migrations are applied in order; index+1 becomes user_version.
 var migrations = []string{
@@ -140,6 +140,17 @@ CREATE VIRTUAL TABLE nodes_fts USING fts5(
   name,
   qualified_name
 );
+`,
+	// v4 (Phase 3): compaction/decay signals. last_used_epoch is the activity
+	// epoch at which a memory was last recalled (decay = current_epoch - it);
+	// recall_count is cumulative recall hits; archived_epoch is when eviction
+	// archived the row (drives archive-GC grace). Existing rows backfill to 0 —
+	// harmless because eviction is budget-triggered, never age-triggered.
+	`
+ALTER TABLE memories ADD COLUMN last_used_epoch INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE memories ADD COLUMN recall_count    INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE memories ADD COLUMN archived_epoch  INTEGER NOT NULL DEFAULT 0;
+CREATE INDEX idx_memories_last_used_epoch ON memories(last_used_epoch);
 `,
 }
 

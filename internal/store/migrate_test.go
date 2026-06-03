@@ -117,3 +117,17 @@ func TestMigrateCreatesGraphTables(t *testing.T) {
 		t.Errorf("user_version = %d, want %d", v, schemaVersion)
 	}
 }
+
+func TestMigrateAddsCompactionColumns(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "store.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	// The v4 columns must exist and be selectable.
+	rows, err := st.DB.Query(`SELECT last_used_epoch, recall_count, archived_epoch FROM memories LIMIT 0`)
+	if err != nil {
+		t.Fatalf("compaction columns missing: %v", err)
+	}
+	rows.Close()
+}
