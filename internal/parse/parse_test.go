@@ -1,6 +1,9 @@
 package parse
 
-import "testing"
+import (
+	"slices"
+	"testing"
+)
 
 func names(syms []Symbol, kind string) []string {
 	var out []string
@@ -10,15 +13,6 @@ func names(syms []Symbol, kind string) []string {
 		}
 	}
 	return out
-}
-
-func has(xs []string, want string) bool {
-	for _, x := range xs {
-		if x == want {
-			return true
-		}
-	}
-	return false
 }
 
 func TestParseGo(t *testing.T) {
@@ -46,13 +40,13 @@ func Run() {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !has(names(res.Symbols, "function"), "Run") {
+	if !slices.Contains(names(res.Symbols, "function"), "Run") {
 		t.Errorf("missing function Run; functions=%v", names(res.Symbols, "function"))
 	}
-	if !has(names(res.Symbols, "method"), "Hello") {
+	if !slices.Contains(names(res.Symbols, "method"), "Hello") {
 		t.Errorf("missing method Hello; methods=%v", names(res.Symbols, "method"))
 	}
-	if !has(names(res.Symbols, "type"), "Greeter") {
+	if !slices.Contains(names(res.Symbols, "type"), "Greeter") {
 		t.Errorf("missing type Greeter; types=%v", names(res.Symbols, "type"))
 	}
 	var calls, imports []string
@@ -64,11 +58,11 @@ func Run() {
 			imports = append(imports, e.DstName)
 		}
 	}
-	if !has(calls, "Sprintf") || !has(calls, "Hello") {
+	if !slices.Contains(calls, "Sprintf") || !slices.Contains(calls, "Hello") {
 		t.Errorf("calls = %v, want Sprintf and Hello", calls)
 	}
-	if len(imports) == 0 {
-		t.Errorf("expected an import edge, got none")
+	if !slices.Contains(imports, "fmt") {
+		t.Errorf("imports = %v, want fmt", imports)
 	}
 	for _, s := range res.Symbols {
 		if s.EndByte <= s.StartByte {

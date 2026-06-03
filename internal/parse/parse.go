@@ -50,7 +50,8 @@ func edgeKind(suffix string) string {
 }
 
 // ParseFile parses src as lang and extracts symbols/edges using the language's
-// compiled query. All C-allocating objects are closed before returning.
+// compiled query. All C-allocating objects are closed before returning. path is
+// currently unused but retained for future qualified-name construction.
 func (r *Registry) ParseFile(lang, path string, src []byte) (Result, error) {
 	l, ok := r.langs[lang]
 	if !ok {
@@ -60,8 +61,13 @@ func (r *Registry) ParseFile(lang, path string, src []byte) (Result, error) {
 
 	p := sitter.NewParser()
 	defer p.Close()
-	p.SetLanguage(l)
+	if err := p.SetLanguage(l); err != nil {
+		return Result{}, fmt.Errorf("parse: set %s language: %w", lang, err)
+	}
 	tree := p.Parse(src, nil)
+	if tree == nil {
+		return Result{}, fmt.Errorf("parse: tree-sitter returned nil tree for %s", lang)
+	}
 	defer tree.Close()
 
 	cur := sitter.NewQueryCursor()
