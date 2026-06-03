@@ -50,6 +50,11 @@ func SessionStart(ctx context.Context, a *app.App, in io.Reader, out io.Writer) 
 	// Warm the code graph for this worktree (best-effort, non-blocking).
 	_ = a.Graph.ReconcileIfStale(ctx, a.Git.Worktree, graph.NewSource(a.Git.Worktree), graph.WorktreeToken(a.Git.Worktree))
 
+	// Opportunistic memory compaction (best-effort, gated to once per interval,
+	// single-flight across worktrees). Runs before recall so this session's
+	// recalls stamp the freshly-advanced epoch. Never blocks the agent.
+	_, _ = a.Engine.Compact(ctx, memory.CompactOptions{})
+
 	results, err := a.Engine.Recall(ctx, memory.RecallQuery{
 		Branch:      a.Git.Branch,
 		TokenBudget: sessionStartBudget,

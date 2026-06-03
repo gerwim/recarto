@@ -115,6 +115,22 @@ func TestPostReadWarnsOnRepeat(t *testing.T) {
 	}
 }
 
+func TestSessionStartRunsCompaction(t *testing.T) {
+	a := newTestApp(t, "main")
+	ctx := context.Background()
+	var out bytes.Buffer
+	if err := SessionStart(ctx, a, strings.NewReader(`{"session_id":"s1","source":"startup"}`), &out); err != nil {
+		t.Fatal(err)
+	}
+	epoch, err := a.Engine.Epoch(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if epoch != 2 { // fresh epoch 1 + one gated pass on session start
+		t.Errorf("epoch after SessionStart = %d, want 2 (compaction did not run)", epoch)
+	}
+}
+
 func TestStopFinalizesSession(t *testing.T) {
 	a := newTestApp(t, "main")
 	ctx := context.Background()
