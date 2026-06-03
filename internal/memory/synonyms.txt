@@ -1,0 +1,18 @@
+# Curated abbreviation / synonym pairs, "a=b", expanded bidirectionally.
+# Scope is DELIBERATELY narrow: known abbreviations + a hand-picked set only,
+# NOT open-ended domain paraphrase (that is left to the structural signal).
+cfg=config
+config=configuration
+auth=authentication
+authn=authentication
+authz=authorization
+db=database
+repo=repository
+fs=filesystem
+ctx=context
+tx=transaction
+id=identifier
+msg=message
+err=error
+btn=button
+impl=implementation
