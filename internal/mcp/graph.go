@@ -93,8 +93,14 @@ type ArchModule struct {
 	Files   int    `json:"files"`
 	Symbols int    `json:"symbols"`
 }
+type ModuleDep struct {
+	From  string `json:"from"`
+	To    string `json:"to"`
+	Count int    `json:"count"`
+}
 type GetArchitectureOutput struct {
 	Modules []ArchModule `json:"modules"`
+	Deps    []ModuleDep  `json:"deps,omitempty"`
 }
 
 func getArchitecture(ctx context.Context, a *app.App, in GetArchitectureInput) (GetArchitectureOutput, error) {
@@ -106,6 +112,9 @@ func getArchitecture(ctx context.Context, a *app.App, in GetArchitectureInput) (
 	out := GetArchitectureOutput{Modules: make([]ArchModule, 0, len(arch.Modules))}
 	for _, m := range arch.Modules {
 		out.Modules = append(out.Modules, ArchModule{Name: m.Name, Files: m.Files, Symbols: m.Symbols})
+	}
+	for _, d := range arch.Deps {
+		out.Deps = append(out.Deps, ModuleDep{From: d.From, To: d.To, Count: d.Count})
 	}
 	return out, nil
 }

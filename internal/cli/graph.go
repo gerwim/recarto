@@ -62,6 +62,9 @@ func Graph(ctx context.Context, a *app.App, w io.Writer, args []string) error {
 		for _, m := range arch.Modules {
 			fmt.Fprintf(w, "%-20s %d files  %d symbols\n", m.Name, m.Files, m.Symbols)
 		}
+		for _, d := range arch.Deps {
+			fmt.Fprintf(w, "  %s → %s  (%d)\n", d.From, d.To, d.Count)
+		}
 		return nil
 	case "query":
 		spec := graph.QuerySpec{}
