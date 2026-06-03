@@ -88,8 +88,8 @@ func TestMigrateCreatesFTS(t *testing.T) {
 	if err := st.DB.QueryRow(`PRAGMA user_version`).Scan(&uv); err != nil {
 		t.Fatal(err)
 	}
-	if uv != 3 {
-		t.Fatalf("user_version = %d, want 3", uv)
+	if uv != schemaVersion {
+		t.Fatalf("user_version = %d, want %d", uv, schemaVersion)
 	}
 }
 
@@ -104,14 +104,16 @@ func TestMigrateCreatesGraphTables(t *testing.T) {
 	for _, table := range []string{"files", "nodes", "edges", "nodes_fts"} {
 		var name string
 		err := st.DB.QueryRow(
-			`SELECT name FROM sqlite_master WHERE name = ?`, table).Scan(&name)
+			`SELECT name FROM sqlite_master WHERE type='table' AND name = ?`, table).Scan(&name)
 		if err != nil {
 			t.Fatalf("table %q not created: %v", table, err)
 		}
 	}
 	var v int
-	st.DB.QueryRow("PRAGMA user_version").Scan(&v)
-	if v != 3 {
-		t.Errorf("user_version = %d, want 3", v)
+	if err := st.DB.QueryRow("PRAGMA user_version").Scan(&v); err != nil {
+		t.Fatal(err)
+	}
+	if v != schemaVersion {
+		t.Errorf("user_version = %d, want %d", v, schemaVersion)
 	}
 }

@@ -120,6 +120,8 @@ CREATE INDEX idx_nodes_file ON nodes(file_id);
 CREATE INDEX idx_nodes_name ON nodes(name);
 CREATE INDEX idx_nodes_qname ON nodes(qualified_name);
 
+-- src_node_id is intentionally nullable: a file-scope reference (an import, or
+-- a call not nested inside any symbol) has no enclosing definition node.
 CREATE TABLE edges (
   id          TEXT PRIMARY KEY,
   src_node_id TEXT REFERENCES nodes(id) ON DELETE CASCADE,
