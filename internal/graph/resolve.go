@@ -140,7 +140,11 @@ INSERT OR IGNORE INTO edge_candidates(edge_id, dst_node_id, confidence, method)
 SELECT ed.id, m.id, 0.9, 'static'
   FROM edges ed
   JOIN files ef ON ef.id = ed.file_id
-  JOIN nodes m  ON m.kind IN ('method','property','constructor','function')
+  -- m.name = ed.dst_name drives the join via idx_nodes_name (the qualified_name
+  -- last segment is always the node name, so this is a result-preserving prefilter
+  -- that avoids a full nodes scan for the leading-wildcard LIKE below).
+  JOIN nodes m  ON m.name = ed.dst_name
+       AND m.kind IN ('method','property','constructor','function')
        AND ( m.qualified_name = ed.dst_recv || '.' || ed.dst_name
              OR m.qualified_name LIKE '%.' || ed.dst_recv || '.' || ed.dst_name )
   JOIN files mf ON mf.id = m.file_id
@@ -182,7 +186,9 @@ SELECT ed.id, m.id, 0.9, 'typed'
        AND tb.name = ed.dst_recv
        AND tb.scope_start_byte <= src.start_byte
        AND src.end_byte <= tb.scope_end_byte
-  JOIN nodes m  ON m.kind IN ('method','property','constructor','function')
+  -- m.name = ed.dst_name drives the join via idx_nodes_name (see stratStatic).
+  JOIN nodes m  ON m.name = ed.dst_name
+       AND m.kind IN ('method','property','constructor','function')
        AND ( m.qualified_name = tb.type_name || '.' || ed.dst_name
              OR m.qualified_name LIKE '%.' || tb.type_name || '.' || ed.dst_name )
   JOIN files mf ON mf.id = m.file_id
