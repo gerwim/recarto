@@ -104,8 +104,27 @@ WHERE dst_node_id IS NULL
 var callStrategies = []string{
 	stratSelf,
 	stratTypedReceiver,
+	stratStatic,
 	stratNameFallback,
 }
+
+// stratStatic (S3): the receiver token is itself a type name T (Foo.Create());
+// bind to T.<method>. Confidence 0.9. A receiver that is a variable (no matching
+// type-qualified node) simply yields no rows here.
+const stratStatic = `
+INSERT OR IGNORE INTO edge_candidates(edge_id, dst_node_id, confidence, method)
+SELECT ed.id, m.id, 0.9, 'static'
+  FROM edges ed
+  JOIN files ef ON ef.id = ed.file_id
+  JOIN nodes m  ON m.kind IN ('method','property','constructor','function')
+       AND ( m.qualified_name = ed.dst_recv || '.' || ed.dst_name
+             OR m.qualified_name LIKE '%.' || ed.dst_recv || '.' || ed.dst_name )
+  JOIN files mf ON mf.id = m.file_id
+ WHERE ed.kind = 'calls' AND ed.dst_recv <> ''
+   AND ef.worktree = ? AND mf.worktree = ?
+   AND ( ef.language = mf.language
+         OR ( ef.language IN ('typescript','tsx','javascript')
+              AND mf.language IN ('typescript','tsx','javascript') ) )`
 
 // stratSelf (S1): a bare M() or this.M() inside a class binds to a sibling method
 // of the same class, linked via contains edges (class -> caller, class -> target).

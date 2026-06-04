@@ -75,6 +75,24 @@ func TestResolveS1SelfCSharp(t *testing.T) {
 	}
 }
 
+func TestResolveS3StaticCSharp(t *testing.T) {
+	e := newTestEngine(t)
+	ctx := context.Background()
+	src := []byte("namespace N;\n" +
+		"class Factory { public static Thing Create() { return null; } }\n" +
+		"class Svc { void M() { Factory.Create(); } }")
+	if err := e.IndexFile(ctx, "/wt", "Svc.cs", src, 1, int64(len(src))); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.Resolve(ctx, "/wt"); err != nil {
+		t.Fatal(err)
+	}
+	got := candidateTargets(t, e, "Create", "Factory")
+	if got["N.Factory.Create"] != "static" {
+		t.Errorf("Factory.Create() should bind static to N.Factory.Create; got %v", got)
+	}
+}
+
 func TestResolveS2TypedReceiverGo(t *testing.T) {
 	e := newTestEngine(t)
 	ctx := context.Background()
