@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"time"
 )
 
 // schemaVersion is the number of applied migrations.
@@ -322,6 +323,23 @@ DELETE FROM meta WHERE key LIKE 'graph_token:%';
 // concurrent processes opening a fresh DB cannot double-apply.
 func Migrate(db *sql.DB) error {
 	ctx := context.Background()
+	// Migrate runs on every Open (MCP startup, `recarto doctor`, every CLI/hook).
+	// Like WriteTx it retries past transient SQLITE_BUSY: busy_timeout blocks each
+	// attempt, and this bounded backoff covers the case where even that is exceeded
+	// under a sustained concurrent write lock (e.g. a long graph reconcile). Without
+	// it a single contended BEGIN IMMEDIATE hard-failed with "database is locked",
+	// taking down MCP startup and doctor. An already-migrated store makes each
+	// attempt a cheap no-op apart from its lock acquisition.
+	for attempt := 0; ; attempt++ {
+		err := migrateOnce(ctx, db)
+		if err == nil || !isBusy(err) || attempt >= maxWriteRetries {
+			return err
+		}
+		time.Sleep(busyBackoff(attempt))
+	}
+}
+
+func migrateOnce(ctx context.Context, db *sql.DB) error {
 	conn, err := db.Conn(ctx)
 	if err != nil {
 		return err
