@@ -159,6 +159,125 @@ function App() { render(); return <div/>; }`)
 	}
 }
 
+func TestParseCSharpModernConstructs(t *testing.T) {
+	r, err := NewRegistry()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	// Modern .NET (C# 10+/.NET 6+): file-scoped namespace, records (class & struct),
+	// enum + members, delegate, and a class with a constructor and a property.
+	src := []byte(`namespace App.Domain;
+
+public enum AppStatus { Active, Stopped }
+
+public sealed record AppDto(System.Guid Id, string Name);
+
+public readonly record struct NetReading(long Rx, long Tx);
+
+public delegate void Notify(string msg);
+
+public class Service
+{
+    public string Name { get; set; }
+
+    public Service(int count) { }
+
+    public void Run() { }
+}
+`)
+	res, err := r.ParseFile("csharp", "App/Service.cs", src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checks := []struct {
+		kind, name string
+	}{
+		{"namespace", "App.Domain"},
+		{"enum", "AppStatus"},
+		{"record", "AppDto"},
+		{"record", "NetReading"},
+		{"delegate", "Notify"},
+		{"property", "Name"},
+		{"constructor", "Service"},
+		{"enum_member", "Active"},
+		{"enum_member", "Stopped"},
+	}
+	for _, c := range checks {
+		if !slices.Contains(names(res.Symbols, c.kind), c.name) {
+			t.Errorf("missing %s %q; %ss=%v", c.kind, c.name, c.kind, names(res.Symbols, c.kind))
+		}
+	}
+}
+
+func TestParseTypeScriptModernConstructs(t *testing.T) {
+	r, err := NewRegistry()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	src := []byte(`namespace Outer { export const x = 1; }
+export enum Color { Red, Green }
+export type ID = string;
+export type Point = { x: number };
+export abstract class Base { abstract run(): void; }
+export const useThing = () => 1;
+export const Comp: React.FC = () => null;
+export const legacy = function () {};
+export function classic() {}
+`)
+	// tsx reuses the typescript query, so both dialects must extract the same set.
+	for _, lang := range []string{"typescript", "tsx"} {
+		res, err := r.ParseFile(lang, "m."+lang, src)
+		if err != nil {
+			t.Fatalf("%s: %v", lang, err)
+		}
+		checks := []struct{ kind, name string }{
+			{"namespace", "Outer"},
+			{"enum", "Color"},
+			{"type", "ID"},
+			{"type", "Point"},
+			{"class", "Base"},        // abstract_class_declaration
+			{"function", "useThing"}, // arrow const
+			{"function", "Comp"},     // typed arrow const
+			{"function", "legacy"},   // function-expression const
+			{"function", "classic"},  // plain function declaration
+		}
+		for _, c := range checks {
+			if !slices.Contains(names(res.Symbols, c.kind), c.name) {
+				t.Errorf("%s: missing %s %q; %ss=%v", lang, c.kind, c.name, c.kind, names(res.Symbols, c.kind))
+			}
+		}
+	}
+}
+
+func TestParseJavaScriptModernConstructs(t *testing.T) {
+	r, err := NewRegistry()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	src := []byte(`function* gen() { yield 1; }
+const useThing = () => {};
+export const legacy = function () {};
+class Box { draw() {} }
+`)
+	res, err := r.ParseFile("javascript", "m.js", src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct{ kind, name string }{
+		{"function", "gen"},      // generator_function_declaration
+		{"function", "useThing"}, // arrow const
+		{"function", "legacy"},   // function-expression const
+		{"class", "Box"},
+	} {
+		if !slices.Contains(names(res.Symbols, c.kind), c.name) {
+			t.Errorf("missing %s %q; %ss=%v", c.kind, c.name, c.kind, names(res.Symbols, c.kind))
+		}
+	}
+}
+
 func edgesOfKind(es []Edge, kind string) []string {
 	var out []string
 	for _, e := range es {

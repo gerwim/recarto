@@ -7,7 +7,7 @@ import (
 )
 
 // schemaVersion is the number of applied migrations.
-const schemaVersion = 4
+const schemaVersion = 6
 
 // migrations are applied in order; index+1 becomes user_version.
 var migrations = []string{
@@ -151,6 +151,34 @@ ALTER TABLE memories ADD COLUMN last_used_epoch INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE memories ADD COLUMN recall_count    INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE memories ADD COLUMN archived_epoch  INTEGER NOT NULL DEFAULT 0;
 CREATE INDEX idx_memories_last_used_epoch ON memories(last_used_epoch);
+`,
+	// v5 (Phase 2 fix): invalidate the derived code-graph index. The C# parser
+	// query was incomplete (missed records/enums/file-scoped namespaces) and the
+	// graph FTS did not split camelCase identifiers; both changed in the indexer.
+	// The graph (files/nodes/edges/nodes_fts) is fully rebuildable from source, so
+	// wipe it and clear the per-worktree freshness token — the next lazy reconcile
+	// rebuilds it with the fixed indexer. Memories are untouched. Bump this whenever
+	// parser queries or FTS content change so existing caches rebuild on upgrade.
+	// Delete children before parents so no foreign-key state is relied upon.
+	`
+DELETE FROM nodes_fts;
+DELETE FROM edges;
+DELETE FROM nodes;
+DELETE FROM files;
+DELETE FROM meta WHERE key LIKE 'graph_token:%';
+`,
+	// v6 (Phase 2 fix): the TypeScript and JavaScript parser queries were
+	// completed to capture enums, type aliases, namespaces, abstract classes, and
+	// arrow/function-expression consts (modern TS/React). Same rationale as v5 —
+	// the derived graph is rebuildable, so wipe it and clear the freshness token
+	// to force a rebuild with the fixed queries. See the v5 comment for the
+	// standing convention.
+	`
+DELETE FROM nodes_fts;
+DELETE FROM edges;
+DELETE FROM nodes;
+DELETE FROM files;
+DELETE FROM meta WHERE key LIKE 'graph_token:%';
 `,
 }
 

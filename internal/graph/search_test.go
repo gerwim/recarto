@@ -5,6 +5,48 @@ import (
 	"testing"
 )
 
+func TestSearchByCamelComponent(t *testing.T) {
+	e := newTestEngine(t)
+	ctx := context.Background()
+	// Modern .NET identifiers are PascalCase with no separators; an agent
+	// searching a conceptual component word ("Renderer", "Backup") must still
+	// find the symbol, not only its exact full name.
+	src := []byte("namespace App;\nclass ActivityMessageRenderer {}\nclass BackupService {}")
+	if err := e.IndexFile(ctx, "/wt", "App.cs", src, 1, int64(len(src))); err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct{ query, want string }{
+		{"Renderer", "ActivityMessageRenderer"},
+		{"Message", "ActivityMessageRenderer"},
+		{"Backup", "BackupService"},
+		{"ActivityMessageRenderer", "ActivityMessageRenderer"}, // exact still works
+	}
+	for _, c := range cases {
+		got, err := e.Search(ctx, "/wt", c.query, "", "", 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var found bool
+		for _, r := range got {
+			if r.Name == c.want {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("Search(%q) did not find %q; got %d results %v",
+				c.query, c.want, len(got), resultNames(got))
+		}
+	}
+}
+
+func resultNames(rs []SearchResult) []string {
+	out := make([]string, len(rs))
+	for i, r := range rs {
+		out[i] = r.Name
+	}
+	return out
+}
+
 func TestSearchByName(t *testing.T) {
 	e := newTestEngine(t)
 	ctx := context.Background()

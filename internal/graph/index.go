@@ -82,9 +82,13 @@ func (e *Engine) writeFileGraph(ctx context.Context, c store.Conn, worktree, pat
 			int64(s.StartByte), int64(s.EndByte), int64(s.StartLine), int64(s.EndLine)); err != nil {
 			return err
 		}
+		// Store identifier-split components alongside the raw name so a query for
+		// a single component word ("Renderer") matches a PascalCase symbol
+		// ("MessageRenderer"); the default unicode61 tokenizer cannot split
+		// camelCase on its own.
 		if _, err := c.ExecContext(ctx,
 			`INSERT INTO nodes_fts(node_id,name,qualified_name) VALUES (?,?,?)`,
-			nid, s.Name, qn); err != nil {
+			nid, ftsText(s.Name), ftsText(qn)); err != nil {
 			return err
 		}
 		spans = append(spans, span{id: nid, start: s.StartByte, end: s.EndByte})
