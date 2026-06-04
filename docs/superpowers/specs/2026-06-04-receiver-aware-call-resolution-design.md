@@ -186,20 +186,39 @@ model would otherwise have to perform by hand.
     to include)`.
   - If a node has *only* low-confidence candidates → surface them, labeled
     `ambiguous by name · low confidence`, rather than returning empty.
-- **Uncertainty is terminal:** chains expand only through high/medium-confidence
-  edges. A low-confidence hop is reported as a leaf with its candidate count,
-  never expanded into a cross-product. (Token economy + signal.)
+- **Uncertainty is terminal:** the tree expands only through
+  high/medium-confidence edges. A low-confidence hop is a leaf that **lists its
+  candidate targets** (`name → path:line`, capped ~5) — not just a count — so the
+  LLM can `get_code_snippet` them directly without a second search. (Consumer
+  refinement: a bare "3 candidates" forces another round-trip.)
+- **Bounded, tree-shaped output:** the result is rendered as an indented call
+  **tree**, each node shown once (a node already expanded elsewhere is referenced,
+  not re-expanded), under a **global node budget** (default ~40) with a
+  truncation summary `(… N more; raise depth/budget or pick a more specific
+  symbol)`. This is the load-bearing fix for *my* token economy: today's
+  root-to-leaf `[][]CallNode` chains can enumerate up to fanout^depth paths —
+  unusable in context. The Go return may stay chains internally, but the
+  MCP rendering the LLM reads is the budgeted, de-duplicated tree.
 - **Caller direction** finds edges whose `edge_candidates` set includes `cur`;
   the bug-110 gating is naturally subsumed (candidates carry resolution; no
   ungated name match).
 - **`min_confidence`** input lets the LLM widen (see everything) or narrow
   (confident spine only). Default behaviour is the adaptive floor above.
+- **Consumer coaching** (the surface is dead weight if I'm not told how to read
+  it): the MCP `trace_call_path` tool description explains `min_confidence`, how
+  to read `[resolution · confidence]`, and that low-confidence leaves list
+  candidate targets to inspect — mirroring the `candidate_symbols` guidance
+  pattern proven in the query-guided-search spec.
 - **Rendering** (compact, verbalizable):
   ```
   MigrationSaga.Handle
     → TakeSnapshotOrRestoreAsync        [typed · high]
         → SendToHostAsync               [typed · high]
-    → Handle  ⟶ 3 candidates            [name · low]  recv: _handler
+    → Handle  [name · low]  recv: _handler  — 3 candidates:
+        · BackupSaga.Handle      sagas/backup/BackupSaga.cs:41
+        · RestoreSaga.Handle     sagas/restore/RestoreSaga.cs:38
+        · PruneSaga.Handle       sagas/prune/PruneSaga.cs:55
+    (… 12 more nodes; raise depth/budget or pick a more specific symbol)
   ```
 - `search_graph` / `get_code_snippet` are unchanged (they read the top
   `dst_node_id`).
@@ -253,7 +272,10 @@ Written before implementation:
    S2 field/param/local/`new`-typed receiver; S3 static type-name; S4 C#
    interface expansion → candidate set; S5 name-only → capped low-confidence set.
 3. **Trace surface** — adaptive floor (only-low candidates *surface*, not empty;
-   high present → tail summarized); uncertainty-terminal (low hop is a leaf);
+   high present → tail summarized); uncertainty-terminal (low hop is a leaf that
+   **lists its capped candidate targets**, not a bare count); **global node budget
+   enforced** (output truncates with a summary past the budget) and **tree
+   de-duplication** (a node reached twice is referenced, not re-expanded);
    confidence label + receiver rendered; `TestTraceCallPathCallersRespectsResolution`
    (bug-110) stays green.
 4. **Migration** — `TestLatestGraphMigrationRebuildsIndex`: old-schema store
