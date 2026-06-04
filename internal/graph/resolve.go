@@ -6,19 +6,73 @@ import (
 	"git.gerwim.nl/gerwim/recarto/internal/store"
 )
 
-// Resolve links unresolved reference edges to a defining node within the same
-// worktree by matching dst_name against node name or qualified_name. Resolution
-// is scoped to the source file's language FAMILY ({csharp}, {go}, and the web
-// family {typescript,tsx,javascript}) so a C# `.Select(...)` can never bind to a
-// React `Select` component. Among candidates it prefers a definition in the same
-// file, then the same top-level directory, then a stable id order — so the common
-// case of calling a sibling defined alongside the caller resolves correctly
-// instead of picking an arbitrary same-named symbol elsewhere. dst_name is
-// retained regardless, so trace_call_path still works by name where resolution is
-// partial or absent.
+// Resolve links reference edges to a defining node within the same worktree.
+// Non-call edges (extends/implements/imports/references) bind dst_node_id by
+// matching dst_name to a node name/qualified_name, scoped to the language FAMILY
+// ({csharp}, {go}, web {typescript,tsx,javascript}) so a C# `.Select(...)` can
+// never bind to a React `Select`, preferring same-file then same-directory then a
+// stable id order. Call edges are resolved into a confidence-ranked candidate set
+// (edge_candidates) by the strategy passes in callStrategies; edges.dst_node_id
+// is then denormalized to the best candidate so single-target readers keep
+// working. dst_name/dst_recv are retained so trace fallbacks still work where
+// resolution is partial.
 func (e *Engine) Resolve(ctx context.Context, worktree string) error {
 	return e.st.WriteTx(ctx, func(c store.Conn) error {
+		// Idempotent re-resolve: clear this worktree's call candidates and reset
+		// the call edges' denormalized target before recomputing.
+		if _, err := c.ExecContext(ctx, `
+DELETE FROM edge_candidates WHERE edge_id IN (
+  SELECT e.id FROM edges e JOIN files f ON f.id = e.file_id
+   WHERE f.worktree = ? AND e.kind = 'calls')`, worktree); err != nil {
+			return err
+		}
+		if _, err := c.ExecContext(ctx, `
+UPDATE edges SET dst_node_id = NULL
+ WHERE kind = 'calls' AND file_id IN (SELECT id FROM files WHERE worktree = ?)`, worktree); err != nil {
+			return err
+		}
+
+		// Non-call edges: unchanged name-match resolution.
+		if err := resolveNonCallEdges(ctx, c, worktree); err != nil {
+			return err
+		}
+
+		// Call edges: candidate strategies, highest-confidence first. OR IGNORE
+		// keeps the first (best) confidence for a given (edge, target) pair.
+		for _, strat := range callStrategies {
+			if _, err := c.ExecContext(ctx, strat, worktree, worktree); err != nil {
+				return err
+			}
+		}
+
+		// Denormalize: edges.dst_node_id = best candidate per call edge — highest
+		// confidence, then locality (same-file, then same-top-level-directory),
+		// then a stable id order. Locality is the tiebreak among equal-confidence
+		// candidates (e.g. several S5 name matches), mirroring the non-call
+		// resolver so a sibling call binds to its own file's definition.
 		_, err := c.ExecContext(ctx, `
+UPDATE edges SET dst_node_id = (
+  SELECT ec.dst_node_id FROM edge_candidates ec
+    JOIN nodes n  ON n.id = ec.dst_node_id
+    JOIN files mf ON mf.id = n.file_id
+    JOIN files ef ON ef.id = edges.file_id
+   WHERE ec.edge_id = edges.id
+   ORDER BY ec.confidence DESC,
+     CASE WHEN mf.id = edges.file_id THEN 0 ELSE 1 END,
+     CASE WHEN substr(mf.path,1,instr(mf.path,'/')) = substr(ef.path,1,instr(ef.path,'/'))
+          THEN 0 ELSE 1 END,
+     ec.dst_node_id
+   LIMIT 1)
+ WHERE kind = 'calls' AND file_id IN (SELECT id FROM files WHERE worktree = ?)`, worktree)
+		return err
+	})
+}
+
+// resolveNonCallEdges binds dst_node_id for every non-call reference edge by
+// matching dst_name to a node name/qualified_name within the language family,
+// preferring same-file then same-top-level-directory then a stable id order.
+func resolveNonCallEdges(ctx context.Context, c store.Conn, worktree string) error {
+	_, err := c.ExecContext(ctx, `
 UPDATE edges SET dst_node_id = (
   SELECT n.id
     FROM nodes n
@@ -40,10 +94,41 @@ UPDATE edges SET dst_node_id = (
    LIMIT 1)
 WHERE dst_node_id IS NULL
   AND dst_name <> ''
+  AND kind <> 'calls'
   AND file_id IN (SELECT id FROM files WHERE worktree = ?)`, worktree, worktree)
-		return err
-	})
+	return err
 }
+
+// callStrategies are INSERT OR IGNORE passes into edge_candidates, applied in
+// priority order (highest confidence first). Each binds (worktree, worktree).
+var callStrategies = []string{
+	stratNameFallback,
+}
+
+// stratNameFallback (S5): name-only fallback — any same-name callable in the
+// language family, capped per edge (locality-ordered), confidence 0.2. Only fires
+// for edges with no better candidate yet, so it never dilutes a resolved edge.
+const stratNameFallback = `
+INSERT OR IGNORE INTO edge_candidates(edge_id, dst_node_id, confidence, method)
+SELECT edge_id, dst_node_id, 0.2, 'name' FROM (
+  SELECT ed.id AS edge_id, m.id AS dst_node_id,
+    ROW_NUMBER() OVER (PARTITION BY ed.id ORDER BY
+      CASE WHEN mf.id = ed.file_id THEN 0 ELSE 1 END,
+      CASE WHEN substr(mf.path,1,instr(mf.path,'/')) = substr(ef.path,1,instr(ef.path,'/'))
+           THEN 0 ELSE 1 END,
+      m.id) AS rn
+  FROM edges ed
+  JOIN files ef ON ef.id = ed.file_id
+  JOIN nodes m  ON m.kind IN ('method','property','constructor','function')
+               AND m.name = ed.dst_name
+  JOIN files mf ON mf.id = m.file_id
+  WHERE ed.kind = 'calls' AND ed.dst_name <> ''
+    AND ef.worktree = ? AND mf.worktree = ?
+    AND ( ef.language = mf.language
+          OR ( ef.language IN ('typescript','tsx','javascript')
+               AND mf.language IN ('typescript','tsx','javascript') ) )
+    AND NOT EXISTS (SELECT 1 FROM edge_candidates ec WHERE ec.edge_id = ed.id)
+) WHERE rn <= 10`
 
 // deleteFile removes a file's graph rows for the given worktree. nodes/edges
 // cascade via FK; nodes_fts rows are dropped manually (FTS5 is unlinked).
