@@ -25,6 +25,28 @@ func TestGraphSearch(t *testing.T) {
 	}
 }
 
+func TestGraphCalleesAnnotated(t *testing.T) {
+	a := newTestApp(t, "main")
+	wt := t.TempDir()
+	a.Git.Worktree = wt
+	os.WriteFile(filepath.Join(wt, "Svc.cs"),
+		[]byte("namespace N;\nclass Dep { public void Run() {} }\n"+
+			"class Svc { private readonly Dep _dep; void M() { _dep.Run(); } }"), 0o644)
+	if err := Index(context.Background(), a, &bytes.Buffer{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := Graph(context.Background(), a, &out, []string{"callees", "N.Svc.M"}); err != nil {
+		t.Fatal(err)
+	}
+	// The Run callee should render with its resolution + confidence annotation.
+	if !bytes.Contains(out.Bytes(), []byte("Run")) ||
+		!bytes.Contains(out.Bytes(), []byte("typed")) ||
+		!bytes.Contains(out.Bytes(), []byte("high")) {
+		t.Errorf("graph callees output = %q, want Run [typed·high]", out.String())
+	}
+}
+
 func TestGraphRequiresSubcommand(t *testing.T) {
 	a := newTestApp(t, "main")
 	if err := Graph(context.Background(), a, &bytes.Buffer{}, nil); err == nil {

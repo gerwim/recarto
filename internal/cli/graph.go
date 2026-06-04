@@ -59,7 +59,14 @@ func Graph(ctx context.Context, a *app.App, w io.Writer, args []string) error {
 		for _, ch := range chains {
 			parts := make([]string, len(ch))
 			for i, n := range ch {
-				parts[i] = n.Name
+				label := n.Name
+				if n.Resolution != "" {
+					label += fmt.Sprintf(" [%s·%s]", n.Resolution, n.Confidence)
+				}
+				if n.Receiver != "" {
+					label += " recv:" + n.Receiver
+				}
+				parts[i] = label
 			}
 			fmt.Fprintln(w, strings.Join(parts, " → "))
 		}
