@@ -77,7 +77,12 @@ baseline now forecloses nothing.
 - TS/JS resolution. The data model is language-agnostic so they slot in later,
   but no `.scm`/resolver work for them now.
 - The **runtime** precise tier. We build only the `edge_candidates(method,
-  confidence)` seam, not a `go/types`/stack-graphs backend.
+  confidence)` seam, not a `go/types`/stack-graphs backend. Whether to build a
+  runtime precise-Go tier is **deferred pending evidence**: the Go oracle (below)
+  is written with the same in-process `go/types` API, so it doubles as that
+  tier's prototype and measures the heuristic-vs-precise gap that would justify
+  building it. (It can't be the *baseline* regardless: `go/packages` needs the
+  module to load/build and is too slow for the per-edit hook.)
 - Return-type inference (`var x = Foo()` stays name-only).
 - Go **structural-interface** implementor discovery (Go has no explicit
   `implements`; Go interface dispatch stays low-confidence / name-only).
@@ -213,7 +218,7 @@ model would otherwise have to perform by hand.
 | `internal/store/migrate.go` | Schema bump: `edges.dst_recv`, `type_bindings`, `edge_candidates`; graph wipe. |
 | `internal/store/migrate_test.go` | Extend `TestLatestGraphMigrationRebuildsIndex`. |
 | `recarto-e2e/oracle/cs/*` | Extend `CsDump` to emit resolved call edges (Roslyn `SemanticModel`). |
-| `recarto-e2e/oracle/go/*` (new) | `go/packages` + `types.Info` resolved-call-edge dumper. |
+| `recarto-e2e/oracle/go/*` (new) | `go/packages` + `types.Info` resolved-call-edge dumper (in-process; **not** gopls — gopls wraps the same `go/types` behind a separately-installed binary + LSP subprocess, more dependency for identical resolution). |
 | `recarto-e2e/compare/*` | Resolution precision/recall vs oracle. |
 | `internal/graph/*_test.go`, `testdata/` | TDD per strategy; regression benchmark fixture. |
 
