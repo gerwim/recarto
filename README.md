@@ -36,7 +36,9 @@ Recarto is a single self-contained binary (no runtime dependencies).
 
 ### Download a prebuilt binary
 
-Pick the build for your platform, then put it on your `PATH`:
+Grab the binary for your platform from the
+[releases page](https://git.gerwim.nl/gerwim/recarto/-/releases), then put it on your
+`PATH`:
 
 | Platform | File |
 |---|---|
@@ -118,6 +120,11 @@ What each agent gets:
 `recarto init` is idempotent — re-running merges only what's missing and preserves
 your existing config.
 
+After `init`, **restart your agent** (Claude Code, OpenCode or Copilot CLI) so it
+picks up the new MCP server and hooks. Verify the MCP server is connected with your
+agent's own command — e.g. `opencode mcp list` or `copilot mcp list` should show
+`recarto`.
+
 ## Usage
 
 Day to day you don't call Recarto directly; your agent uses the MCP tools and the
@@ -139,6 +146,56 @@ recarto serve             run the MCP server over stdio (used by the agents)
 MCP tools exposed by `recarto serve`: `record_memory`, `recall_memory`, `get_memory`,
 `list_memory`, `record_bug`, `search_bugs`, `search_graph`, `get_code_snippet`,
 `trace_call_path`, `get_architecture`, `query_graph`.
+
+## Verify it's working
+
+After `recarto init` and restarting your agent, sanity-check the install.
+
+**Linux / macOS**
+
+```sh
+recarto version
+recarto doctor            # health checks — every line should read [ok]
+recarto index             # build the code graph for this worktree
+```
+
+**Windows (PowerShell)**
+
+```powershell
+recarto version
+recarto doctor            # health checks — every line should read [ok]
+recarto index             # build the code graph for this worktree
+```
+
+`recarto doctor` checks the store (WAL, integrity, schema) and git identity, and exits
+non-zero if any check fails — so it doubles as a smoke test in scripts and CI.
+
+**Is it doing useful work?** Run `recarto status` after a few agent sessions and watch
+the lifetime ledger counters:
+
+- `memories_recalled` climbing while `recall_misses` stays low → recall is hitting.
+- `recall_tokens_injected` → how much context is injected at session start.
+- `reads` / `repeated_reads_blocked` → the just-in-time bug/read surfacing is firing.
+- `live tokens N / 250000` → how full the live-set budget is (compaction prunes as it
+  approaches the cap).
+
+**Is it fast?** Recarto has no built-in timing, so measure the two heavy operations —
+the graph index and recall — directly. Hooks are exit-0 CLI calls, so their latency is
+essentially these two (session-start / post-edit reconcile + session-start injection):
+
+**Linux / macOS**
+
+```sh
+time recarto index
+time recarto recall "auth flow"
+```
+
+**Windows (PowerShell)**
+
+```powershell
+Measure-Command { recarto index }
+Measure-Command { recarto recall "auth flow" }
+```
 
 ## How it works
 
