@@ -31,6 +31,9 @@ UPDATE edges SET dst_node_id = (
                 AND f.language IN ('typescript','tsx','javascript') ) )
    ORDER BY
      CASE WHEN f.id = edges.file_id THEN 0 ELSE 1 END,
+     -- same top-level directory next. instr(path,'/')=0 for a root-level file, and
+     -- substr(s,1,0)='' in SQLite, so two root-level files compare equal here —
+     -- correct "same directory" semantics.
      CASE WHEN substr(f.path,1,instr(f.path,'/')) = substr(ef.path,1,instr(ef.path,'/'))
           THEN 0 ELSE 1 END,
      n.id

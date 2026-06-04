@@ -62,17 +62,42 @@ func projectRoots(worktree string) []string {
 	return roots
 }
 
-// moduleOf returns the module a path belongs to: the basename of the nearest
-// ancestor project root, or the first path segment ("." for a top-level file)
-// when no deeper project marker applies. A repo-root marker (".") is skipped so
-// it never flattens everything into one bucket.
-func moduleOf(roots []string, path string) string {
+// moduleNames assigns each project root a display name: its basename when that
+// basename is unique among the roots, else its full relative path so that two
+// distinct projects sharing a basename (e.g. backend/App and frontend/App) stay
+// separate modules instead of silently merging.
+func moduleNames(roots []string) map[string]string {
+	count := map[string]int{}
+	for _, r := range roots {
+		if r != "." {
+			count[filepath.Base(r)]++
+		}
+	}
+	names := map[string]string{}
+	for _, r := range roots {
+		if r == "." {
+			continue
+		}
+		if b := filepath.Base(r); count[b] == 1 {
+			names[r] = b
+		} else {
+			names[r] = r
+		}
+	}
+	return names
+}
+
+// moduleOf returns the module a path belongs to: the (collision-disambiguated)
+// name of the nearest ancestor project root, or the first path segment ("." for a
+// top-level file) when no deeper project marker applies. A repo-root marker (".")
+// is skipped so it never flattens everything into one bucket.
+func moduleOf(roots []string, names map[string]string, path string) string {
 	for _, r := range roots {
 		if r == "." {
 			continue
 		}
 		if path == r || strings.HasPrefix(path, r+"/") {
-			return filepath.Base(r)
+			return names[r]
 		}
 	}
 	if i := strings.IndexByte(path, '/'); i >= 0 {
@@ -85,6 +110,7 @@ func moduleOf(roots []string, path string) string {
 // top-level directory. scope, if non-empty, restricts to paths under that prefix.
 func (e *Engine) Architecture(ctx context.Context, worktree, scope string) (Architecture, error) {
 	roots := projectRoots(worktree)
+	modNames := moduleNames(roots)
 	q := `SELECT f.path, (SELECT COUNT(*) FROM nodes n WHERE n.file_id = f.id)
 	        FROM files f WHERE f.worktree = ?`
 	args := []any{worktree}
@@ -105,7 +131,7 @@ func (e *Engine) Architecture(ctx context.Context, worktree, scope string) (Arch
 		if err := rows.Scan(&path, &syms); err != nil {
 			return Architecture{}, err
 		}
-		m := moduleOf(roots, path)
+		m := moduleOf(roots, modNames, path)
 		if byMod[m] == nil {
 			byMod[m] = &agg{}
 		}
@@ -146,7 +172,7 @@ SELECT srcf.path, dstf.path, COUNT(*)
 			depRows.Close()
 			return Architecture{}, err
 		}
-		sm, dm := moduleOf(roots, sp), moduleOf(roots, dp)
+		sm, dm := moduleOf(roots, modNames, sp), moduleOf(roots, modNames, dp)
 		if sm != dm {
 			depCount[[2]string{sm, dm}] += c
 		}

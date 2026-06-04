@@ -106,3 +106,39 @@ func TestArchitectureProjectAwareModules(t *testing.T) {
 		t.Errorf("modules %+v, want one named frontend (nearest package.json dir)", arch.Modules)
 	}
 }
+
+func TestArchitectureDisambiguatesCollidingModuleNames(t *testing.T) {
+	e := newTestEngine(t)
+	ctx := context.Background()
+	wt := t.TempDir()
+	mk := func(dir, marker, srcfile, src string) {
+		full := filepath.Join(wt, dir)
+		if err := os.MkdirAll(full, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(full, marker), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		rel := filepath.ToSlash(filepath.Join(dir, srcfile))
+		if err := e.IndexFile(ctx, wt, rel, []byte(src), 1, int64(len(src))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Two distinct projects whose directories share the basename "App".
+	mk("backend/App", "App.csproj", "a.cs", "namespace A;\nclass X {}")
+	mk("frontend/App", "package.json", "b.ts", "export function Y(){}")
+	arch, err := e.Architecture(ctx, wt, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := map[string]bool{}
+	for _, m := range arch.Modules {
+		names[m.Name] = true
+	}
+	if names["App"] {
+		t.Errorf("colliding basename 'App' must be disambiguated, got modules %+v", arch.Modules)
+	}
+	if !names["backend/App"] || !names["frontend/App"] {
+		t.Errorf("want distinct modules backend/App and frontend/App, got %+v", arch.Modules)
+	}
+}

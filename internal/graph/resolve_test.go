@@ -88,3 +88,59 @@ func TestResolvePrefersSameFile(t *testing.T) {
 		t.Errorf("Helper call resolved to %q, want a.go (same-file preference)", path)
 	}
 }
+
+func TestResolvePrefersSameTopLevelDir(t *testing.T) {
+	e := newTestEngine(t)
+	ctx := context.Background()
+	// Foo is defined in both auth/ and other/; the call from auth/a.go must prefer
+	// the same-top-level-directory definition over the equally-named other one.
+	if err := e.IndexFile(ctx, "/wt", "auth/a.go", []byte("package p\nfunc A(){ Foo() }"), 1, 30); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.IndexFile(ctx, "/wt", "auth/b.go", []byte("package p\nfunc Foo(){}"), 1, 21); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.IndexFile(ctx, "/wt", "other/c.go", []byte("package p\nfunc Foo(){}"), 1, 21); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.Resolve(ctx, "/wt"); err != nil {
+		t.Fatal(err)
+	}
+	var path string
+	if err := e.st.DB.QueryRow(`
+		SELECT f.path FROM edges ed
+		  JOIN nodes n ON n.id = ed.dst_node_id
+		  JOIN files f ON f.id = n.file_id
+		 WHERE ed.kind='calls' AND ed.dst_name='Foo'`).Scan(&path); err != nil {
+		t.Fatal(err)
+	}
+	if path != "auth/b.go" {
+		t.Errorf("Foo resolved to %q, want auth/b.go (same top-level dir preference)", path)
+	}
+}
+
+func TestResolveWithinWebFamily(t *testing.T) {
+	e := newTestEngine(t)
+	ctx := context.Background()
+	// A .tsx component calls a helper defined in a .ts file: typescript and tsx are
+	// the same language family, so the call must resolve across the dialect.
+	tsx := []byte("export function Comp(){ helper(); }")
+	if err := e.IndexFile(ctx, "/wt", "web/comp.tsx", tsx, 1, int64(len(tsx))); err != nil {
+		t.Fatal(err)
+	}
+	ts := []byte("export function helper(){}")
+	if err := e.IndexFile(ctx, "/wt", "web/util.ts", ts, 1, int64(len(ts))); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.Resolve(ctx, "/wt"); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	if err := e.st.DB.QueryRow(`
+		SELECT COUNT(*) FROM edges WHERE kind='calls' AND dst_name='helper' AND dst_node_id IS NOT NULL`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Errorf("web-family resolved helper calls = %d, want 1", n)
+	}
+}
