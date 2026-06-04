@@ -105,8 +105,32 @@ var callStrategies = []string{
 	stratSelf,
 	stratTypedReceiver,
 	stratStatic,
+	stratInterface,
 	stratNameFallback,
 }
+
+// stratInterface (S4, C#): the receiver's bound type T is an interface or base
+// class; expand to <method> on each implementing/deriving type, found via the
+// extends edges (X extends/implements T) and X's contained methods. Confidence
+// 0.5 — a set of possible dispatch targets. Go interfaces are structural (no
+// extends edge), so this yields nothing for Go (intended: Go stays S5).
+const stratInterface = `
+INSERT OR IGNORE INTO edge_candidates(edge_id, dst_node_id, confidence, method)
+SELECT ed.id, m.id, 0.5, 'iface'
+  FROM edges ed
+  JOIN files ef ON ef.id = ed.file_id
+  JOIN nodes src ON src.id = ed.src_node_id
+  JOIN type_bindings tb ON tb.file_id = ed.file_id
+       AND tb.name = ed.dst_recv
+       AND tb.scope_start_byte <= src.start_byte
+       AND src.end_byte <= tb.scope_end_byte
+  JOIN nodes iface ON iface.name = tb.type_name AND iface.kind IN ('interface','class')
+  JOIN edges ext ON ext.kind = 'extends' AND ext.dst_node_id = iface.id
+  JOIN edges cm  ON cm.kind = 'contains' AND cm.src_node_id = ext.src_node_id
+  JOIN nodes m   ON m.id = cm.dst_node_id AND m.kind = 'method' AND m.name = ed.dst_name
+  JOIN files mf  ON mf.id = m.file_id
+ WHERE ed.kind = 'calls' AND ed.dst_recv <> ''
+   AND ef.worktree = ? AND mf.worktree = ?`
 
 // stratStatic (S3): the receiver token is itself a type name T (Foo.Create());
 // bind to T.<method>. Confidence 0.9. A receiver that is a variable (no matching

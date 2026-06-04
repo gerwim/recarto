@@ -75,6 +75,26 @@ func TestResolveS1SelfCSharp(t *testing.T) {
 	}
 }
 
+func TestResolveS4InterfaceExpansionCSharp(t *testing.T) {
+	e := newTestEngine(t)
+	ctx := context.Background()
+	src := []byte("namespace N;\n" +
+		"interface IHandler { void Handle(); }\n" +
+		"class A : IHandler { public void Handle() {} }\n" +
+		"class B : IHandler { public void Handle() {} }\n" +
+		"class Svc { private readonly IHandler _h; void M() { _h.Handle(); } }")
+	if err := e.IndexFile(ctx, "/wt", "H.cs", src, 1, int64(len(src))); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.Resolve(ctx, "/wt"); err != nil {
+		t.Fatal(err)
+	}
+	got := candidateTargets(t, e, "Handle", "_h")
+	if got["N.A.Handle"] != "iface" || got["N.B.Handle"] != "iface" {
+		t.Errorf("_h.Handle() should expand to A.Handle and B.Handle (iface); got %v", got)
+	}
+}
+
 func TestResolveS3StaticCSharp(t *testing.T) {
 	e := newTestEngine(t)
 	ctx := context.Background()
