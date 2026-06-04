@@ -88,6 +88,11 @@ func (e *Engine) writeFileGraph(ctx context.Context, c store.Conn, worktree, pat
 	// Pass 2: insert nodes with structural qualified names + FTS content.
 	for i, s := range res.Symbols {
 		qn := qualifiedName(spans, res.Symbols, i)
+		// Go methods are siblings of their type (not nested), so structural
+		// containment yields a bare name; prepend the captured receiver type.
+		if s.RecvType != "" && !strings.Contains(qn, ".") {
+			qn = s.RecvType + "." + s.Name
+		}
 		if _, err := c.ExecContext(ctx,
 			`INSERT INTO nodes(id,file_id,kind,name,qualified_name,signature,
 			   start_byte,end_byte,start_line,end_line)
@@ -125,10 +130,37 @@ func (e *Engine) writeFileGraph(ctx context.Context, c store.Conn, worktree, pat
 	// Insert edges, attributing each to the innermost enclosing node.
 	for _, ed := range res.Edges {
 		if _, err := c.ExecContext(ctx,
-			`INSERT INTO edges(id,src_node_id,dst_node_id,dst_name,kind,file_id,line)
-			 VALUES (?,?,?,?,?,?,?)`,
-			ids.New(), nullStr(enclosing(spans, ed.StartByte)), nil, ed.DstName, ed.Kind,
+			`INSERT INTO edges(id,src_node_id,dst_node_id,dst_name,dst_recv,kind,file_id,line)
+			 VALUES (?,?,?,?,?,?,?,?)`,
+			ids.New(), nullStr(enclosing(spans, ed.StartByte)), nil, ed.DstName, ed.Recv, ed.Kind,
 			fileID, int64(ed.Line)); err != nil {
+			return err
+		}
+	}
+
+	// Type bindings: scope each to its innermost enclosing definition's byte span
+	// (class body for fields, method body for params/locals/receiver vars). A
+	// binding at file scope (no enclosing def) covers up to the last node end.
+	var maxEnd uint
+	for _, sp := range spans {
+		if sp.end > maxEnd {
+			maxEnd = sp.end
+		}
+	}
+	for _, b := range res.Bindings {
+		scStart, scEnd := uint(0), maxEnd
+		if encID := enclosing(spans, b.StartByte); encID != "" {
+			for _, sp := range spans {
+				if sp.id == encID {
+					scStart, scEnd = sp.start, sp.end
+					break
+				}
+			}
+		}
+		if _, err := c.ExecContext(ctx,
+			`INSERT INTO type_bindings(id,file_id,name,type_name,scope_start_byte,scope_end_byte)
+			 VALUES (?,?,?,?,?,?)`,
+			ids.New(), fileID, b.Name, b.TypeName, int64(scStart), int64(scEnd)); err != nil {
 			return err
 		}
 	}
