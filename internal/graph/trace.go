@@ -84,7 +84,7 @@ SELECT DISTINCT n.id, n.name, f.path, n.start_line
   JOIN nodes n ON n.id = ed.src_node_id
   JOIN files f ON f.id = n.file_id
  WHERE ed.kind='calls' AND f.worktree = ?
-   AND (ed.dst_node_id = ? OR ed.dst_name = ?)
+   AND (ed.dst_node_id = ? OR (ed.dst_node_id IS NULL AND ed.dst_name = ?))
  LIMIT ?`
 	} else {
 		q = `
