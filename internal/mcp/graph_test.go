@@ -80,3 +80,47 @@ func TestGraphHandlersMapping(t *testing.T) {
 		t.Errorf("getCodeSnippet = %q, want the A function source", snip.Snippet)
 	}
 }
+
+func TestSearchGraphCandidateSymbolsAndHint(t *testing.T) {
+	a := newTestApp(t, "main")
+	wt := t.TempDir()
+	a.Git.Worktree = wt
+	if err := os.WriteFile(filepath.Join(wt, "a.cs"),
+		[]byte("namespace App;\nclass PdokAddressLookupService {}\nclass InvoiceService {}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := a.Graph.Reconcile(ctx, wt, graph.FSSource{Root: wt}); err != nil {
+		t.Fatal(err)
+	}
+
+	// candidate_symbols drives a concept query to the right symbol; no hint when found.
+	out, err := searchGraph(ctx, a, SearchGraphInput{
+		Query:            "convert a street into coordinates",
+		CandidateSymbols: []string{"AddressLookup"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, r := range out.Results {
+		if r.Name == "PdokAddressLookupService" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("candidate_symbols search missed PdokAddressLookupService: %+v", out.Results)
+	}
+	if out.Hint != "" {
+		t.Errorf("hint should be empty when results were found, got %q", out.Hint)
+	}
+
+	// Empty result + no candidates → hint nudges the agent to supply candidate_symbols.
+	miss, err := searchGraph(ctx, a, SearchGraphInput{Query: "zzzznotarealconcept"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if miss.Count != 0 || miss.Hint == "" {
+		t.Errorf("expected zero results with a hint, got count=%d hint=%q", miss.Count, miss.Hint)
+	}
+}

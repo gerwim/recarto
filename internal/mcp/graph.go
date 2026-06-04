@@ -17,10 +17,11 @@ func ensureFresh(ctx context.Context, a *app.App) {
 // --- search_graph ---
 
 type SearchGraphInput struct {
-	Query    string `json:"query" jsonschema:"symbol name or keywords to search"`
-	Kind     string `json:"kind,omitempty" jsonschema:"restrict to a node kind (function, method, class, …)"`
-	Language string `json:"language,omitempty" jsonschema:"restrict to a language (go, csharp, typescript, tsx, javascript)"`
-	Limit    int    `json:"limit,omitempty" jsonschema:"max results"`
+	Query            string   `json:"query" jsonschema:"the concept or symbol name to find, in plain natural language"`
+	CandidateSymbols []string `json:"candidate_symbols,omitempty" jsonschema:"the identifier names you expect to exist for this concept (3-8 best guesses). Any form is accepted and matched leniently: PascalCase (AddressLookup), interface-prefixed (IAddressLookupService), snake_case (address_lookup), plain phrases (address lookup), or partial/qualified names. Provide these whenever searching by concept rather than an exact known name."`
+	Kind             string   `json:"kind,omitempty" jsonschema:"restrict to a node kind (function, method, class, …)"`
+	Language         string   `json:"language,omitempty" jsonschema:"restrict to a language (go, csharp, typescript, tsx, javascript)"`
+	Limit            int      `json:"limit,omitempty" jsonschema:"max results"`
 }
 type GraphSymbol struct {
 	Name          string  `json:"name"`
@@ -33,11 +34,16 @@ type GraphSymbol struct {
 type SearchGraphOutput struct {
 	Count   int           `json:"count"`
 	Results []GraphSymbol `json:"results"`
+	Hint    string        `json:"hint,omitempty"`
 }
+
+// weakResultHint nudges the agent to use candidate_symbols when a concept query
+// found nothing and supplied none. No server-side model is involved.
+const weakResultHint = "No matches. Retry search_graph with candidate_symbols set to the identifier names you'd expect for this concept (e.g. AddressLookup, Geocode) — any form works (PascalCase, interface-prefixed, snake_case, or plain words)."
 
 func searchGraph(ctx context.Context, a *app.App, in SearchGraphInput) (SearchGraphOutput, error) {
 	ensureFresh(ctx, a)
-	res, err := a.Graph.Search(ctx, a.Git.Worktree, in.Query, in.Kind, in.Language, in.Limit)
+	res, err := a.Graph.SearchGuided(ctx, a.Git.Worktree, in.Query, in.CandidateSymbols, in.Kind, in.Language, in.Limit)
 	if err != nil {
 		return SearchGraphOutput{}, err
 	}
@@ -47,6 +53,9 @@ func searchGraph(ctx context.Context, a *app.App, in SearchGraphInput) (SearchGr
 			Name: r.Name, QualifiedName: r.QualifiedName, Kind: r.Kind,
 			Path: r.Path, Line: r.Line, Score: r.Score,
 		})
+	}
+	if out.Count == 0 && len(in.CandidateSymbols) == 0 {
+		out.Hint = weakResultHint
 	}
 	return out, nil
 }
