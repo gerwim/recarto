@@ -7,7 +7,7 @@ import (
 )
 
 // schemaVersion is the number of applied migrations.
-const schemaVersion = 10
+const schemaVersion = 11
 
 // migrations are applied in order; index+1 becomes user_version.
 var migrations = []string{
@@ -288,6 +288,23 @@ DELETE FROM meta WHERE key LIKE 'graph_token:%';
 	// required-expression pattern silently dropped them). Indexer change, so wipe
 	// the rebuildable graph + freshness token to force a rebuild. Memories/bugs
 	// untouched. See the v5 comment for the standing convention.
+	`
+DELETE FROM edge_candidates;
+DELETE FROM type_bindings;
+DELETE FROM nodes_fts;
+DELETE FROM nodes_fts_stem;
+DELETE FROM nodes_fts_tri;
+DELETE FROM edges;
+DELETE FROM nodes;
+DELETE FROM files;
+DELETE FROM meta WHERE key LIKE 'graph_token:%';
+`,
+	// v11 (receiver-aware resolution, Phase 3): the resolver now scores S5
+	// name-only candidates by AMBIGUITY (unique match = medium/expandable, several
+	// = low/terminal) — a change to the stored edge_candidates confidences that the
+	// freshness token (gated on source state) would not otherwise pick up. Wipe the
+	// rebuildable graph + freshness token so the next reconcile re-resolves with
+	// the new confidence model. Memories/bugs untouched. See the v5 comment.
 	`
 DELETE FROM edge_candidates;
 DELETE FROM type_bindings;
