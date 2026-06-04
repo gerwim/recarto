@@ -54,9 +54,15 @@ func (e *Engine) TraceCallPathFiltered(ctx context.Context, worktree, symbol, di
 	}
 	_ = e.led.Incr(ctx, "lifetime", "graph_queries", 1)
 
+	const traceNodeBudget = 40
 	var chains [][]CallNode
+	emitted := 0
+	truncated := false
 	var walk func(cur CallNode, path []CallNode, visited map[string]bool, d int)
 	walk = func(cur CallNode, path []CallNode, visited map[string]bool, d int) {
+		if truncated {
+			return
+		}
 		if d == 0 {
 			chains = append(chains, path)
 			return // depth limit reached; don't issue a needless neighbor query
@@ -70,12 +76,26 @@ func (e *Engine) TraceCallPathFiltered(ctx context.Context, worktree, symbol, di
 			if visited[nb.NodeID] {
 				continue
 			}
+			if emitted >= traceNodeBudget {
+				truncated = true
+				chains = append(chains, append(append([]CallNode{}, path...),
+					CallNode{Name: "… (node budget reached; narrow the symbol or lower depth)"}))
+				return
+			}
+			emitted++
+			childPath := append(append([]CallNode{}, path...), nb)
+			// Uncertainty is terminal: a low-confidence hop is reported as a leaf,
+			// never expanded into a speculative cross-product.
+			if nb.Confidence == "low" {
+				chains = append(chains, childPath)
+				continue
+			}
 			v2 := make(map[string]bool, len(visited)+1)
 			for k := range visited {
 				v2[k] = true
 			}
 			v2[nb.NodeID] = true
-			walk(nb, append(append([]CallNode{}, path...), nb), v2, d-1)
+			walk(nb, childPath, v2, d-1)
 		}
 	}
 	walk(start, []CallNode{start}, map[string]bool{start.NodeID: true}, depth)

@@ -193,12 +193,16 @@ SELECT ed.id, m.id, 0.9, 'typed'
               AND mf.language IN ('typescript','tsx','javascript') ) )`
 
 // stratNameFallback (S5): name-only fallback — any same-name callable in the
-// language family, capped per edge (locality-ordered), confidence 0.2. Only fires
-// for edges with no better candidate yet, so it never dilutes a resolved edge.
+// language family, capped per edge (locality-ordered). Confidence reflects
+// AMBIGUITY: a UNIQUE same-name match is reasonably reliable (the only thing the
+// call could lexically be — e.g. a Go package function) → 0.45 (medium); several
+// same-name matches are genuinely ambiguous → 0.2 (low). Only fires for edges
+// with no better candidate, so it never dilutes a resolved edge.
 const stratNameFallback = `
 INSERT OR IGNORE INTO edge_candidates(edge_id, dst_node_id, confidence, method)
-SELECT edge_id, dst_node_id, 0.2, 'name' FROM (
+SELECT edge_id, dst_node_id, CASE WHEN cnt = 1 THEN 0.45 ELSE 0.2 END, 'name' FROM (
   SELECT ed.id AS edge_id, m.id AS dst_node_id,
+    COUNT(*) OVER (PARTITION BY ed.id) AS cnt,
     ROW_NUMBER() OVER (PARTITION BY ed.id ORDER BY
       CASE WHEN mf.id = ed.file_id THEN 0 ELSE 1 END,
       CASE WHEN substr(mf.path,1,instr(mf.path,'/')) = substr(ef.path,1,instr(ef.path,'/'))
