@@ -22,7 +22,17 @@ func Graph(ctx context.Context, a *app.App, w io.Writer, args []string) error {
 	sub, rest := args[0], args[1:]
 	switch sub {
 	case "search":
-		res, err := a.Graph.Search(ctx, wt, strings.Join(rest, " "), "", "", 20)
+		var syms, qwords []string
+		for _, tok := range rest {
+			if s, ok := strings.CutPrefix(tok, "--symbol="); ok {
+				if s != "" {
+					syms = append(syms, s)
+				}
+				continue
+			}
+			qwords = append(qwords, tok)
+		}
+		res, err := a.Graph.SearchGuided(ctx, wt, strings.Join(qwords, " "), syms, "", "", 20)
 		if err != nil {
 			return err
 		}

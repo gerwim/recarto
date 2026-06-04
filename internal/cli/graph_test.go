@@ -51,3 +51,22 @@ func TestGraphSearchAutoReconciles(t *testing.T) {
 		t.Errorf("graph search did not auto-reconcile; output = %q", out.String())
 	}
 }
+
+func TestGraphSearchSymbolFlag(t *testing.T) {
+	a := newTestApp(t, "main")
+	wt := t.TempDir()
+	a.Git.Worktree = wt
+	if err := os.WriteFile(filepath.Join(wt, "a.cs"),
+		[]byte("namespace App;\nclass PdokAddressLookupService {}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	// Concept words + a --symbol candidate that bridges to the target name.
+	if err := Graph(context.Background(), a, &out,
+		[]string{"search", "--symbol=AddressLookup", "convert", "street"}); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(out.Bytes(), []byte("PdokAddressLookupService")) {
+		t.Errorf("graph search --symbol output = %q", out.String())
+	}
+}
