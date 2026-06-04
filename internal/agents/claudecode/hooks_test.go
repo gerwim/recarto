@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
+	"git.gerwim.nl/gerwim/recarto/internal/agents"
 	"git.gerwim.nl/gerwim/recarto/internal/app"
 	"git.gerwim.nl/gerwim/recarto/internal/clock"
-	"git.gerwim.nl/gerwim/recarto/internal/graph"
 	"git.gerwim.nl/gerwim/recarto/internal/memory"
 )
 
@@ -86,6 +86,15 @@ func TestSessionStartInjectsRecallAndOpensSession(t *testing.T) {
 	if err := a.Store.DB.QueryRowContext(ctx,
 		`SELECT started_at FROM sessions WHERE id='sess-1'`).Scan(&started); err != nil {
 		t.Fatalf("session row not created: %v", err)
+	}
+	// The Claude Code adapter must stamp the agent name.
+	var agent string
+	if err := a.Store.DB.QueryRowContext(ctx,
+		`SELECT agent FROM sessions WHERE id='sess-1'`).Scan(&agent); err != nil {
+		t.Fatal(err)
+	}
+	if agent != "claude-code" {
+		t.Errorf("sessions.agent = %q, want claude-code", agent)
 	}
 }
 
@@ -181,47 +190,6 @@ func TestSessionStartInjectsCerebrumAndRecentBugs(t *testing.T) {
 	}
 }
 
-func TestSessionBudgetEnvOverride(t *testing.T) {
-	t.Setenv("RECARTO_SESSION_BUDGET", "50")
-	if got := sessionBudget(); got != 50 {
-		t.Errorf("sessionBudget() = %d, want 50", got)
-	}
-	t.Setenv("RECARTO_SESSION_BUDGET", "")
-	if got := sessionBudget(); got != sessionStartBudget {
-		t.Errorf("sessionBudget() default = %d, want %d", got, sessionStartBudget)
-	}
-}
-
-func TestFormatSessionContextDegradesToTitles(t *testing.T) {
-	results := []memory.RecallResult{
-		{Record: &memory.Record{Kind: memory.KindLearning, Title: "AAA", Body: "short body"}},
-		{Record: &memory.Record{Kind: memory.KindLearning, Title: "BBB", Body: strings.Repeat("x", 2000)}},
-	}
-	s := formatSessionContext(results, graph.Architecture{}, nil, 60)
-	if !strings.Contains(s, "AAA") || !strings.Contains(s, "short body") {
-		t.Errorf("first entry should render with its body:\n%s", s)
-	}
-	if !strings.Contains(s, "BBB") {
-		t.Errorf("second entry title should still appear:\n%s", s)
-	}
-	if strings.Contains(s, strings.Repeat("x", 100)) {
-		t.Errorf("second entry body should be dropped under tight budget:\n%s", s)
-	}
-}
-
-func TestFormatSessionContextDropsEntryUnderTinyBudget(t *testing.T) {
-	results := []memory.RecallResult{
-		{Record: &memory.Record{Kind: memory.KindLearning, Title: "WontFitAtAll", Body: "body"}},
-	}
-	s := formatSessionContext(results, graph.Architecture{}, nil, 2)
-	if strings.Contains(s, "WontFitAtAll") {
-		t.Errorf("entry should be dropped entirely when even its title exceeds the budget:\n%s", s)
-	}
-	if strings.Contains(s, "no prior memories yet") {
-		t.Errorf("results were non-empty; must not claim none exist:\n%s", s)
-	}
-}
-
 func TestPostReadSurfacesBugForFile(t *testing.T) {
 	a := newTestApp(t, "main") // worktree "/repo"
 	ctx := context.Background()
@@ -241,5 +209,29 @@ func TestPostReadSurfacesBugForFile(t *testing.T) {
 	s := out.String()
 	if !strings.Contains(s, "prior bug") || !strings.Contains(s, "nil deref here") {
 		t.Errorf("post-read should surface the prior bug:\n%s", s)
+	}
+}
+
+func TestAdapterEncodeSessionStart(t *testing.T) {
+	var sb strings.Builder
+	if err := (Adapter{}).Encode(agents.KindSessionStart, &sb, agents.Result{Context: "hello"}); err != nil {
+		t.Fatal(err)
+	}
+	out := sb.String()
+	if !strings.Contains(out, `"hookSpecificOutput"`) ||
+		!strings.Contains(out, `"additionalContext"`) ||
+		!strings.Contains(out, "hello") {
+		t.Errorf("unexpected CC envelope:\n%s", out)
+	}
+}
+
+func TestAdapterDecodePostEditFilePath(t *testing.T) {
+	in := strings.NewReader(`{"session_id":"s","tool_input":{"file_path":"/x/y.go"}}`)
+	ev, err := Adapter{}.Decode(agents.KindPostEdit, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ev.FilePath != "/x/y.go" || ev.Agent != "claude-code" {
+		t.Errorf("decoded %+v", ev)
 	}
 }
