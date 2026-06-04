@@ -27,6 +27,10 @@ feature parity across all three.
 - **Code graph** — `search_graph` / `get_code_snippet` / `trace_call_path` /
   `get_architecture` / `query_graph`: query symbols, call paths and module structure
   instead of reading whole files. Re-indexed incrementally as the agent edits.
+  Searching by concept? Pass `search_graph` the identifier names you expect via
+  `candidate_symbols` — the agent supplies the semantic signal, the dependency-free
+  lexical engine does the lookup (no embedding model required). See
+  [the design](docs/superpowers/specs/2026-06-04-query-guided-search-design.md).
 - **Session injection** — at session start Recarto injects the most relevant memories
   for the current branch, a compact module map, and recent bugs.
 
