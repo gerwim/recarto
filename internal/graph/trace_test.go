@@ -40,6 +40,39 @@ func TestTraceCallPathCallersRespectsResolution(t *testing.T) {
 	}
 }
 
+func TestCallNeighborsAnnotatesConfidence(t *testing.T) {
+	e := newTestEngine(t)
+	ctx := context.Background()
+	src := []byte("namespace N;\n" +
+		"class Dep { public void Run() {} }\n" +
+		"class Other { public void Run() {} }\n" +
+		"class Svc { private readonly Dep _dep; void M() { _dep.Run(); } }")
+	if err := e.IndexFile(ctx, "/wt", "Svc.cs", src, 1, int64(len(src))); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.Resolve(ctx, "/wt"); err != nil {
+		t.Fatal(err)
+	}
+	chains, err := e.TraceCallPath(ctx, "/wt", "N.Svc.M", "callees", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sawRun bool
+	for _, ch := range chains {
+		for _, n := range ch {
+			if n.Name == "Run" {
+				sawRun = true
+				if n.Path != "Svc.cs" || n.Resolution != "typed" || n.Confidence != "high" {
+					t.Errorf("Run hop = %+v, want typed/high in Svc.cs", n)
+				}
+			}
+		}
+	}
+	if !sawRun {
+		t.Errorf("expected a Run callee; chains=%v", chains)
+	}
+}
+
 func TestTraceCallPathCallees(t *testing.T) {
 	e := newTestEngine(t)
 	ctx := context.Background()

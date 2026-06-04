@@ -8,10 +8,25 @@ import (
 
 // CallNode is one hop in a call chain.
 type CallNode struct {
-	NodeID string
-	Name   string
-	Path   string
-	Line   int
+	NodeID     string
+	Name       string
+	Path       string
+	Line       int
+	Resolution string // how the edge into this hop resolved: self|typed|static|iface|name ("" for root)
+	Confidence string // high|medium|low ("" for root)
+	Receiver   string // receiver expression for an ambiguous hop, else ""
+}
+
+// confLabel buckets a candidate confidence into a verbalizable band.
+func confLabel(c float64) string {
+	switch {
+	case c >= 0.8:
+		return "high"
+	case c >= 0.4:
+		return "medium"
+	default:
+		return "low"
+	}
 }
 
 // TraceCallPath returns call chains starting at symbol. direction "callees"
@@ -20,6 +35,13 @@ type CallNode struct {
 // avoid explosion. Edges resolved by dst_node_id are followed directly;
 // unresolved edges fall back to matching dst_name to a node name.
 func (e *Engine) TraceCallPath(ctx context.Context, worktree, symbol, direction string, depth int) ([][]CallNode, error) {
+	return e.TraceCallPathFiltered(ctx, worktree, symbol, direction, depth, 0)
+}
+
+// TraceCallPathFiltered is TraceCallPath with an explicit confidence floor:
+// minConf 0 uses the adaptive default (each call site shows its high/medium
+// candidates, or its low ones only when it has nothing better).
+func (e *Engine) TraceCallPathFiltered(ctx context.Context, worktree, symbol, direction string, depth int, minConf float64) ([][]CallNode, error) {
 	if depth <= 0 {
 		depth = 3
 	}
@@ -39,7 +61,7 @@ func (e *Engine) TraceCallPath(ctx context.Context, worktree, symbol, direction 
 			chains = append(chains, path)
 			return // depth limit reached; don't issue a needless neighbor query
 		}
-		next, err := e.callNeighbors(ctx, worktree, cur, direction)
+		next, err := e.callNeighbors(ctx, worktree, cur, direction, minConf)
 		if err != nil || len(next) == 0 {
 			chains = append(chains, path)
 			return
@@ -73,46 +95,89 @@ SELECT n.id, n.name, f.path, n.start_line
 	return n, err
 }
 
-// callNeighbors returns the next hop nodes for cur in the given direction, capped.
-func (e *Engine) callNeighbors(ctx context.Context, worktree string, cur CallNode, direction string) ([]CallNode, error) {
+// callNeighbors returns next-hop nodes for cur in the given direction, reading
+// the candidate set. Per call site (edge): if it has any candidate at/above the
+// medium band keep those, else keep its low candidates (capped) — so a confident
+// call yields its precise target and an ambiguous call yields its alternatives.
+// minConf drops anything below the caller's floor. Capped by fanout.
+func (e *Engine) callNeighbors(ctx context.Context, worktree string, cur CallNode, direction string, minConf float64) ([]CallNode, error) {
 	const fanout = 25
+	const lowCapPerEdge = 5
 	var q string
 	if direction == "callers" {
 		q = `
-SELECT DISTINCT n.id, n.name, f.path, n.start_line
-  FROM edges ed
-  JOIN nodes n ON n.id = ed.src_node_id
-  JOIN files f ON f.id = n.file_id
- WHERE ed.kind='calls' AND f.worktree = ?
-   AND (ed.dst_node_id = ? OR (ed.dst_node_id IS NULL AND ed.dst_name = ?))
- LIMIT ?`
+SELECT ed.id, n.id, n.name, f.path, n.start_line, ec.confidence, ec.method, ed.dst_recv
+  FROM edge_candidates ec
+  JOIN edges ed ON ed.id = ec.edge_id
+  JOIN nodes n  ON n.id = ed.src_node_id
+  JOIN files f  ON f.id = n.file_id
+ WHERE ed.kind='calls' AND ec.dst_node_id = ? AND f.worktree = ?
+ ORDER BY ed.id, ec.confidence DESC, n.id`
 	} else {
 		q = `
-SELECT DISTINCT n.id, n.name, f.path, n.start_line
+SELECT ed.id, n.id, n.name, f.path, n.start_line, ec.confidence, ec.method, ed.dst_recv
   FROM edges ed
-  JOIN nodes n ON (n.id = ed.dst_node_id OR (ed.dst_node_id IS NULL AND n.name = ed.dst_name))
+  JOIN edge_candidates ec ON ec.edge_id = ed.id
+  JOIN nodes n ON n.id = ec.dst_node_id
   JOIN files f ON f.id = n.file_id
  WHERE ed.kind='calls' AND ed.src_node_id = ? AND f.worktree = ?
- LIMIT ?`
+ ORDER BY ed.id, ec.confidence DESC, n.id`
 	}
-	var rows *sql.Rows
-	var err error
-	if direction == "callers" {
-		rows, err = e.st.DB.QueryContext(ctx, q, worktree, cur.NodeID, cur.Name, fanout)
-	} else {
-		rows, err = e.st.DB.QueryContext(ctx, q, cur.NodeID, worktree, fanout)
-	}
+	rows, err := e.st.DB.QueryContext(ctx, q, cur.NodeID, worktree)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var out []CallNode
+
+	type cand struct {
+		node CallNode
+		conf float64
+	}
+	byEdge := map[string][]cand{}
+	var order []string
 	for rows.Next() {
+		var edgeID, recv, method string
 		var n CallNode
-		if err := rows.Scan(&n.NodeID, &n.Name, &n.Path, &n.Line); err != nil {
+		var conf float64
+		if err := rows.Scan(&edgeID, &n.NodeID, &n.Name, &n.Path, &n.Line, &conf, &method, &recv); err != nil {
 			return nil, err
 		}
-		out = append(out, n)
+		n.Resolution, n.Confidence, n.Receiver = method, confLabel(conf), recv
+		if _, seen := byEdge[edgeID]; !seen {
+			order = append(order, edgeID)
+		}
+		byEdge[edgeID] = append(byEdge[edgeID], cand{n, conf})
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	var out []CallNode
+	seen := map[string]bool{}
+	for _, edgeID := range order {
+		cs := byEdge[edgeID]
+		hasBetter := cs[0].conf >= 0.4 // rows are confidence-desc within an edge
+		kept := 0
+		for _, c := range cs {
+			if c.conf < minConf {
+				continue
+			}
+			if hasBetter && c.conf < 0.4 {
+				continue // per-site floor: drop low when a better candidate exists
+			}
+			if !hasBetter && kept >= lowCapPerEdge {
+				break // cap the ambiguous candidate set
+			}
+			if seen[c.node.NodeID] {
+				continue
+			}
+			seen[c.node.NodeID] = true
+			out = append(out, c.node)
+			kept++
+			if len(out) >= fanout {
+				return out, nil
+			}
+		}
+	}
+	return out, nil
 }
