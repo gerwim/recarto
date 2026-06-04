@@ -102,8 +102,32 @@ WHERE dst_node_id IS NULL
 // callStrategies are INSERT OR IGNORE passes into edge_candidates, applied in
 // priority order (highest confidence first). Each binds (worktree, worktree).
 var callStrategies = []string{
+	stratTypedReceiver,
 	stratNameFallback,
 }
+
+// stratTypedReceiver (S2): the receiver identifier resolves, via a type_binding
+// in scope at the call (the binding's scope contains the calling method's span —
+// edges.src_node_id), to type T; bind to T.<method>. Confidence 0.9.
+const stratTypedReceiver = `
+INSERT OR IGNORE INTO edge_candidates(edge_id, dst_node_id, confidence, method)
+SELECT ed.id, m.id, 0.9, 'typed'
+  FROM edges ed
+  JOIN files ef  ON ef.id = ed.file_id
+  JOIN nodes src ON src.id = ed.src_node_id
+  JOIN type_bindings tb ON tb.file_id = ed.file_id
+       AND tb.name = ed.dst_recv
+       AND tb.scope_start_byte <= src.start_byte
+       AND src.end_byte <= tb.scope_end_byte
+  JOIN nodes m  ON m.kind IN ('method','property','constructor','function')
+       AND ( m.qualified_name = tb.type_name || '.' || ed.dst_name
+             OR m.qualified_name LIKE '%.' || tb.type_name || '.' || ed.dst_name )
+  JOIN files mf ON mf.id = m.file_id
+ WHERE ed.kind = 'calls' AND ed.dst_recv <> ''
+   AND ef.worktree = ? AND mf.worktree = ?
+   AND ( ef.language = mf.language
+         OR ( ef.language IN ('typescript','tsx','javascript')
+              AND mf.language IN ('typescript','tsx','javascript') ) )`
 
 // stratNameFallback (S5): name-only fallback — any same-name callable in the
 // language family, capped per edge (locality-ordered), confidence 0.2. Only fires
