@@ -32,6 +32,13 @@ func TestParseCsharpCapturesReceiverAndBindings(t *testing.T) {
 			t.Errorf("binding %s = %q, want %q; all=%v", n, got[n], ty, res.Bindings)
 		}
 	}
+	// The implicit-type 'var' must not be stored as a binding type (it is noise
+	// that would mislead resolution; the object-creation type is the real one).
+	for _, b := range res.Bindings {
+		if b.TypeName == "var" {
+			t.Errorf("stored useless 'var' binding for %s; all=%v", b.Name, res.Bindings)
+		}
+	}
 	foundCall := false
 	for _, e := range res.Edges {
 		if e.Kind == "calls" && e.DstName == "Run" && e.Recv == "_dep" {

@@ -133,7 +133,10 @@ func (r *Registry) ParseFile(lang, path string, src []byte) (Result, error) {
 			res.Edges = append(res.Edges, Edge{
 				Kind: edgeKind(refKind), DstName: name, Recv: recv, StartByte: sb, Line: sl,
 			})
-		case bindName != "" && bindType != "":
+		case bindName != "" && bindType != "" && bindType != "var":
+			// C# `var x = …` yields an implicit_type "var"; skip it — the real type
+			// comes from the object-creation binding pattern. ("var" is a contextual
+			// keyword in C# and not a valid type name in Go either, so this is safe.)
 			res.Bindings = append(res.Bindings,
 				TypeBinding{Name: bindName, TypeName: bindType, StartByte: bindByte})
 		}
