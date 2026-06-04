@@ -3,6 +3,7 @@ package graph
 import (
 	"context"
 	"fmt"
+	"strings"
 )
 
 // Lexical fusion tuning. The exact (unicode61) primary pass carries full weight;
@@ -16,6 +17,16 @@ const (
 	synonymWeight = 0.4
 	trigramWeight = 0.25
 	triMinTermLen = 4
+)
+
+// Candidate-symbol fusion weights. When the LLM supplies candidate_symbols (the
+// identifier names it expects), an exact name/qualified-name match is the highest
+// possible signal — the model's guess landing precisely — so it outranks every
+// lexical pass; an identifier-split match on the guesses ranks just above plain
+// natural-language lexical hits.
+const (
+	candidateExactWeight = 2.0
+	candidateSplitWeight = 1.2
 )
 
 // vecReserveNum/vecReserveDen reserve a minority share of the result page for the
@@ -43,13 +54,20 @@ type SearchResult struct {
 }
 
 // Search returns symbols matching query, scoped to worktree and optionally
-// filtered by kind and language. It always runs the lexical tier (an exact pass
-// plus stemmed/synonym/trigram broadeners on underfill). When a semantic
-// embedder is set it additionally runs a vector-similarity pass and fuses it with
-// the lexical result via Reciprocal Rank Fusion, so symbols that share no tokens
-// with the query (true synonyms) are still found. With no embedder, behaviour is
-// purely lexical.
+// filtered by kind and language. It is SearchGuided with no candidate symbols:
+// purely lexical (an exact pass plus stemmed/synonym/trigram broadeners on
+// underfill), with the dormant vector tier fused in only when an embedder is set.
 func (e *Engine) Search(ctx context.Context, worktree, query, kind, lang string, limit int) ([]SearchResult, error) {
+	return e.SearchGuided(ctx, worktree, query, nil, kind, lang, limit)
+}
+
+// SearchGuided is Search with optional candidate_symbols: the identifier names an
+// LLM expects to exist for the concept in query. They drive two high-priority
+// lexical passes — exact name/qualified-name equality, then identifier-split FTS —
+// fused ABOVE the natural-language passes, so a concept query the agent annotated
+// with the right names surfaces those symbols even when the prose shares no tokens
+// with them. With no candidates the behaviour is identical to the previous Search.
+func (e *Engine) SearchGuided(ctx context.Context, worktree, query string, candidateSymbols []string, kind, lang string, limit int) ([]SearchResult, error) {
 	if limit <= 0 {
 		limit = 20
 	}
@@ -59,17 +77,105 @@ func (e *Engine) Search(ctx context.Context, worktree, query, kind, lang string,
 	}
 	_ = e.led.Incr(ctx, "lifetime", "graph_queries", 1)
 
+	if len(candidateSymbols) > 0 {
+		return e.mergeCandidates(ctx, worktree, candidateSymbols, lex, kind, lang, limit)
+	}
+
 	if e.emb == nil {
 		return dedupByName(lex, limit), nil
 	}
-
-	// Semantic tier. Embedding is best-effort: on any error, fall back to the
-	// lexical result rather than failing the search.
+	// Dormant semantic tier (set only under -tags ORT). Best-effort.
 	vec, verr := e.vectorPass(ctx, worktree, query, kind, lang, limit*3)
 	if verr != nil {
 		vec = nil
 	}
 	return mergeHybrid(lex, vec, limit), nil
+}
+
+// mergeCandidates fuses the candidate exact-name and identifier-split passes above
+// the natural-language lexical list, then dedups by name. The exact pass leads
+// (its hits are the agent's guesses landing precisely), the split pass ranks above
+// plain lexical, and lexical backfills the remaining page.
+func (e *Engine) mergeCandidates(ctx context.Context, worktree string, candidates []string, lex []SearchResult, kind, lang string, limit int) ([]SearchResult, error) {
+	fetch := limit * 3
+	exact, err := e.candidateExactPass(ctx, worktree, candidates, kind, lang, fetch)
+	if err != nil {
+		return nil, err
+	}
+	var split []SearchResult
+	if terms := baseTerms(strings.Join(candidates, " ")); len(terms) > 0 {
+		split, err = e.ftsPass(ctx, "nodes_fts", orMatch(terms), worktree, kind, lang, fetch)
+		if err != nil {
+			return nil, err
+		}
+	}
+	fused := fuseResults(
+		rankedList{weight: candidateExactWeight, results: exact},
+		rankedList{weight: candidateSplitWeight, results: split},
+		rankedList{weight: exactWeight, results: lex},
+	)
+	return dedupByName(fused, limit), nil
+}
+
+// candidateExactPass returns symbols whose name OR qualified_name equals one of
+// the candidate identifiers (case-insensitive), scoped to worktree and optional
+// kind/language. These are the agent's guesses landing exactly, so the caller
+// fuses them at the top weight. Returns nil for an empty/blank candidate set.
+func (e *Engine) candidateExactPass(ctx context.Context, worktree string, candidates []string, kind, lang string, limit int) ([]SearchResult, error) {
+	seen := map[string]bool{}
+	var lowered []any
+	var ph []string
+	for _, c := range candidates {
+		lc := strings.ToLower(strings.TrimSpace(c))
+		if lc == "" || seen[lc] {
+			continue
+		}
+		seen[lc] = true
+		lowered = append(lowered, lc)
+		ph = append(ph, "?")
+	}
+	if len(lowered) == 0 {
+		return nil, nil
+	}
+	inList := strings.Join(ph, ",")
+	args := []any{worktree}
+	args = append(args, lowered...) // lower(n.name) IN (...)
+	args = append(args, lowered...) // lower(n.qualified_name) IN (...)
+	sql := `
+SELECT n.id, n.name, n.qualified_name, n.kind, f.language, f.path, n.start_line
+  FROM nodes n
+  JOIN files f ON f.id = n.file_id
+ WHERE f.worktree = ?
+   AND (lower(n.name) IN (` + inList + `) OR lower(n.qualified_name) IN (` + inList + `))`
+	if kind != "" {
+		sql += " AND n.kind = ?"
+		args = append(args, kind)
+	}
+	if lang != "" {
+		sql += " AND f.language = ?"
+		args = append(args, lang)
+	}
+	sql += " ORDER BY n.name LIMIT ?"
+	args = append(args, limit)
+
+	rows, err := e.st.DB.QueryContext(ctx, sql, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []SearchResult
+	for rows.Next() {
+		var r SearchResult
+		if err := rows.Scan(&r.NodeID, &r.Name, &r.QualifiedName, &r.Kind,
+			&r.Language, &r.Path, &r.Line); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // mergeHybrid fuses the lexical and vector tiers with a reserved tail. Lexical

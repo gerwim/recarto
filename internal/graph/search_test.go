@@ -118,6 +118,63 @@ func resultNames(rs []SearchResult) []string {
 	return out
 }
 
+func TestSearchGuidedCandidateBoost(t *testing.T) {
+	e := newTestEngine(t)
+	ctx := context.Background()
+	// The concept query shares NO identifier token with the target name; only the
+	// LLM-supplied candidate bridges them.
+	src := []byte("namespace App;\nclass PdokAddressLookupService {}\nclass InvoiceService {}\nclass ReportService {}")
+	if err := e.IndexFile(ctx, "/wt", "App.cs", src, 1, int64(len(src))); err != nil {
+		t.Fatal(err)
+	}
+
+	// Split-token candidate: "AddressLookup" → address/lookup → PdokAddressLookupService.
+	got, err := e.SearchGuided(ctx, "/wt", "convert a street into coordinates",
+		[]string{"AddressLookup"}, "", "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) == 0 || got[0].Name != "PdokAddressLookupService" {
+		t.Fatalf("split candidate should boost PdokAddressLookupService to top, got %v", resultNames(got))
+	}
+
+	// Exact-name candidate: lands the precise symbol even with an unrelated query.
+	got2, err := e.SearchGuided(ctx, "/wt", "totally unrelated prose",
+		[]string{"InvoiceService"}, "", "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got2) == 0 || got2[0].Name != "InvoiceService" {
+		t.Fatalf("exact candidate should rank InvoiceService first, got %v", resultNames(got2))
+	}
+}
+
+func TestSearchGuidedNilCandidatesMatchesSearch(t *testing.T) {
+	e := newTestEngine(t)
+	ctx := context.Background()
+	src := []byte("namespace App;\nclass AlternativeSlotFinder {}\nclass SlotRepository {}")
+	if err := e.IndexFile(ctx, "/wt", "App.cs", src, 1, int64(len(src))); err != nil {
+		t.Fatal(err)
+	}
+	base, err := e.Search(ctx, "/wt", "alternative slot", "", "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	guided, err := e.SearchGuided(ctx, "/wt", "alternative slot", nil, "", "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bn, gn := resultNames(base), resultNames(guided)
+	if len(bn) != len(gn) {
+		t.Fatalf("nil-candidate SearchGuided diverged from Search: %v vs %v", bn, gn)
+	}
+	for i := range bn {
+		if bn[i] != gn[i] {
+			t.Fatalf("nil-candidate SearchGuided diverged at %d: %v vs %v", i, bn, gn)
+		}
+	}
+}
+
 func TestSearchByName(t *testing.T) {
 	e := newTestEngine(t)
 	ctx := context.Background()
