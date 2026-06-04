@@ -100,7 +100,7 @@ func usage(w io.Writer) error {
 	fmt.Fprintln(w, "recarto <command>")
 	fmt.Fprintln(w, "  init              configure agents (--agent claude,opencode,copilot  --scope user|repo)")
 	fmt.Fprintln(w, "  serve             run the MCP server over stdio")
-	fmt.Fprintln(w, "  hook <event>      run a Claude Code hook (session-start|post-read|post-edit|augment|stop)")
+	fmt.Fprintln(w, "  hook <event>      run an agent hook (session-start|post-read|post-edit|augment|stop) [--agent]")
 	fmt.Fprintln(w, "  status            repo id, branch, memory counts, ledger")
 	fmt.Fprintln(w, "  doctor            health checks (db, WAL, integrity, git)")
 	fmt.Fprintln(w, "  remember <kind>   record a memory (--title --body --files --symbols --tags --pin --global)")

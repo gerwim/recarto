@@ -5,28 +5,38 @@ VERSION     ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo 
 LDFLAGS     := -ldflags "-s -w -X $(MODULE)/internal/version.Version=$(VERSION)"
 
 # Recarto links tree-sitter via CGO, so cross-compilation needs a C cross-compiler.
-# We use `zig cc` (a build-time dependency only — never shipped). Targets match CI:
-# linux/amd64 (static musl), darwin/arm64, windows/amd64.
+# We use `zig cc` (a build-time dependency only — never shipped). Targets:
+# linux/amd64 (static musl), windows/amd64, darwin/arm64.
+#
+# CGO stays enabled for tree-sitter, but the netgo/osusergo tags force Go's
+# pure-Go DNS and os/user resolvers, keeping the binaries fully static.
+#
+# NOTE on `darwin`: cross-compiling to macOS additionally requires the macOS SDK
+# frameworks (CoreFoundation, Security) that crypto/x509 links — zig bundles libc
+# but not these frameworks. Build the darwin target either on a macOS host
+# (`make native`) or with the SDK available (e.g. via osxcross) on `-F`/SDKROOT.
+# linux and windows cross-build from any host with zig.
+TAGS := -tags netgo,osusergo
 
-.PHONY: all linux darwin windows native test vet fmt clean
+.PHONY: all linux windows darwin native test vet fmt clean
 
-all: linux darwin windows
+all: linux windows darwin
 
 linux:
 	GOOS=linux GOARCH=amd64 CGO_ENABLED=1 CC="zig cc -target x86_64-linux-musl" \
-		go build $(LDFLAGS) -o releases/linux-amd64/$(BINARY_NAME) $(PKG)
+		go build $(TAGS) $(LDFLAGS) -o releases/linux-amd64/$(BINARY_NAME) $(PKG)
 
 darwin:
 	GOOS=darwin GOARCH=arm64 CGO_ENABLED=1 CC="zig cc -target aarch64-macos" \
-		go build $(LDFLAGS) -o releases/darwin-arm64/$(BINARY_NAME) $(PKG)
+		go build $(TAGS) $(LDFLAGS) -o releases/darwin-arm64/$(BINARY_NAME) $(PKG)
 
 windows:
 	GOOS=windows GOARCH=amd64 CGO_ENABLED=1 CC="zig cc -target x86_64-windows-gnu" \
-		go build $(LDFLAGS) -o releases/windows-amd64/$(BINARY_NAME).exe $(PKG)
+		go build $(TAGS) $(LDFLAGS) -o releases/windows-amd64/$(BINARY_NAME).exe $(PKG)
 
 # Build for the host platform using the system C compiler (no zig required).
 native:
-	CGO_ENABLED=1 go build $(LDFLAGS) -o releases/$(BINARY_NAME) $(PKG)
+	CGO_ENABLED=1 go build $(TAGS) $(LDFLAGS) -o releases/$(BINARY_NAME) $(PKG)
 
 test:
 	go test ./...

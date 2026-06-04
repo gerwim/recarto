@@ -1,93 +1,163 @@
-# recarto
+# Recarto
 
+**Cross-session memory and a code graph for AI coding agents — one static binary.**
 
+Recarto gives your coding agent a persistent brain: it remembers preferences,
+learnings, decisions, do-not-repeats and bugs across sessions, and it indexes your
+codebase into a tree-sitter symbol/call graph. Both are exposed as **MCP tools** and
+wired into each agent's **lifecycle hooks**, so the right context shows up
+automatically at session start and while you work.
 
-## Getting started
+Everything lives in a shared per-repo SQLite cache **outside** your working tree
+(`~/.cache/recarto/<repo-id>/`), keyed by the repository and tagged per branch and
+worktree. Nothing is committed, so there are no file-merge conflicts.
 
-To make it easy for you to get started with GitLab, here's a list of recommended next steps.
+Supported agents: **Claude Code**, **OpenCode**, and **GitHub Copilot CLI** — with
+feature parity across all three.
 
-Already a pro? Just edit this README.md and make it your own. Want to make it easy? [Use the template at the bottom](#editing-this-readme)!
+---
 
-## Add your files
+## What it does
 
-* [Create](https://docs.gitlab.com/user/project/repository/web_editor/#create-a-file) or [upload](https://docs.gitlab.com/user/project/repository/web_editor/#upload-a-file) files
-* [Add files using the command line](https://docs.gitlab.com/topics/git/add_files/#add-files-to-a-git-repository) or push an existing Git repository with the following command:
+- **Memory** — `record_memory` / `recall_memory`: token-budgeted, branch-aware recall
+  ranked by lexical (BM25) + structural signals; near-duplicates are reinforced, not
+  duplicated.
+- **Bugs** — `record_bug` / `search_bugs`: searchable bug history (error, root cause,
+  fix), surfaced just-in-time when you read or edit the related file.
+- **Code graph** — `search_graph` / `get_code_snippet` / `trace_call_path` /
+  `get_architecture` / `query_graph`: query symbols, call paths and module structure
+  instead of reading whole files. Re-indexed incrementally as the agent edits.
+- **Session injection** — at session start Recarto injects the most relevant memories
+  for the current branch, a compact module map, and recent bugs.
+
+## Install
+
+Recarto is a single self-contained binary (no runtime dependencies).
+
+### Download a prebuilt binary
+
+Pick the build for your platform, then put it on your `PATH`:
+
+| Platform | File |
+|---|---|
+| **Linux x64** | `recarto` (linux-amd64, static musl) |
+| **Windows x64** | `recarto.exe` (windows-amd64) |
+| **macOS (Apple Silicon)** | `recarto` (darwin-arm64) |
+
+**Linux / macOS**
+
+```sh
+chmod +x recarto
+sudo mv recarto /usr/local/bin/recarto      # or anywhere on your PATH
+recarto version
+```
+
+**Windows (PowerShell)**
+
+```powershell
+# Move recarto.exe to a folder on your PATH, e.g. %USERPROFILE%\bin
+mkdir $HOME\bin -Force
+Move-Item .\recarto.exe $HOME\bin\
+setx PATH "$($env:PATH);$HOME\bin"          # new terminals pick this up
+recarto version
+```
+
+### Build from source
+
+Requires **Go 1.26.4**. Recarto links tree-sitter via CGO, so a C toolchain is
+needed.
+
+```sh
+git clone https://git.gerwim.nl/gerwim/recarto.git
+cd recarto
+
+# Host build (uses your system C compiler — best on macOS for the darwin binary):
+make native            # → releases/recarto
+
+# Cross-compile the release targets (requires `zig`):
+make linux             # → releases/linux-amd64/recarto   (static musl)
+make windows           # → releases/windows-amd64/recarto.exe
+make darwin            # → releases/darwin-arm64/recarto   (see note below)
+make all               # linux + windows + darwin
+```
+
+`zig` is used only as a cross-compiler (`zig cc`) and is never shipped. Install it
+from <https://ziglang.org/download/> (or `brew install zig`).
+
+**linux** and **windows** cross-build from any host with zig. The **darwin** target
+additionally needs the macOS SDK frameworks (`CoreFoundation`, `Security`, linked by
+Go's `crypto/x509`), which zig does not bundle — so build it on a macOS host
+(`make native`) or with an SDK available (e.g. [osxcross](https://github.com/tpoechtrager/osxcross)).
+
+## Setup
+
+From inside a git repository, run:
+
+```sh
+recarto init
+```
+
+`recarto init` **auto-detects** which agents are installed (`claude`, `opencode`,
+`copilot` on your `PATH`) and configures each one. When run interactively it asks
+whether to install at **repo** scope (this project) or **user** scope (global).
+
+Flags:
 
 ```
-cd existing_repo
-git remote add origin https://git.gerwim.nl/gerwim/recarto.git
-git branch -M master
-git push -uf origin master
+recarto init [--agent claude,opencode,copilot] [--scope user|repo]
 ```
 
-## Integrate with your tools
+What each agent gets:
 
-* [Set up project integrations](https://git.gerwim.nl/gerwim/recarto/-/settings/integrations)
+| Agent | MCP server | Hooks | Instructions |
+|---|---|---|---|
+| **Claude Code** | `.mcp.json` (repo) / `~/.claude.json` (user) | `.claude/settings.json` / `~/.claude/settings.json` | `AGENTS.md` / `~/.claude/CLAUDE.md` |
+| **OpenCode** | `opencode.json` / `~/.config/opencode/opencode.json` | `.opencode/plugins/recarto.js` (generated) | `AGENTS.md` / `~/.config/opencode/AGENTS.md` |
+| **Copilot CLI** | `.mcp.json` / `~/.copilot/mcp-config.json` | `.github/hooks/recarto.json` / `~/.copilot/hooks/recarto.json` | `AGENTS.md` / `~/.copilot/copilot-instructions.md` |
 
-## Collaborate with your team
-
-* [Invite team members and collaborators](https://docs.gitlab.com/user/project/members/)
-* [Create a new merge request](https://docs.gitlab.com/user/project/merge_requests/creating_merge_requests/)
-* [Automatically close issues from merge requests](https://docs.gitlab.com/user/project/issues/managing_issues/#closing-issues-automatically)
-* [Enable merge request approvals](https://docs.gitlab.com/user/project/merge_requests/approvals/)
-* [Set auto-merge](https://docs.gitlab.com/user/project/merge_requests/auto_merge/)
-
-## Test and Deploy
-
-Use the built-in continuous integration in GitLab.
-
-* [Get started with GitLab CI/CD](https://docs.gitlab.com/ci/quick_start/)
-* [Analyze your code for known vulnerabilities with Static Application Security Testing (SAST)](https://docs.gitlab.com/user/application_security/sast/)
-* [Deploy to Kubernetes, Amazon EC2, or Amazon ECS using Auto Deploy](https://docs.gitlab.com/topics/autodevops/requirements/)
-* [Use pull-based deployments for improved Kubernetes management](https://docs.gitlab.com/user/clusters/agent/)
-* [Set up protected environments](https://docs.gitlab.com/ci/environments/protected_environments/)
-
-***
-
-# Editing this README
-
-When you're ready to make this README your own, just edit this file and use the handy template below (or feel free to structure it however you want - this is just a starting point!). Thanks to [makeareadme.com](https://www.makeareadme.com/) for this template.
-
-## Suggestions for a good README
-
-Every project is different, so consider which of these sections apply to yours. The sections used in the template are suggestions for most open source projects. Also keep in mind that while a README can be too long and detailed, too long is better than too short. If you think your README is too long, consider utilizing another form of documentation rather than cutting out information.
-
-## Name
-Choose a self-explaining name for your project.
-
-## Description
-Let people know what your project can do specifically. Provide context and add a link to any reference visitors might be unfamiliar with. A list of Features or a Background subsection can also be added here. If there are alternatives to your project, this is a good place to list differentiating factors.
-
-## Badges
-On some READMEs, you may see small images that convey metadata, such as whether or not all the tests are passing for the project. You can use Shields to add some to your README. Many services also have instructions for adding a badge.
-
-## Visuals
-Depending on what you are making, it can be a good idea to include screenshots or even a video (you'll frequently see GIFs rather than actual videos). Tools like ttygif can help, but check out Asciinema for a more sophisticated method.
-
-## Installation
-Within a particular ecosystem, there may be a common way of installing things, such as using Yarn, NuGet, or Homebrew. However, consider the possibility that whoever is reading your README is a novice and would like more guidance. Listing specific steps helps remove ambiguity and gets people to using your project as quickly as possible. If it only runs in a specific context like a particular programming language version or operating system or has dependencies that have to be installed manually, also add a Requirements subsection.
+`recarto init` is idempotent — re-running merges only what's missing and preserves
+your existing config.
 
 ## Usage
-Use examples liberally, and show the expected output if you can. It's helpful to have inline the smallest example of usage that you can demonstrate, while providing links to more sophisticated examples if they are too long to reasonably include in the README.
 
-## Support
-Tell people where they can go to for help. It can be any combination of an issue tracker, a chat room, an email address, etc.
+Day to day you don't call Recarto directly; your agent uses the MCP tools and the
+hooks fire automatically. The CLI is available for inspection and scripting:
 
-## Roadmap
-If you have ideas for releases in the future, it is a good idea to list them in the README.
+```
+recarto status            repo id, branch, memory counts, ledger
+recarto doctor            health checks (db, WAL, integrity, git)
+recarto remember <kind>   record a memory (--title --body --files --symbols --tags --pin --global)
+recarto recall [hint]     ranked, budgeted recall (--files --symbols --kind --limit --budget)
+recarto bug add|search    record or search bug memories
+recarto memory show       render all active memory as markdown (--branch)
+recarto index             build/refresh the code graph for this worktree
+recarto graph <sub>       query the code graph (search|callers|callees|arch|query|snippet)
+recarto compact           prune/decay memory (--force --dry-run --budget-tokens)
+recarto serve             run the MCP server over stdio (used by the agents)
+```
 
-## Contributing
-State if you are open to contributions and what your requirements are for accepting them.
+MCP tools exposed by `recarto serve`: `record_memory`, `recall_memory`, `get_memory`,
+`list_memory`, `record_bug`, `search_bugs`, `search_graph`, `get_code_snippet`,
+`trace_call_path`, `get_architecture`, `query_graph`.
 
-For people who want to make changes to your project, it's helpful to have some documentation on how to get started. Perhaps there is a script that they should run or some environment variables that they need to set. Make these steps explicit. These instructions could also be useful to your future self.
+## How it works
 
-You can also document commands to lint the code or run tests. These steps help to ensure high code quality and reduce the likelihood that the changes inadvertently break something. Having instructions for running tests is especially helpful if it requires external setup, such as starting a Selenium server for testing in a browser.
+- **One store per repo** in a global cache (`~/.cache/recarto/<repo-id>/`), shared
+  across all worktrees; the repo id comes from `git rev-parse --git-common-dir`.
+  Records are branch/worktree-tagged.
+- **SQLite is the single source of truth** (pure-Go `modernc.org/sqlite`, WAL);
+  markdown is on-demand export only.
+- **No daemon.** Hooks are pure exit-0 CLI invocations; the code graph reconciles
+  lazily at session start and incrementally on each edit.
+- **Languages:** Go, C#, TypeScript (+TSX), JavaScript (+JSX) via tree-sitter.
 
-## Authors and acknowledgment
-Show your appreciation to those who have contributed to the project.
+## Development
 
-## License
-For open source projects, say how it is licensed.
+```sh
+make test     # go test ./...
+make vet      # go vet ./...
+make fmt      # gofmt -l .
+```
 
-## Project status
-If you have run out of energy or time for your project, put a note at the top of the README saying that development has slowed down or stopped completely. Someone may choose to fork your project or volunteer to step in as a maintainer or owner, allowing your project to keep going. You can also make an explicit request for maintainers.
+CI runs the suite on Linux, macOS and Windows, gofmt-checks every file, and
+cross-compiles all three release targets with `zig cc`.
