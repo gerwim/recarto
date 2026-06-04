@@ -102,9 +102,29 @@ WHERE dst_node_id IS NULL
 // callStrategies are INSERT OR IGNORE passes into edge_candidates, applied in
 // priority order (highest confidence first). Each binds (worktree, worktree).
 var callStrategies = []string{
+	stratSelf,
 	stratTypedReceiver,
 	stratNameFallback,
 }
+
+// stratSelf (S1): a bare M() or this.M() inside a class binds to a sibling method
+// of the same class, linked via contains edges (class -> caller, class -> target).
+// Confidence 0.95. (C#; Go self-calls use an explicit receiver and go via S2.)
+// The second bound parameter is unused here but kept so every callStrategies
+// entry has the same (worktree, worktree) arity; "? IS NOT NULL" is always true.
+const stratSelf = `
+INSERT OR IGNORE INTO edge_candidates(edge_id, dst_node_id, confidence, method)
+SELECT ed.id, m.id, 0.95, 'self'
+  FROM edges ed
+  JOIN files ef ON ef.id = ed.file_id
+  JOIN edges pc ON pc.kind = 'contains' AND pc.dst_node_id = ed.src_node_id
+  JOIN edges cm ON cm.kind = 'contains' AND cm.src_node_id = pc.src_node_id
+  JOIN nodes m  ON m.id = cm.dst_node_id
+       AND m.kind IN ('method','property','constructor')
+       AND m.name = ed.dst_name
+ WHERE ed.kind = 'calls' AND (ed.dst_recv = '' OR ed.dst_recv = 'this')
+   AND ef.worktree = ?
+   AND ? IS NOT NULL`
 
 // stratTypedReceiver (S2): the receiver identifier resolves, via a type_binding
 // in scope at the call (the binding's scope contains the calling method's span —

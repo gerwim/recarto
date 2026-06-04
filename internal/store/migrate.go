@@ -7,7 +7,7 @@ import (
 )
 
 // schemaVersion is the number of applied migrations.
-const schemaVersion = 9
+const schemaVersion = 10
 
 // migrations are applied in order; index+1 becomes user_version.
 var migrations = []string{
@@ -278,6 +278,23 @@ CREATE INDEX idx_edge_candidates_dst ON edge_candidates(dst_node_id);
 DELETE FROM nodes_fts;
 DELETE FROM nodes_fts_stem;
 DELETE FROM nodes_fts_tri;
+DELETE FROM nodes;
+DELETE FROM files;
+DELETE FROM meta WHERE key LIKE 'graph_token:%';
+`,
+	// v10 (receiver-aware resolution fix): csharp.scm's member-access call pattern
+	// now makes the receiver optional (expression: (_)?), so `this.Method()` calls
+	// — which parse without an `expression` field — are captured again (Phase 1's
+	// required-expression pattern silently dropped them). Indexer change, so wipe
+	// the rebuildable graph + freshness token to force a rebuild. Memories/bugs
+	// untouched. See the v5 comment for the standing convention.
+	`
+DELETE FROM edge_candidates;
+DELETE FROM type_bindings;
+DELETE FROM nodes_fts;
+DELETE FROM nodes_fts_stem;
+DELETE FROM nodes_fts_tri;
+DELETE FROM edges;
 DELETE FROM nodes;
 DELETE FROM files;
 DELETE FROM meta WHERE key LIKE 'graph_token:%';

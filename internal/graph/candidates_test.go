@@ -52,6 +52,29 @@ func TestResolveS2TypedReceiverCSharp(t *testing.T) {
 	}
 }
 
+func TestResolveS1SelfCSharp(t *testing.T) {
+	e := newTestEngine(t)
+	ctx := context.Background()
+	src := []byte("namespace N;\n" +
+		"class Other { void Helper() {} }\n" +
+		"class Svc { void Helper() {} void M() { Helper(); this.Helper(); } }")
+	if err := e.IndexFile(ctx, "/wt", "Svc.cs", src, 1, int64(len(src))); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.Resolve(ctx, "/wt"); err != nil {
+		t.Fatal(err)
+	}
+	// Both bare Helper() and this.Helper() capture with recv="" (this has no
+	// expression child in the C# grammar), and S1 binds them to the sibling.
+	got := candidateTargets(t, e, "Helper", "")
+	if got["N.Svc.Helper"] != "self" {
+		t.Errorf("Helper()/this.Helper() inside Svc should bind self to N.Svc.Helper; got %v", got)
+	}
+	if _, bad := got["N.Other.Helper"]; bad {
+		t.Errorf("self-call must not bind Other.Helper; got %v", got)
+	}
+}
+
 func TestResolveS2TypedReceiverGo(t *testing.T) {
 	e := newTestEngine(t)
 	ctx := context.Background()

@@ -10,7 +10,7 @@
 (property_declaration name: (identifier) @name) @definition.property
 (namespace_declaration name: (_) @name) @definition.namespace
 (file_scoped_namespace_declaration name: (_) @name) @definition.namespace
-(invocation_expression function: (member_access_expression expression: (_) @recv name: (identifier) @name)) @reference.call
+(invocation_expression function: (member_access_expression expression: (_)? @recv name: (identifier) @name)) @reference.call
 (invocation_expression function: (identifier) @name) @reference.call
 (base_list (identifier) @name) @reference.extends
 (base_list (generic_name (identifier) @name)) @reference.extends
