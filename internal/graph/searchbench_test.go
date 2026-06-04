@@ -44,6 +44,7 @@ type benchQuery struct {
 	Q    string   `json:"q"`
 	Rel  []string `json:"rel"`
 	Type string   `json:"type"`
+	Cand []string `json:"cand,omitempty"` // LLM-supplied candidate_symbols (semantic queries)
 }
 
 // TestSearchQualityBenchmark indexes a real worktree and measures how well
@@ -107,7 +108,7 @@ func TestSearchQualityBenchmark(t *testing.T) {
 	t.Logf("%-42s %-15s recall@k  rank1", "query", "type")
 
 	for _, q := range queries {
-		res, err := e.Search(ctx, repo, q.Q, "", "", k)
+		res, err := e.SearchGuided(ctx, repo, q.Q, q.Cand, "", "", k)
 		if err != nil {
 			t.Fatalf("search %q: %v", q.Q, err)
 		}
