@@ -19,7 +19,12 @@ type SearchResult struct {
 
 // ftsQuery turns a free-text query into a safe FTS5 MATCH expression: each
 // whitespace-separated term is double-quoted (so identifiers with punctuation or
-// FTS operators can't break the query) and ANDed together.
+// FTS operators can't break the query) and ORed together. OR (not AND) is
+// deliberate: a natural-language or multi-word query rarely matches every term
+// against a single symbol's name, so AND-matching returned "(no matches)" for
+// anything but an exact phrase. With OR, partial matches surface and bm25 ranks
+// the symbol matching the most (and rarest) terms first — an exact/full match
+// still wins, but a near-miss is now found instead of dropped.
 func ftsQuery(q string) string {
 	fields := strings.Fields(q)
 	if len(fields) == 0 {
@@ -28,7 +33,7 @@ func ftsQuery(q string) string {
 	for i, f := range fields {
 		fields[i] = `"` + strings.ReplaceAll(f, `"`, `""`) + `"`
 	}
-	return strings.Join(fields, " ")
+	return strings.Join(fields, " OR ")
 }
 
 // Search returns symbols matching query (FTS over name/qualified_name), scoped to

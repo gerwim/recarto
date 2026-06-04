@@ -76,3 +76,43 @@ func TestSearchByName(t *testing.T) {
 		t.Errorf("cross-worktree search leaked %d results", len(none))
 	}
 }
+
+func TestSearchOrReturnsPartialMatches(t *testing.T) {
+	e := newTestEngine(t)
+	ctx := context.Background()
+	// No single symbol contains BOTH query words: AND-matching returns nothing,
+	// OR-matching surfaces each partial match (ranked).
+	src := []byte("namespace App;\nclass AlternativeSlotFinder {}\nclass TravelTimeService {}")
+	if err := e.IndexFile(ctx, "/wt", "App.cs", src, 1, int64(len(src))); err != nil {
+		t.Fatal(err)
+	}
+	got, err := e.Search(ctx, "/wt", "alternative travel", "", "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	set := map[string]bool{}
+	for _, n := range resultNames(got) {
+		set[n] = true
+	}
+	if !set["AlternativeSlotFinder"] || !set["TravelTimeService"] {
+		t.Fatalf("OR search should surface both partial matches, got %v", resultNames(got))
+	}
+}
+
+func TestSearchRanksMoreCompleteMatchHigher(t *testing.T) {
+	e := newTestEngine(t)
+	ctx := context.Background()
+	// Both symbols match "slot"; only one also matches "alternative". The fuller
+	// match must rank first under bm25 even though the query is now OR-matched.
+	src := []byte("namespace App;\nclass AlternativeSlotFinder {}\nclass SlotRepository {}")
+	if err := e.IndexFile(ctx, "/wt", "App.cs", src, 1, int64(len(src))); err != nil {
+		t.Fatal(err)
+	}
+	got, err := e.Search(ctx, "/wt", "alternative slot", "", "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) == 0 || got[0].Name != "AlternativeSlotFinder" {
+		t.Fatalf("fuller match should rank first, got %v", resultNames(got))
+	}
+}
