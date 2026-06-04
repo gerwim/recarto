@@ -12,6 +12,7 @@ type Symbol struct {
 	Kind          string
 	Name          string
 	QualifiedName string
+	RecvType      string // method receiver type, "" unless a Go method (e.g. "Saga")
 	StartByte     uint
 	EndByte       uint
 	StartLine     uint // 1-based
@@ -23,14 +24,24 @@ type Symbol struct {
 type Edge struct {
 	Kind      string // calls | imports | extends | implements | references
 	DstName   string
+	Recv      string // receiver expression text for a member/selector call, else ""
 	StartByte uint
 	Line      uint // 1-based
 }
 
+// TypeBinding records that, at a byte offset, identifier Name has static type
+// TypeName. The indexer turns StartByte into a scope (the enclosing definition).
+type TypeBinding struct {
+	Name      string
+	TypeName  string
+	StartByte uint
+}
+
 // Result is the extracted graph for one file.
 type Result struct {
-	Symbols []Symbol
-	Edges   []Edge
+	Symbols  []Symbol
+	Edges    []Edge
+	Bindings []TypeBinding
 }
 
 // edgeKind maps a reference.* capture suffix to a graph edge kind.
@@ -77,14 +88,27 @@ func (r *Registry) ParseFile(lang, path string, src []byte) (Result, error) {
 	var res Result
 	matches := cur.Matches(q, tree.RootNode(), src)
 	for m := matches.Next(); m != nil; m = matches.Next() {
-		var name string
+		var name, recv, recvType, recvName, bindName, bindType string
 		var defKind, refKind string
 		var sb, eb, sl, el uint
+		var recvNameByte, bindByte uint
 		for _, c := range m.Captures {
 			cn := captureNames[c.Index]
 			switch {
 			case cn == "name":
 				name = strings.Trim(c.Node.Utf8Text(src), `"`)
+			case cn == "recv":
+				recv = c.Node.Utf8Text(src)
+			case cn == "recv.type":
+				recvType = strings.TrimPrefix(c.Node.Utf8Text(src), "*")
+			case cn == "recv.name":
+				recvName = c.Node.Utf8Text(src)
+				recvNameByte = c.Node.StartByte()
+			case cn == "bind.name":
+				bindName = c.Node.Utf8Text(src)
+				bindByte = c.Node.StartByte()
+			case cn == "bind.type":
+				bindType = strings.TrimPrefix(c.Node.Utf8Text(src), "*")
 			case strings.HasPrefix(cn, "definition."):
 				defKind = strings.TrimPrefix(cn, "definition.")
 				sb, eb = c.Node.StartByte(), c.Node.EndByte()
@@ -98,13 +122,20 @@ func (r *Registry) ParseFile(lang, path string, src []byte) (Result, error) {
 		switch {
 		case defKind != "" && name != "":
 			res.Symbols = append(res.Symbols, Symbol{
-				Kind: defKind, Name: name, QualifiedName: name,
+				Kind: defKind, Name: name, QualifiedName: name, RecvType: recvType,
 				StartByte: sb, EndByte: eb, StartLine: sl, EndLine: el,
 			})
+			if recvType != "" && recvName != "" {
+				res.Bindings = append(res.Bindings,
+					TypeBinding{Name: recvName, TypeName: recvType, StartByte: recvNameByte})
+			}
 		case refKind != "" && name != "":
 			res.Edges = append(res.Edges, Edge{
-				Kind: edgeKind(refKind), DstName: name, StartByte: sb, Line: sl,
+				Kind: edgeKind(refKind), DstName: name, Recv: recv, StartByte: sb, Line: sl,
 			})
+		case bindName != "" && bindType != "":
+			res.Bindings = append(res.Bindings,
+				TypeBinding{Name: bindName, TypeName: bindType, StartByte: bindByte})
 		}
 	}
 	return res, nil
