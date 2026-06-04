@@ -2,11 +2,15 @@ package graph
 
 import (
 	"context"
+	"io/fs"
+	"path/filepath"
 	"sort"
 	"strings"
 )
 
-// Module is a top-level grouping (first path segment) with rollup counts.
+// Module is a project-level grouping (the nearest ancestor directory holding a
+// project marker — .csproj / package.json / go.mod — else the first path segment)
+// with rollup counts.
 type Module struct {
 	Name    string
 	Files   int
@@ -27,8 +31,50 @@ type Architecture struct {
 	Deps    []ModuleEdge
 }
 
-// moduleOf returns the first path segment ("." for a top-level file).
-func moduleOf(path string) string {
+// projectRoots returns directories (relative to worktree, slash-separated,
+// longest-first) that hold a project marker (.csproj / package.json / go.mod).
+// They let a monorepo be grouped at project granularity instead of collapsing
+// every nested project under one top-level directory. A non-existent worktree
+// (e.g. a synthetic test path) yields no roots, so moduleOf falls back to the
+// first path segment.
+func projectRoots(worktree string) []string {
+	var roots []string
+	_ = filepath.WalkDir(worktree, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			switch d.Name() {
+			case "node_modules", "bin", "obj", ".git":
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		name := d.Name()
+		if name == "package.json" || name == "go.mod" || strings.HasSuffix(name, ".csproj") {
+			if rel, relErr := filepath.Rel(worktree, filepath.Dir(p)); relErr == nil {
+				roots = append(roots, filepath.ToSlash(rel))
+			}
+		}
+		return nil
+	})
+	sort.Slice(roots, func(i, j int) bool { return len(roots[i]) > len(roots[j]) })
+	return roots
+}
+
+// moduleOf returns the module a path belongs to: the basename of the nearest
+// ancestor project root, or the first path segment ("." for a top-level file)
+// when no deeper project marker applies. A repo-root marker (".") is skipped so
+// it never flattens everything into one bucket.
+func moduleOf(roots []string, path string) string {
+	for _, r := range roots {
+		if r == "." {
+			continue
+		}
+		if path == r || strings.HasPrefix(path, r+"/") {
+			return filepath.Base(r)
+		}
+	}
 	if i := strings.IndexByte(path, '/'); i >= 0 {
 		return path[:i]
 	}
@@ -38,6 +84,7 @@ func moduleOf(path string) string {
 // Architecture summarizes the worktree's modules: file and symbol counts per
 // top-level directory. scope, if non-empty, restricts to paths under that prefix.
 func (e *Engine) Architecture(ctx context.Context, worktree, scope string) (Architecture, error) {
+	roots := projectRoots(worktree)
 	q := `SELECT f.path, (SELECT COUNT(*) FROM nodes n WHERE n.file_id = f.id)
 	        FROM files f WHERE f.worktree = ?`
 	args := []any{worktree}
@@ -58,7 +105,7 @@ func (e *Engine) Architecture(ctx context.Context, worktree, scope string) (Arch
 		if err := rows.Scan(&path, &syms); err != nil {
 			return Architecture{}, err
 		}
-		m := moduleOf(path)
+		m := moduleOf(roots, path)
 		if byMod[m] == nil {
 			byMod[m] = &agg{}
 		}
@@ -99,7 +146,7 @@ SELECT srcf.path, dstf.path, COUNT(*)
 			depRows.Close()
 			return Architecture{}, err
 		}
-		sm, dm := moduleOf(sp), moduleOf(dp)
+		sm, dm := moduleOf(roots, sp), moduleOf(roots, dp)
 		if sm != dm {
 			depCount[[2]string{sm, dm}] += c
 		}

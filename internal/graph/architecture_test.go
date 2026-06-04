@@ -2,6 +2,8 @@ package graph
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -65,5 +67,42 @@ func TestArchitectureDependencyEdges(t *testing.T) {
 		if d.From == d.To {
 			t.Errorf("unexpected self-dependency edge %+v", d)
 		}
+	}
+}
+
+func TestArchitectureProjectAwareModules(t *testing.T) {
+	e := newTestEngine(t)
+	ctx := context.Background()
+	wt := t.TempDir()
+	mkProj := func(dir, marker, srcfile, src string) {
+		full := filepath.Join(wt, dir)
+		if err := os.MkdirAll(full, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(full, marker), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		rel := filepath.ToSlash(filepath.Join(dir, srcfile))
+		if err := e.IndexFile(ctx, wt, rel, []byte(src), 1, int64(len(src))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Two nested projects: a C# project deep under backend/src, and the frontend.
+	mkProj("backend/src/Ordia.Domain", "Ordia.Domain.csproj", "Appointment.cs", "namespace Ordia.Domain;\nclass Appointment {}")
+	mkProj("frontend", "package.json", "app.ts", "export function App(){}")
+
+	arch, err := e.Architecture(ctx, wt, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := map[string]bool{}
+	for _, m := range arch.Modules {
+		names[m.Name] = true
+	}
+	if !names["Ordia.Domain"] {
+		t.Errorf("modules %+v, want one named Ordia.Domain (nearest .csproj dir)", arch.Modules)
+	}
+	if !names["frontend"] {
+		t.Errorf("modules %+v, want one named frontend (nearest package.json dir)", arch.Modules)
 	}
 }
