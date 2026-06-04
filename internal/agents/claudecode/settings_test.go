@@ -1,11 +1,6 @@
 package claudecode
 
-import (
-	"encoding/json"
-	"os"
-	"path/filepath"
-	"testing"
-)
+import "testing"
 
 func TestEnsureMCPServerIdempotent(t *testing.T) {
 	doc := map[string]any{}
@@ -24,7 +19,7 @@ func TestEnsureMCPServerIdempotent(t *testing.T) {
 
 func TestAppendHookAndHasCommandIdempotent(t *testing.T) {
 	s := map[string]any{}
-	cmd := "recarto hook session-start"
+	cmd := "recarto hook session-start --agent claude"
 	if hasCommand(s, "SessionStart", cmd) {
 		t.Fatal("empty settings should not contain the command")
 	}
@@ -37,28 +32,5 @@ func TestAppendHookAndHasCommandIdempotent(t *testing.T) {
 	groups := s["hooks"].(map[string]any)["SessionStart"].([]any)
 	if len(groups) != 2 {
 		t.Errorf("expected 2 hook groups, got %d", len(groups))
-	}
-}
-
-func TestReadWriteJSONObjectRoundTrip(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "sub", "settings.json")
-
-	m, err := readJSONObject(path) // missing file → empty object, no error
-	if err != nil || len(m) != 0 {
-		t.Fatalf("missing file should yield empty map: %v, %v", m, err)
-	}
-	m["x"] = "y"
-	if err := writeJSONObject(path, m); err != nil { // creates parent dirs
-		t.Fatal(err)
-	}
-	got, err := readJSONObject(path)
-	if err != nil || got["x"] != "y" {
-		t.Fatalf("round trip failed: %v, %v", got, err)
-	}
-	b, _ := os.ReadFile(path)
-	var probe map[string]any
-	if json.Unmarshal(b, &probe) != nil {
-		t.Error("written file is not valid JSON")
 	}
 }

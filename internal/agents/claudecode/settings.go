@@ -1,54 +1,9 @@
 // Package claudecode installs Recarto's Claude Code integration (MCP server
-// registration + lifecycle hooks) and implements the hook entrypoints. The
-// installer merges into existing .mcp.json / .claude/settings.json without
-// clobbering unrelated content and is idempotent.
+// registration + lifecycle hooks + instructions) and implements the Claude Code
+// hook adapter. The installer merges into existing .mcp.json / settings.json
+// without clobbering unrelated content and is idempotent. Shared JSON object
+// read/write lives in the parent agents package.
 package claudecode
-
-import (
-	"bytes"
-	"encoding/json"
-	"errors"
-	"fmt"
-	"io/fs"
-	"os"
-	"path/filepath"
-)
-
-// readJSONObject reads a JSON object file into a map. A missing or empty file
-// yields an empty (non-nil) map and no error, so callers can merge unconditionally.
-func readJSONObject(path string) (map[string]any, error) {
-	b, err := os.ReadFile(path)
-	if errors.Is(err, fs.ErrNotExist) {
-		return map[string]any{}, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	if len(bytes.TrimSpace(b)) == 0 {
-		return map[string]any{}, nil
-	}
-	var m map[string]any
-	if err := json.Unmarshal(b, &m); err != nil {
-		return nil, fmt.Errorf("%s: %w", path, err)
-	}
-	if m == nil {
-		m = map[string]any{}
-	}
-	return m, nil
-}
-
-// writeJSONObject writes m as indented JSON, creating parent directories.
-func writeJSONObject(path string, m map[string]any) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	b, err := json.MarshalIndent(m, "", "  ")
-	if err != nil {
-		return err
-	}
-	b = append(b, '\n')
-	return os.WriteFile(path, b, 0o644)
-}
 
 // ensureMCPServer adds an mcpServers.recarto entry to doc if absent. It reports
 // whether it changed doc.

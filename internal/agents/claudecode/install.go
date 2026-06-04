@@ -2,74 +2,63 @@ package claudecode
 
 import (
 	"fmt"
-	"os"
-	"path/filepath"
-)
 
-// Result summarizes what Install changed, for human-readable CLI output.
-type Result struct {
-	MCPStatus          string // "configured" | "already present"
-	HooksStatus        string // "installed N" | "already present"
-	InstructionsStatus string // "written" | "already present"
-}
+	"git.gerwim.nl/gerwim/recarto/internal/agents"
+)
 
 // hookSpec is one (event, matcher, command) hook the installer registers.
 type hookSpec struct{ event, matcher, command string }
 
 // hookSpecs are the advisory hooks. SessionStart and Stop run unconditionally
-// (no matcher); post-read, post-edit, and augment are scoped to their tools.
+// (no matcher); post-read, post-edit, and augment are scoped to their tools. Each
+// command carries `--agent claude` so the dispatcher selects the Claude adapter.
 func hookSpecs(binary string) []hookSpec {
 	return []hookSpec{
-		{"SessionStart", "", binary + " hook session-start"},
-		{"PostToolUse", "Read", binary + " hook post-read"},
-		{"PostToolUse", "Edit|Write", binary + " hook post-edit"},
-		{"PostToolUse", "Grep|Glob", binary + " hook augment"},
-		{"Stop", "", binary + " hook stop"},
+		{"SessionStart", "", binary + " hook session-start --agent claude"},
+		{"PostToolUse", "Read", binary + " hook post-read --agent claude"},
+		{"PostToolUse", "Edit|Write", binary + " hook post-edit --agent claude"},
+		{"PostToolUse", "Grep|Glob", binary + " hook augment --agent claude"},
+		{"Stop", "", binary + " hook stop --agent claude"},
 	}
 }
 
-// instructions is the RECARTO.md snippet describing the record/recall discipline.
-const instructions = `# Recarto
+// Install sets up Claude Code integration at the given scope. It is idempotent:
+// re-running adds nothing already present and preserves unrelated config.
+//
+// Repo scope writes .mcp.json, .claude/settings.json, and AGENTS.md. User scope
+// writes ~/.claude.json (mcpServers), ~/.claude/settings.json (hooks), and
+// ~/.claude/CLAUDE.md (Claude's global instructions file).
+func Install(p agents.Paths, binary string) (agents.InstallResult, error) {
+	res := agents.InstallResult{Agent: "claude"}
 
-This repo uses **Recarto** for cross-session memory (preferences, learnings,
-decisions, do-not-repeats, bugs) stored in a shared per-repo SQLite cache outside
-the working tree.
+	var mcpPath, settingsPath, docPath string
+	switch p.Scope {
+	case agents.ScopeUser:
+		mcpPath = p.UserFile(".claude.json")
+		settingsPath = p.UserFile(".claude", "settings.json")
+		docPath = p.UserFile(".claude", "CLAUDE.md")
+	default:
+		mcpPath = p.RepoFile(".mcp.json")
+		settingsPath = p.RepoFile(".claude", "settings.json")
+		docPath = p.RepoFile("AGENTS.md")
+	}
 
-- At session start, Recarto injects the most relevant memories for this branch.
-- **Record** new knowledge with the ` + "`record_memory`" + ` tool (or ` + "`recarto remember`" + `):
-  preferences, learnings, decisions, do-not-repeats, and actions.
-- **Record bugs** with ` + "`record_bug`" + ` (error, root cause, fix) and **search**
-  them with ` + "`search_bugs`" + ` before fixing something.
-- **Recall** relevant memory for the current task with ` + "`recall_memory`" + `.
-
-Recarto reinforces near-duplicate memories instead of duplicating them, so record
-freely — repeated learnings converge to one entry.
-`
-
-// Install sets up Claude Code integration for the repo rooted at dir, invoking
-// the recarto binary as `binary`. It is idempotent: re-running adds nothing that
-// is already present and preserves unrelated config.
-func Install(dir, binary string) (Result, error) {
-	var res Result
-
-	// 1. Register the MCP server in .mcp.json.
-	mcpPath := filepath.Join(dir, ".mcp.json")
-	mcpDoc, err := readJSONObject(mcpPath)
+	// 1. Register the MCP server.
+	mcpDoc, err := agents.ReadJSONObject(mcpPath)
 	if err != nil {
 		return res, err
 	}
 	if ensureMCPServer(mcpDoc, binary) {
-		res.MCPStatus = "configured"
+		res.MCP = "configured"
 	} else {
-		res.MCPStatus = "already present"
+		res.MCP = "already present"
 	}
-	if err := writeJSONObject(mcpPath, mcpDoc); err != nil {
+	if err := agents.WriteJSONObject(mcpPath, mcpDoc); err != nil {
 		return res, err
 	}
 
-	// 2. Install lifecycle hooks into .claude/settings.json.
-	settingsPath := filepath.Join(dir, ".claude", "settings.json")
-	settings, err := readJSONObject(settingsPath)
+	// 2. Install lifecycle hooks.
+	settings, err := agents.ReadJSONObject(settingsPath)
 	if err != nil {
 		return res, err
 	}
@@ -81,27 +70,19 @@ func Install(dir, binary string) (Result, error) {
 		}
 	}
 	if added > 0 {
-		res.HooksStatus = fmt.Sprintf("installed %d", added)
+		res.Hooks = fmt.Sprintf("installed %d", added)
 	} else {
-		res.HooksStatus = "already present"
+		res.Hooks = "already present"
 	}
-	if err := writeJSONObject(settingsPath, settings); err != nil {
+	if err := agents.WriteJSONObject(settingsPath, settings); err != nil {
 		return res, err
 	}
 
-	// 3. Write RECARTO.md if absent.
-	mdPath := filepath.Join(dir, "RECARTO.md")
-	switch _, err := os.Stat(mdPath); {
-	case err == nil:
-		res.InstructionsStatus = "already present"
-	case os.IsNotExist(err):
-		if err := os.WriteFile(mdPath, []byte(instructions), 0o644); err != nil {
-			return res, err
-		}
-		res.InstructionsStatus = "written"
-	default:
+	// 3. Write the instructions block.
+	if err := agents.WriteInstructionsBlock(docPath); err != nil {
 		return res, err
 	}
+	res.Docs = "written"
 
 	return res, nil
 }

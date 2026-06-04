@@ -6,6 +6,9 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
+
+	"github.com/mattn/go-isatty"
 
 	"git.gerwim.nl/gerwim/recarto/internal/cli"
 	"git.gerwim.nl/gerwim/recarto/internal/ledger"
@@ -29,12 +32,41 @@ func main() {
 			fmt.Fprintln(os.Stderr, "debug-stress:", err)
 			os.Exit(1)
 		}
+	case "init":
+		// Prompt for install scope when interactive and --scope was not given,
+		// then hand off to the normal CLI dispatch.
+		args := append([]string{"init"}, maybePromptScope(os.Args[2:])...)
+		if err := cli.Run(args, os.Stdout); err != nil {
+			fmt.Fprintln(os.Stderr, "recarto:", err)
+			os.Exit(1)
+		}
 	default:
 		if err := cli.Run(os.Args[1:], os.Stdout); err != nil {
 			fmt.Fprintln(os.Stderr, "recarto:", err)
 			os.Exit(1)
 		}
 	}
+}
+
+// maybePromptScope asks the user for the install scope (repo or user) when stdin
+// is a TTY and --scope was not already supplied, appending the chosen flag. In a
+// non-interactive context it leaves args untouched (init defaults to repo scope).
+func maybePromptScope(args []string) []string {
+	for _, a := range args {
+		if a == "--scope" || a == "-scope" || strings.HasPrefix(a, "--scope=") || strings.HasPrefix(a, "-scope=") {
+			return args
+		}
+	}
+	if !isatty.IsTerminal(os.Stdin.Fd()) {
+		return args
+	}
+	fmt.Fprint(os.Stderr, "Install scope — [r]epo (this project) or [u]ser (global)? [r/u]: ")
+	var line string
+	fmt.Fscanln(os.Stdin, &line)
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(line)), "u") {
+		return append(args, "--scope", "user")
+	}
+	return append(args, "--scope", "repo")
 }
 
 // runDebugStress performs --iter atomic increments to counters[lifetime,stress].
