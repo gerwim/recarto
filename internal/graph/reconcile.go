@@ -70,7 +70,16 @@ func (e *Engine) Reconcile(ctx context.Context, worktree string, src Source) err
 			return err
 		}
 	}
-	return e.Resolve(ctx, worktree)
+	if err := e.Resolve(ctx, worktree); err != nil {
+		return err
+	}
+	// Semantic tier (no-op unless an embedder is set): bring the vector index up
+	// to date. Best-effort — a model error must not fail reconciliation, since
+	// the lexical graph is already written and fully usable on its own.
+	if e.emb != nil {
+		_ = e.embedWorktree(ctx, worktree)
+	}
+	return nil
 }
 
 // ReconcileIfStale reconciles only when the worktree's git token differs from the

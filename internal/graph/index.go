@@ -55,6 +55,16 @@ func (e *Engine) writeFileGraph(ctx context.Context, c store.Conn, worktree, pat
 			fileID); err != nil {
 			return err
 		}
+		if _, err := c.ExecContext(ctx,
+			`DELETE FROM nodes_fts_stem WHERE node_id IN (SELECT id FROM nodes WHERE file_id=?)`,
+			fileID); err != nil {
+			return err
+		}
+		if _, err := c.ExecContext(ctx,
+			`DELETE FROM nodes_fts_tri WHERE node_id IN (SELECT id FROM nodes WHERE file_id=?)`,
+			fileID); err != nil {
+			return err
+		}
 		if _, err := c.ExecContext(ctx, `DELETE FROM nodes WHERE file_id=?`, fileID); err != nil {
 			return err
 		}
@@ -91,9 +101,23 @@ func (e *Engine) writeFileGraph(ctx context.Context, c store.Conn, worktree, pat
 		// ("MessageRenderer"); the default unicode61 tokenizer cannot split
 		// camelCase on its own. The dotted qualified name also feeds the FTS so a
 		// namespace/class word ("Domain") surfaces its members.
+		// Primary exact index (unicode61) + the porter-stemmed broadener share the
+		// same identifier-split content; the trigram broadener stores the raw name +
+		// qualified name for substring matching.
+		ftsName, ftsQN := ftsText(s.Name), ftsText(qn)
 		if _, err := c.ExecContext(ctx,
 			`INSERT INTO nodes_fts(node_id,name,qualified_name) VALUES (?,?,?)`,
-			spans[i].id, ftsText(s.Name), ftsText(qn)); err != nil {
+			spans[i].id, ftsName, ftsQN); err != nil {
+			return err
+		}
+		if _, err := c.ExecContext(ctx,
+			`INSERT INTO nodes_fts_stem(node_id,name,qualified_name) VALUES (?,?,?)`,
+			spans[i].id, ftsName, ftsQN); err != nil {
+			return err
+		}
+		if _, err := c.ExecContext(ctx,
+			`INSERT INTO nodes_fts_tri(node_id,content) VALUES (?,?)`,
+			spans[i].id, s.Name+" "+qn); err != nil {
 			return err
 		}
 	}

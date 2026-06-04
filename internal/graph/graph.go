@@ -20,6 +20,7 @@ type Engine struct {
 	led *ledger.Ledger
 	clk clock.Clock
 	reg *parse.Registry
+	emb Embedder // optional semantic tier; nil => lexical-only search
 }
 
 // New builds an Engine, compiling the parse registry (which links tree-sitter).

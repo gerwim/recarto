@@ -55,6 +55,18 @@ DELETE FROM nodes_fts WHERE node_id IN (
   WHERE f.worktree = ? AND f.path = ?)`, worktree, path); err != nil {
 			return err
 		}
+		if _, err := c.ExecContext(ctx, `
+DELETE FROM nodes_fts_stem WHERE node_id IN (
+  SELECT n.id FROM nodes n JOIN files f ON f.id = n.file_id
+  WHERE f.worktree = ? AND f.path = ?)`, worktree, path); err != nil {
+			return err
+		}
+		if _, err := c.ExecContext(ctx, `
+DELETE FROM nodes_fts_tri WHERE node_id IN (
+  SELECT n.id FROM nodes n JOIN files f ON f.id = n.file_id
+  WHERE f.worktree = ? AND f.path = ?)`, worktree, path); err != nil {
+			return err
+		}
 		_, err := c.ExecContext(ctx,
 			`DELETE FROM files WHERE worktree = ? AND path = ?`, worktree, path)
 		return err

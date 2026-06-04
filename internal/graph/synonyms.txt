@@ -1,0 +1,37 @@
+# Curated abbreviation / synonym pairs for code-symbol search, "a=b", expanded
+# bidirectionally. Kept LOCAL to the graph layer (mirrors internal/memory) so the
+# code graph carries no dependency on the memory engine. These are GENERAL code
+# vocabulary bridges (abbreviation <-> full word, common aliases) — not
+# codebase-specific. True semantic synonyms (street<->address) are handled by the
+# optional embedding tier, not here.
+auth=authentication
+authz=authorization
+authn=authentication
+repo=repository
+db=database
+config=configuration
+ctx=context
+impl=implementation
+init=initialize
+util=utility
+utils=utilities
+btn=button
+msg=message
+err=error
+req=request
+res=response
+resp=response
+addr=address
+calc=calculate
+spec=specification
+svc=service
+mgr=manager
+ctrl=controller
+async=asynchronous
+sync=synchronous
+dir=directory
+fmt=format
+img=image
+pwd=password
+perm=permission
+org=organization

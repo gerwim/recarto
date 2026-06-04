@@ -1,0 +1,16 @@
+[
+ {"q":"convert a street into map coordinates","rel":["IAddressLookupService","PdokAddressLookupService","AddressLookupResult"],"type":"semantic"},
+ {"q":"compute the most efficient driving order","rel":["IRouteOptimizationService","OrToolsRouteOptimizationService","IRouteReorderingService"],"type":"semantic"},
+ {"q":"decide whether a user may perform an action","rel":["IAuthorizationService","PermissionAuthorizationHandler"],"type":"semantic"},
+ {"q":"persist pending edits to the database","rel":["IUnitOfWork","SaveChangesAsync","ApplicationDbContext"],"type":"semantic"},
+ {"q":"how long to drive between two locations","rel":["ITravelTimeService","TravelTimeService"],"type":"semantic"},
+ {"q":"suggest the best date for a visit","rel":["IOptimalDayService","OptimalDayPicker","GetOptimalDays"],"type":"semantic"},
+ {"q":"the current state of a booking","rel":["AppointmentStatus"],"type":"semantic"},
+ {"q":"propose replacement time options","rel":["ISmartAlternativeService","AlternativeSlots","IAlternativeSlotFindingService","FindSmartAlternativesAsync"],"type":"semantic"},
+ {"q":"earlier openings at another location","rel":["AlternativeSlots","IAlternativeSlotFindingService","FindAlternativesAsync"],"type":"semantic"},
+ {"q":"availability of a staff member","rel":["WorkingHoursInput","SetWorkingHours"],"type":"semantic"},
+ {"q":"alternative slots","rel":["AlternativeSlots","IAlternativeSlotFindingService"],"type":"lexical-control"},
+ {"q":"authorization service","rel":["IAuthorizationService"],"type":"lexical-control"},
+ {"q":"travel time","rel":["ITravelTimeService","TravelTimeService"],"type":"lexical-control"},
+ {"q":"optimal day","rel":["IOptimalDayService","OptimalDayPicker"],"type":"lexical-control"}
+]

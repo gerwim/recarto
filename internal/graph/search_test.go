@@ -39,6 +39,77 @@ func TestSearchByCamelComponent(t *testing.T) {
 	}
 }
 
+func TestSearchStemsMorphology(t *testing.T) {
+	e := newTestEngine(t)
+	ctx := context.Background()
+	// A plural/inflected query term must still find the singular-rooted symbol.
+	// The default unicode61 tokenizer treats "coordinates" and "coordinate" as
+	// distinct tokens (no match); porter stemming reduces both to a common root.
+	src := []byte("namespace App;\nclass CoordinateConverter {}\nclass BookingRepository {}")
+	if err := e.IndexFile(ctx, "/wt", "App.cs", src, 1, int64(len(src))); err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []string{"coordinates", "converting", "bookings"} {
+		got, err := e.Search(ctx, "/wt", q, "", "", 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) == 0 {
+			t.Errorf("Search(%q) found nothing; stemming should match the root", q)
+		}
+	}
+}
+
+func TestSearchSynonymFallback(t *testing.T) {
+	e := newTestEngine(t)
+	ctx := context.Background()
+	// "authn" shares no token with "AuthenticationService"; the precise pass finds
+	// nothing, so the synonym broadener (authn -> authentication) must recover it.
+	src := []byte("namespace App;\nclass AuthenticationService {}")
+	if err := e.IndexFile(ctx, "/wt", "App.cs", src, 1, int64(len(src))); err != nil {
+		t.Fatal(err)
+	}
+	got, err := e.Search(ctx, "/wt", "authn", "", "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, r := range got {
+		if r.Name == "AuthenticationService" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("synonym fallback authn->authentication missed AuthenticationService; got %v",
+			resultNames(got))
+	}
+}
+
+func TestSearchTrigramSubstring(t *testing.T) {
+	e := newTestEngine(t)
+	ctx := context.Background()
+	// A mid-identifier fragment that is neither a camelCase component nor a stem
+	// prefix should still locate the symbol via the trigram substring index.
+	src := []byte("namespace App;\nclass AuthenticationMiddleware {}")
+	if err := e.IndexFile(ctx, "/wt", "App.cs", src, 1, int64(len(src))); err != nil {
+		t.Fatal(err)
+	}
+	got, err := e.Search(ctx, "/wt", "thentica", "", "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, r := range got {
+		if r.Name == "AuthenticationMiddleware" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("trigram substring search for %q missed AuthenticationMiddleware; got %v",
+			"thentica", resultNames(got))
+	}
+}
+
 func resultNames(rs []SearchResult) []string {
 	out := make([]string, len(rs))
 	for i, r := range rs {

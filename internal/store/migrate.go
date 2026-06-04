@@ -7,7 +7,7 @@ import (
 )
 
 // schemaVersion is the number of applied migrations.
-const schemaVersion = 7
+const schemaVersion = 8
 
 // migrations are applied in order; index+1 becomes user_version.
 var migrations = []string{
@@ -189,6 +189,39 @@ DELETE FROM meta WHERE key LIKE 'graph_token:%';
 	// rebuildable graph and clear the freshness token to force a rebuild with the
 	// fixed indexer. See the v5 comment for the standing convention.
 	`
+DELETE FROM nodes_fts;
+DELETE FROM edges;
+DELETE FROM nodes;
+DELETE FROM files;
+DELETE FROM meta WHERE key LIKE 'graph_token:%';
+`,
+	// v8 (Tier A search quality): better lexical matching for code symbols, added
+	// as BROADENERS so they never dilute an already-precise match. nodes_fts
+	// (unicode61) stays the primary exact index; two more are consulted only when
+	// the exact pass underfills:
+	//   nodes_fts_stem - porter stemming, so an inflected query ("coordinates",
+	//                    "bookings") matches the root ("Coordinate", "Booking");
+	//   nodes_fts_tri  - trigram over raw name + qualified_name, so a
+	//                    mid-identifier substring ("thentica" inside
+	//                    "AuthenticationMiddleware") or near-miss is found.
+	// The derived graph is rebuildable, so wipe nodes/edges/files + the freshness
+	// token to force a reconcile that repopulates all three FTS tables. The
+	// broadeners are DROP+CREATEd so the migration is safe to re-run. See the v5
+	// comment for the standing convention.
+	`
+DROP TABLE IF EXISTS nodes_fts_stem;
+CREATE VIRTUAL TABLE nodes_fts_stem USING fts5(
+  node_id UNINDEXED,
+  name,
+  qualified_name,
+  tokenize = 'porter unicode61'
+);
+DROP TABLE IF EXISTS nodes_fts_tri;
+CREATE VIRTUAL TABLE nodes_fts_tri USING fts5(
+  node_id UNINDEXED,
+  content,
+  tokenize = 'trigram'
+);
 DELETE FROM nodes_fts;
 DELETE FROM edges;
 DELETE FROM nodes;
