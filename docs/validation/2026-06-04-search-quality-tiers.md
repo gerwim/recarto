@@ -6,6 +6,14 @@
 > `internal/graph/testdata/searchbench.json` — 10 zero-token-overlap *semantic*
 > queries + 4 *lexical-control* queries, scored recall@10 / MRR / zero-hit.
 
+> **SUPERSEDED (2026-06-04):** The Tier B recommendation below is retired. Faster
+> models collapse at 60k scale and document enrichment does not help; the win is
+> query-side — LLM-supplied `candidate_symbols` lift the dependency-free lexical
+> tier from 0% to a measured **57.5% semantic recall@10** (lexical-control held at
+> 87.5%) on the full Ordia corpus, with zero index cost. See
+> `docs/superpowers/specs/2026-06-04-query-guided-search-design.md`. The ORT/`vec0`
+> code remains in the tree, dormant and unrecommended.
+
 ## TL;DR
 
 | config | new deps | lexical-control recall@10 / MRR | semantic recall@10 |
