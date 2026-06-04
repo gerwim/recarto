@@ -7,17 +7,34 @@ import (
 )
 
 // Resolve links unresolved reference edges to a defining node within the same
-// worktree by matching dst_name against node name or qualified_name. Ambiguous
-// names take the first match (LIMIT 1); dst_name is retained regardless, so
-// trace_call_path still works by name where resolution is partial.
+// worktree by matching dst_name against node name or qualified_name. Resolution
+// is scoped to the source file's language FAMILY ({csharp}, {go}, and the web
+// family {typescript,tsx,javascript}) so a C# `.Select(...)` can never bind to a
+// React `Select` component. Among candidates it prefers a definition in the same
+// file, then the same top-level directory, then a stable id order — so the common
+// case of calling a sibling defined alongside the caller resolves correctly
+// instead of picking an arbitrary same-named symbol elsewhere. dst_name is
+// retained regardless, so trace_call_path still works by name where resolution is
+// partial or absent.
 func (e *Engine) Resolve(ctx context.Context, worktree string) error {
 	return e.st.WriteTx(ctx, func(c store.Conn) error {
 		_, err := c.ExecContext(ctx, `
 UPDATE edges SET dst_node_id = (
-  SELECT n.id FROM nodes n JOIN files f ON f.id = n.file_id
-  WHERE f.worktree = ?
-    AND (n.name = edges.dst_name OR n.qualified_name = edges.dst_name)
-  LIMIT 1)
+  SELECT n.id
+    FROM nodes n
+    JOIN files f  ON f.id = n.file_id
+    JOIN files ef ON ef.id = edges.file_id
+   WHERE f.worktree = ?
+     AND (n.name = edges.dst_name OR n.qualified_name = edges.dst_name)
+     AND ( ef.language = f.language
+           OR ( ef.language IN ('typescript','tsx','javascript')
+                AND f.language IN ('typescript','tsx','javascript') ) )
+   ORDER BY
+     CASE WHEN f.id = edges.file_id THEN 0 ELSE 1 END,
+     CASE WHEN substr(f.path,1,instr(f.path,'/')) = substr(ef.path,1,instr(ef.path,'/'))
+          THEN 0 ELSE 1 END,
+     n.id
+   LIMIT 1)
 WHERE dst_node_id IS NULL
   AND dst_name <> ''
   AND file_id IN (SELECT id FROM files WHERE worktree = ?)`, worktree, worktree)

@@ -122,3 +122,44 @@ func TestIndexFileFileScopeEdgeHasNullSrc(t *testing.T) {
 		t.Errorf("file-scope import edges with NULL src = %d, want 1", n)
 	}
 }
+
+func TestIndexFilePopulatesQualifiedNameFileScopedNamespace(t *testing.T) {
+	e := newTestEngine(t)
+	ctx := context.Background()
+	// C# file-scoped namespace: the namespace node does NOT span-contain the
+	// following types, so qualified_name must prefix them via a preceding-namespace
+	// rule, not pure containment.
+	src := []byte("namespace Ordia.Domain;\nclass Appointment {\n  void Handle() {}\n}")
+	if err := e.IndexFile(ctx, "/wt", "a.cs", src, 1, int64(len(src))); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{
+		"Appointment": "Ordia.Domain.Appointment",
+		"Handle":      "Ordia.Domain.Appointment.Handle",
+	}
+	for name, wantQN := range want {
+		var qn string
+		if err := e.st.DB.QueryRow(`SELECT qualified_name FROM nodes WHERE name=?`, name).Scan(&qn); err != nil {
+			t.Fatal(err)
+		}
+		if qn != wantQN {
+			t.Errorf("qualified_name(%s)=%q, want %q", name, qn, wantQN)
+		}
+	}
+}
+
+func TestIndexFilePopulatesQualifiedNameBlockNamespace(t *testing.T) {
+	e := newTestEngine(t)
+	ctx := context.Background()
+	src := []byte("namespace Ordia.Domain {\n class Appointment {\n  void Handle() {}\n }\n}")
+	if err := e.IndexFile(ctx, "/wt", "b.cs", src, 1, int64(len(src))); err != nil {
+		t.Fatal(err)
+	}
+	var qn string
+	if err := e.st.DB.QueryRow(`SELECT qualified_name FROM nodes WHERE name='Handle'`).Scan(&qn); err != nil {
+		t.Fatal(err)
+	}
+	if qn != "Ordia.Domain.Appointment.Handle" {
+		t.Errorf("qualified_name(Handle)=%q, want Ordia.Domain.Appointment.Handle", qn)
+	}
+}

@@ -7,7 +7,7 @@ import (
 )
 
 // schemaVersion is the number of applied migrations.
-const schemaVersion = 6
+const schemaVersion = 7
 
 // migrations are applied in order; index+1 becomes user_version.
 var migrations = []string{
@@ -173,6 +173,21 @@ DELETE FROM meta WHERE key LIKE 'graph_token:%';
 	// the derived graph is rebuildable, so wipe it and clear the freshness token
 	// to force a rebuild with the fixed queries. See the v5 comment for the
 	// standing convention.
+	`
+DELETE FROM nodes_fts;
+DELETE FROM edges;
+DELETE FROM nodes;
+DELETE FROM files;
+DELETE FROM meta WHERE key LIKE 'graph_token:%';
+`,
+	// v7 (Ordia validation fix): the indexer now (a) populates a real dotted
+	// qualified_name from the structural context (namespace.class.member, with C#
+	// file-scoped namespaces handled) and feeds it to the node FTS, and (b)
+	// resolves reference edges within the source file's language FAMILY with a
+	// same-file/same-directory preference (so a C# `.Select` no longer binds to a
+	// React `Select`). Both change stored node/edge content, so wipe the
+	// rebuildable graph and clear the freshness token to force a rebuild with the
+	// fixed indexer. See the v5 comment for the standing convention.
 	`
 DELETE FROM nodes_fts;
 DELETE FROM edges;

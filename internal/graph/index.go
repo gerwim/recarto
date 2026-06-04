@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"sort"
+	"strings"
 
 	"git.gerwim.nl/gerwim/recarto/internal/ids"
 	"git.gerwim.nl/gerwim/recarto/internal/parse"
@@ -66,32 +68,34 @@ func (e *Engine) writeFileGraph(ctx context.Context, c store.Conn, worktree, pat
 		}
 	}
 
-	// Insert nodes; remember each node's byte span for edge attribution.
-	spans := make([]span, 0, len(res.Symbols))
-	for _, s := range res.Symbols {
-		nid := ids.New()
-		qn := s.QualifiedName
-		if qn == "" {
-			qn = s.Name
-		}
+	// Pass 1: assign ids and byte spans (in lockstep with res.Symbols) so a
+	// symbol's qualified name can be derived from the full structural context of
+	// the file before any row is written.
+	spans := make([]span, len(res.Symbols))
+	for i, s := range res.Symbols {
+		spans[i] = span{id: ids.New(), start: s.StartByte, end: s.EndByte}
+	}
+	// Pass 2: insert nodes with structural qualified names + FTS content.
+	for i, s := range res.Symbols {
+		qn := qualifiedName(spans, res.Symbols, i)
 		if _, err := c.ExecContext(ctx,
 			`INSERT INTO nodes(id,file_id,kind,name,qualified_name,signature,
 			   start_byte,end_byte,start_line,end_line)
 			 VALUES (?,?,?,?,?,?,?,?,?,?)`,
-			nid, fileID, s.Kind, s.Name, qn, "", // signature: reserved for a future version
+			spans[i].id, fileID, s.Kind, s.Name, qn, "", // signature: reserved for a future version
 			int64(s.StartByte), int64(s.EndByte), int64(s.StartLine), int64(s.EndLine)); err != nil {
 			return err
 		}
 		// Store identifier-split components alongside the raw name so a query for
 		// a single component word ("Renderer") matches a PascalCase symbol
 		// ("MessageRenderer"); the default unicode61 tokenizer cannot split
-		// camelCase on its own.
+		// camelCase on its own. The dotted qualified name also feeds the FTS so a
+		// namespace/class word ("Domain") surfaces its members.
 		if _, err := c.ExecContext(ctx,
 			`INSERT INTO nodes_fts(node_id,name,qualified_name) VALUES (?,?,?)`,
-			nid, ftsText(s.Name), ftsText(qn)); err != nil {
+			spans[i].id, ftsText(s.Name), ftsText(qn)); err != nil {
 			return err
 		}
-		spans = append(spans, span{id: nid, start: s.StartByte, end: s.EndByte})
 	}
 
 	// Insert edges, attributing each to the innermost enclosing node.
@@ -123,4 +127,61 @@ func (e *Engine) writeFileGraph(ctx context.Context, c store.Conn, worktree, pat
 		}
 	}
 	return nil
+}
+
+// qualifiedName builds a dotted structural name for the symbol at syms[i]. It
+// joins, outermost-first: any namespace that governs the symbol but does not
+// span-contain it (a C# file-scoped namespace `namespace N;` precedes its types
+// without enclosing them), then the chain of enclosing definitions (block
+// namespaces, classes) found by byte containment, then the symbol's own name.
+// spans is in lockstep with syms (spans[i] is syms[i]).
+func qualifiedName(spans []span, syms []parse.Symbol, i int) string {
+	self := spans[i]
+	contains := func(outer, inner span) bool {
+		return outer.start <= inner.start && inner.end <= outer.end
+	}
+	// Governing namespaces that precede the symbol but do not enclose it. Block
+	// namespaces that DO enclose the symbol are excluded here — they are picked up
+	// by the containment chain below, so neither path double-counts them.
+	type pre struct {
+		start uint
+		name  string
+	}
+	var prefixes []pre
+	for j := range spans {
+		if j == i || syms[j].Kind != "namespace" {
+			continue
+		}
+		if spans[j].start <= self.start && !contains(spans[j], self) {
+			prefixes = append(prefixes, pre{spans[j].start, syms[j].Name})
+		}
+	}
+	sort.Slice(prefixes, func(a, b int) bool { return prefixes[a].start < prefixes[b].start })
+	// Enclosing definitions, innermost first via the containment tree.
+	var anc []string
+	cur := self
+	seen := map[string]bool{self.id: true}
+	for {
+		pid := containingParent(spans, cur)
+		if pid == "" || seen[pid] {
+			break
+		}
+		seen[pid] = true
+		for k := range spans {
+			if spans[k].id == pid {
+				anc = append(anc, syms[k].Name)
+				cur = spans[k]
+				break
+			}
+		}
+	}
+	parts := make([]string, 0, len(prefixes)+len(anc)+1)
+	for _, p := range prefixes {
+		parts = append(parts, p.name)
+	}
+	for k := len(anc) - 1; k >= 0; k-- { // reverse to outermost-first
+		parts = append(parts, anc[k])
+	}
+	parts = append(parts, syms[i].Name)
+	return strings.Join(parts, ".")
 }
