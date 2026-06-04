@@ -1,6 +1,7 @@
 package store
 
 import (
+	"database/sql"
 	"fmt"
 	"path/filepath"
 	"testing"
@@ -173,6 +174,87 @@ func mustExec(t *testing.T, st *Store, q string) {
 	t.Helper()
 	if _, err := st.DB.Exec(q); err != nil {
 		t.Fatalf("seed exec failed: %v\n%s", err, q)
+	}
+}
+
+func TestMigrateV9AddsResolutionSchema(t *testing.T) {
+	dir := t.TempDir()
+	st, err := Open(filepath.Join(dir, "store.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	// New tables exist.
+	for _, table := range []string{"type_bindings", "edge_candidates"} {
+		var name string
+		if err := st.DB.QueryRow(
+			`SELECT name FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&name); err != nil {
+			t.Fatalf("table %q not created: %v", table, err)
+		}
+	}
+	// edges has the new dst_recv column.
+	rows, err := st.DB.Query(`PRAGMA table_info(edges)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	hasRecv := false
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull, pk int
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			t.Fatal(err)
+		}
+		if name == "dst_recv" {
+			hasRecv = true
+		}
+	}
+	if !hasRecv {
+		t.Error("edges.dst_recv column missing")
+	}
+}
+
+// TestV9MigrationPreservesMemories pins the standing invariant that a
+// graph-invalidating migration NEVER deletes memories/bugs (bugs are memories
+// rows with kind='bug') — only the rebuildable code-graph index is wiped.
+func TestV9MigrationPreservesMemories(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "store.db")
+	st, err := Open(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustExec(t, st, `INSERT INTO memories(id,kind,title,body,created_at,updated_at)
+		VALUES('m1','learning','keep me','body',1,1)`)
+	mustExec(t, st, `INSERT INTO memories(id,kind,title,body,created_at,updated_at)
+		VALUES('b1','bug','a bug','body',1,1)`)
+	mustExec(t, st, `INSERT INTO files(id,worktree,path,language,content_hash,mtime,size,last_indexed_at)
+		VALUES('f1','/wt','A.cs','csharp','h',1,1,1)`)
+	mustExec(t, st, `INSERT INTO meta(key,value) VALUES('graph_token:/wt','tok')`)
+	// Simulate a store written by the previous binary, forcing v9 to re-run on reopen.
+	mustExec(t, st, fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion-1))
+	st.Close()
+
+	st2, err := Open(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st2.Close()
+	var mem int
+	if err := st2.DB.QueryRow(`SELECT COUNT(*) FROM memories`).Scan(&mem); err != nil {
+		t.Fatal(err)
+	}
+	if mem != 2 {
+		t.Errorf("memories after migration = %d, want 2 (migrations must never delete memories/bugs)", mem)
+	}
+	var files int
+	if err := st2.DB.QueryRow(`SELECT COUNT(*) FROM files`).Scan(&files); err != nil {
+		t.Fatal(err)
+	}
+	if files != 0 {
+		t.Errorf("graph not rebuilt: files = %d, want 0", files)
 	}
 }
 

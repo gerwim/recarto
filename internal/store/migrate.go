@@ -7,7 +7,7 @@ import (
 )
 
 // schemaVersion is the number of applied migrations.
-const schemaVersion = 8
+const schemaVersion = 9
 
 // migrations are applied in order; index+1 becomes user_version.
 var migrations = []string{
@@ -224,6 +224,60 @@ CREATE VIRTUAL TABLE nodes_fts_tri USING fts5(
 );
 DELETE FROM nodes_fts;
 DELETE FROM edges;
+DELETE FROM nodes;
+DELETE FROM files;
+DELETE FROM meta WHERE key LIKE 'graph_token:%';
+`,
+	// v9 (receiver-aware call resolution): add per-scope type bindings and
+	// per-edge candidate sets with confidence, plus a receiver column on edges.
+	// edges is rebuildable, so it is DROP+CREATEd with the new dst_recv column
+	// rather than ALTERed — keeping this migration idempotent, which the rebuild
+	// test (TestLatestGraphMigrationRebuildsIndex) requires of the last migration.
+	// Wipe the derived graph + freshness token so the new indexer repopulates it.
+	// Memories/bugs are untouched (TestV9MigrationPreservesMemories). See the v5
+	// comment for the standing convention.
+	`
+DROP TABLE IF EXISTS edge_candidates;
+DROP TABLE IF EXISTS type_bindings;
+
+DROP TABLE IF EXISTS edges;
+CREATE TABLE edges (
+  id          TEXT PRIMARY KEY,
+  src_node_id TEXT REFERENCES nodes(id) ON DELETE CASCADE,
+  dst_node_id TEXT REFERENCES nodes(id) ON DELETE SET NULL,
+  dst_name    TEXT NOT NULL DEFAULT '',
+  dst_recv    TEXT NOT NULL DEFAULT '',
+  kind        TEXT NOT NULL,
+  file_id     TEXT NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+  line        INTEGER NOT NULL
+);
+CREATE INDEX idx_edges_src     ON edges(src_node_id, kind);
+CREATE INDEX idx_edges_dst     ON edges(dst_node_id);
+CREATE INDEX idx_edges_dstname ON edges(dst_name);
+
+CREATE TABLE type_bindings (
+  id               TEXT PRIMARY KEY,
+  file_id          TEXT NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+  name             TEXT NOT NULL,
+  type_name        TEXT NOT NULL,
+  scope_start_byte INTEGER NOT NULL,
+  scope_end_byte   INTEGER NOT NULL
+);
+CREATE INDEX idx_type_bindings_file ON type_bindings(file_id);
+CREATE INDEX idx_type_bindings_name ON type_bindings(name);
+
+CREATE TABLE edge_candidates (
+  edge_id     TEXT NOT NULL REFERENCES edges(id) ON DELETE CASCADE,
+  dst_node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+  confidence  REAL NOT NULL DEFAULT 0,
+  method      TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY (edge_id, dst_node_id)
+);
+CREATE INDEX idx_edge_candidates_dst ON edge_candidates(dst_node_id);
+
+DELETE FROM nodes_fts;
+DELETE FROM nodes_fts_stem;
+DELETE FROM nodes_fts_tri;
 DELETE FROM nodes;
 DELETE FROM files;
 DELETE FROM meta WHERE key LIKE 'graph_token:%';
