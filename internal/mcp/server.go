@@ -34,7 +34,7 @@ func NewServer(a *app.App) *sdk.Server {
 		"List stored memories, optionally filtered by kind and branch.",
 		listMemory)
 	addTool(s, a, "search_graph",
-		"Search the code graph for symbols by name or keywords (functions, methods, classes, types).",
+		"Search the code graph for symbols (functions, methods, classes, types). Pass `query` as the concept in plain words; when searching by concept, also pass `candidate_symbols` — the identifier names you expect to exist (e.g. AddressLookup, Geocode). The names you supply are what make concept search land; any form works (PascalCase, interface-prefixed, snake_case, or plain words).",
 		searchGraph)
 	addTool(s, a, "trace_call_path",
 		"Trace call chains to/from a symbol (direction: callers or callees).",

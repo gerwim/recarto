@@ -25,7 +25,9 @@ per-repo SQLite cache outside the working tree.
 - **Record** knowledge with ` + "`record_memory`" + ` and bug fixes with ` + "`record_bug`" + `.
 - **Recall** with ` + "`recall_memory`" + ` and ` + "`search_bugs`" + ` before changing code.
 - Query the code graph with ` + "`search_graph` / `get_code_snippet` / `trace_call_path`" + `
-  instead of reading whole files.
+  instead of reading whole files. When searching ` + "`search_graph`" + ` by concept, also
+  pass ` + "`candidate_symbols`" + ` — the identifier names you expect (e.g. ` + "`AddressLookup`, `Geocode`" + `);
+  the names you supply are what make concept search land.
 
 Recarto reinforces near-duplicate memories instead of duplicating them, so record
 freely — repeated learnings converge to one entry.`
