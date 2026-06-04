@@ -125,6 +125,11 @@ func (e *Engine) mergeCandidates(ctx context.Context, worktree string, candidate
 // the candidate identifiers (case-insensitive), scoped to worktree and optional
 // kind/language. These are the agent's guesses landing exactly, so the caller
 // fuses them at the top weight. Returns nil for an empty/blank candidate set.
+//
+// Matching is whole-string equality. The name arm is the primary path; the
+// qualified_name arm is a rare-hit safety net, since real qualified names are
+// dotted (App.AddressLookup) while candidates are usually bare (AddressLookup) —
+// the identifier-split FTS pass in mergeCandidates does the actual fuzzy bridging.
 func (e *Engine) candidateExactPass(ctx context.Context, worktree string, candidates []string, kind, lang string, limit int) ([]SearchResult, error) {
 	seen := map[string]bool{}
 	var lowered []any

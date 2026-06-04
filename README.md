@@ -143,6 +143,7 @@ recarto bug add|search    record or search bug memories
 recarto memory show       render all active memory as markdown (--branch)
 recarto index             build/refresh the code graph for this worktree
 recarto graph <sub>       query the code graph (search|callers|callees|arch|query|snippet)
+                          graph search [--symbol=Name ...] <concept words>  (candidate-guided)
 recarto compact           prune/decay memory (--force --dry-run --budget-tokens)
 recarto serve             run the MCP server over stdio (used by the agents)
 ```
