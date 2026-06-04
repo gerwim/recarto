@@ -83,10 +83,54 @@ func TestMigrateV9AddsResolutionSchema(t *testing.T) {
 
 Ensure `database/sql` is imported in the test file (it already imports `fmt`, `path/filepath`, `testing`).
 
+Also add this guard, pinning the standing invariant that a graph-invalidating
+migration NEVER deletes memories/bugs (bugs are `memories` rows with `kind='bug'`):
+
+```go
+func TestV9MigrationPreservesMemories(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "store.db")
+	st, err := Open(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Seed a memory and a bug, plus a stale graph index as a prior version left it.
+	mustExec(t, st, `INSERT INTO memories(id,kind,title,body,created_at,updated_at)
+		VALUES('m1','learning','keep me','body',1,1)`)
+	mustExec(t, st, `INSERT INTO memories(id,kind,title,body,created_at,updated_at)
+		VALUES('b1','bug','a bug','body',1,1)`)
+	mustExec(t, st, `INSERT INTO files(id,worktree,path,language,content_hash,mtime,size,last_indexed_at)
+		VALUES('f1','/wt','A.cs','csharp','h',1,1,1)`)
+	mustExec(t, st, `INSERT INTO meta(key,value) VALUES('graph_token:/wt','tok')`)
+	// Simulate a store written by the previous binary, forcing v9 to re-run on reopen.
+	mustExec(t, st, fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion-1))
+	st.Close()
+
+	st2, err := Open(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st2.Close()
+	var mem int
+	if err := st2.DB.QueryRow(`SELECT COUNT(*) FROM memories`).Scan(&mem); err != nil {
+		t.Fatal(err)
+	}
+	if mem != 2 {
+		t.Errorf("memories after migration = %d, want 2 (migrations must never delete memories/bugs)", mem)
+	}
+	var files int
+	if err := st2.DB.QueryRow(`SELECT COUNT(*) FROM files`).Scan(&files); err != nil {
+		t.Fatal(err)
+	}
+	if files != 0 {
+		t.Errorf("graph not rebuilt: files = %d, want 0", files)
+	}
+}
+```
+
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `go test ./internal/store/ -run TestMigrateV9AddsResolutionSchema -v`
-Expected: FAIL — `type_bindings` not created / `dst_recv` missing.
+Run: `go test ./internal/store/ -run 'TestMigrateV9AddsResolutionSchema|TestV9MigrationPreservesMemories' -v`
+Expected: `TestMigrateV9AddsResolutionSchema` FAILs — `type_bindings` not created / `dst_recv` missing. (`TestV9MigrationPreservesMemories` may pass even pre-implementation since no migration deletes memories — that's fine; it is a standing regression guard, not a red-first driver.)
 
 - [ ] **Step 3: Implement migration v9**
 
