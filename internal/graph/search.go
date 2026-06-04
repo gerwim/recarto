@@ -77,6 +77,10 @@ func (e *Engine) SearchGuided(ctx context.Context, worktree, query string, candi
 	}
 	_ = e.led.Incr(ctx, "lifetime", "graph_queries", 1)
 
+	// Candidate symbols are a stronger, agent-supplied signal than the dormant
+	// vector tier, so when they are present they replace it: the candidate path
+	// fuses its own passes with the lexical tier and returns, intentionally
+	// skipping the embedder branch below.
 	if len(candidateSymbols) > 0 {
 		return e.mergeCandidates(ctx, worktree, candidateSymbols, lex, kind, lang, limit)
 	}
@@ -155,7 +159,11 @@ SELECT n.id, n.name, n.qualified_name, n.kind, f.language, f.path, n.start_line
 		sql += " AND f.language = ?"
 		args = append(args, lang)
 	}
-	sql += " ORDER BY n.name LIMIT ?"
+	// Every row here is an exact name/qualified-name hit, so there is no intrinsic
+	// relevance order among them (unlike the bm25-ranked FTS passes). Order
+	// shortest-name-first as a tie-break — a shorter exact match is the tightest
+	// reading of the agent's guess — then by name for determinism.
+	sql += " ORDER BY length(n.name), n.name LIMIT ?"
 	args = append(args, limit)
 
 	rows, err := e.st.DB.QueryContext(ctx, sql, args...)
