@@ -75,6 +75,30 @@ func TestResolveS1SelfCSharp(t *testing.T) {
 	}
 }
 
+func TestResolveDenormalizesBestCandidate(t *testing.T) {
+	e := newTestEngine(t)
+	ctx := context.Background()
+	src := []byte("namespace N;\n" +
+		"class Dep { public void Run() {} }\n" +
+		"class Other { public void Run() {} }\n" +
+		"class Svc { private readonly Dep _dep; void M() { _dep.Run(); } }")
+	if err := e.IndexFile(ctx, "/wt", "Svc.cs", src, 1, int64(len(src))); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.Resolve(ctx, "/wt"); err != nil {
+		t.Fatal(err)
+	}
+	var qn string
+	if err := e.st.DB.QueryRow(`
+SELECT n.qualified_name FROM edges ed JOIN nodes n ON n.id = ed.dst_node_id
+ WHERE ed.kind='calls' AND ed.dst_name='Run' AND ed.dst_recv='_dep'`).Scan(&qn); err != nil {
+		t.Fatal(err)
+	}
+	if qn != "N.Dep.Run" {
+		t.Errorf("denormalized dst_node_id = %q, want N.Dep.Run (typed beats name)", qn)
+	}
+}
+
 func TestResolveS4InterfaceExpansionCSharp(t *testing.T) {
 	e := newTestEngine(t)
 	ctx := context.Background()
