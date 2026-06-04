@@ -37,7 +37,7 @@ func NewServer(a *app.App) *sdk.Server {
 		"Search the code graph for symbols (functions, methods, classes, types). Pass `query` as the concept in plain words; when searching by concept, also pass `candidate_symbols` — the identifier names you expect to exist (e.g. AddressLookup, Geocode). The names you supply are what make concept search land; any form works (PascalCase, interface-prefixed, snake_case, or plain words).",
 		searchGraph)
 	addTool(s, a, "trace_call_path",
-		"Trace call chains to/from a symbol (direction: callers or callees).",
+		"Trace call chains to/from a symbol (direction: callers or callees). Each hop past the root is annotated with `resolution` (self/typed/static/iface/name — how the call was bound) and `confidence` (high/medium/low). Ambiguous low-confidence hops carry the `receiver` expression, appear as sibling branches (the candidate alternatives), and are not expanded further. By default confident hops are shown and low-confidence ones surface only when nothing better exists; set `min_confidence` (0–1) to raise the floor. Trust high/typed/self hops; treat low/name hops as candidates to verify with get_code_snippet.",
 		traceCallPath)
 	addTool(s, a, "get_architecture",
 		"Summarize the codebase structure: modules with file and symbol counts.",

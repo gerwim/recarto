@@ -63,12 +63,24 @@ func searchGraph(ctx context.Context, a *app.App, in SearchGraphInput) (SearchGr
 // --- trace_call_path ---
 
 type TraceCallPathInput struct {
-	Symbol    string `json:"symbol" jsonschema:"the symbol to trace from"`
-	Direction string `json:"direction,omitempty" jsonschema:"callers or callees (default callees)"`
-	Depth     int    `json:"depth,omitempty" jsonschema:"max chain depth (default 3)"`
+	Symbol        string  `json:"symbol" jsonschema:"the symbol to trace from (name or qualified name)"`
+	Direction     string  `json:"direction,omitempty" jsonschema:"callers or callees (default callees)"`
+	Depth         int     `json:"depth,omitempty" jsonschema:"max chain depth (default 3)"`
+	MinConfidence float64 `json:"min_confidence,omitempty" jsonschema:"confidence floor 0-1. Default 0 = adaptive: confident hops are shown and low-confidence/ambiguous ones surface only when nothing better exists. Raise toward 1 to keep only high-confidence hops."`
+}
+
+// TraceHop is one annotated hop in a call chain. Resolution/Confidence/Receiver
+// are empty on the root and tell the LLM how each subsequent call was bound.
+type TraceHop struct {
+	Symbol     string `json:"symbol"`
+	Path       string `json:"path,omitempty"`
+	Line       int    `json:"line,omitempty"`
+	Resolution string `json:"resolution,omitempty"` // self|typed|static|iface|name
+	Confidence string `json:"confidence,omitempty"` // high|medium|low
+	Receiver   string `json:"receiver,omitempty"`   // receiver expr for an ambiguous hop
 }
 type TraceCallPathOutput struct {
-	Chains [][]string `json:"chains"`
+	Chains [][]TraceHop `json:"chains"`
 }
 
 func traceCallPath(ctx context.Context, a *app.App, in TraceCallPathInput) (TraceCallPathOutput, error) {
@@ -77,17 +89,20 @@ func traceCallPath(ctx context.Context, a *app.App, in TraceCallPathInput) (Trac
 	if dir == "" {
 		dir = "callees"
 	}
-	chains, err := a.Graph.TraceCallPath(ctx, a.Git.Worktree, in.Symbol, dir, in.Depth)
+	chains, err := a.Graph.TraceCallPathFiltered(ctx, a.Git.Worktree, in.Symbol, dir, in.Depth, in.MinConfidence)
 	if err != nil {
 		return TraceCallPathOutput{}, err
 	}
-	out := TraceCallPathOutput{Chains: make([][]string, 0, len(chains))}
+	out := TraceCallPathOutput{Chains: make([][]TraceHop, 0, len(chains))}
 	for _, ch := range chains {
-		names := make([]string, len(ch))
+		hops := make([]TraceHop, len(ch))
 		for i, n := range ch {
-			names[i] = n.Name
+			hops[i] = TraceHop{
+				Symbol: n.Name, Path: n.Path, Line: n.Line,
+				Resolution: n.Resolution, Confidence: n.Confidence, Receiver: n.Receiver,
+			}
 		}
-		out.Chains = append(out.Chains, names)
+		out.Chains = append(out.Chains, hops)
 	}
 	return out, nil
 }

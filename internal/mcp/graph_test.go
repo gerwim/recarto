@@ -48,8 +48,12 @@ func TestGraphHandlersMapping(t *testing.T) {
 	}
 	foundChain := false
 	for _, ch := range tr.Chains {
-		if len(ch) >= 2 && ch[0] == "A" && ch[1] == "B" {
+		if len(ch) >= 2 && ch[0].Symbol == "A" && ch[1].Symbol == "B" {
 			foundChain = true
+			// B is a unique Go function → name resolution, medium confidence.
+			if ch[1].Resolution != "name" || ch[1].Confidence != "medium" {
+				t.Errorf("B hop = %+v, want resolution=name confidence=medium", ch[1])
+			}
 		}
 	}
 	if !foundChain {
