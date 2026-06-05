@@ -24,6 +24,9 @@ per-repo SQLite cache outside the working tree.
 - At session start Recarto injects the most relevant memories for this branch.
 - **Record** knowledge with ` + "`record_memory`" + ` and bug fixes with ` + "`record_bug`" + `.
 - **Recall** with ` + "`recall_memory`" + ` and ` + "`search_bugs`" + ` before changing code.
+- **Track open work** as a ` + "`todo`" + ` memory (` + "`record_memory`" + ` with kind ` + "`todo`" + `): it
+  resurfaces at session start and when you touch its referenced files. Close it with
+  ` + "`complete_todo`" + ` (or ` + "`recarto todo done <id>`" + `) when the work is finished.
 - Query the code graph with ` + "`search_graph` / `get_code_snippet` / `trace_call_path`" + `
   instead of reading whole files. When searching ` + "`search_graph`" + ` by concept, also
   pass ` + "`candidate_symbols`" + ` — the identifier names you expect (e.g. ` + "`AddressLookup`, `Geocode`" + `);
