@@ -12,7 +12,7 @@ import (
 // known reports whether cmd is a CLI command that needs an open App.
 func known(cmd string) bool {
 	switch cmd {
-	case "status", "doctor", "remember", "recall", "bug", "memory", "serve", "hook", "index", "graph", "compact":
+	case "status", "doctor", "remember", "recall", "bug", "memory", "serve", "hook", "index", "graph", "compact", "snapshot":
 		return true
 	}
 	return false
@@ -83,6 +83,8 @@ func Run(args []string, out io.Writer) error {
 		return Graph(ctx, a, out, rest)
 	case "compact":
 		return Compact(ctx, a, out, rest)
+	case "snapshot":
+		return Snapshot(ctx, a, out, rest)
 	}
 	return nil // unreachable: known() gates the switch
 }
