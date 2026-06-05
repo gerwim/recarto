@@ -24,6 +24,7 @@ type MemoryView struct {
 	Pinned             bool    `json:"pinned,omitempty"`
 	ReinforcementCount int     `json:"reinforcement_count,omitempty"`
 	Score              float64 `json:"score,omitempty"`
+	Caveat             string  `json:"caveat,omitempty"`
 }
 
 // RecordMemoryInput are the arguments to the record_memory tool. Fields without
@@ -99,6 +100,7 @@ func recallMemory(ctx context.Context, a *app.App, in RecallMemoryInput) (Recall
 		Symbols:     in.Symbols,
 		Kind:        memory.Kind(in.Kind),
 		Branch:      a.Git.Branch,
+		Worktree:    a.Git.Worktree,
 		Limit:       in.Limit,
 		TokenBudget: in.TokenBudget,
 	})
@@ -109,6 +111,7 @@ func recallMemory(ctx context.Context, a *app.App, in RecallMemoryInput) (Recall
 	for _, r := range results {
 		v := viewOf(r.Record)
 		v.Score = r.Score
+		v.Caveat = r.Caveat()
 		out.Memories = append(out.Memories, v)
 	}
 	return out, nil

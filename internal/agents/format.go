@@ -56,6 +56,9 @@ func formatSessionContext(results []memory.RecallResult, arch graph.Architecture
 			line := fmt.Sprintf("- [%s] %s\n  %s\n", r.Record.Kind, title, r.Record.Body)
 			b.WriteString(line)
 			used += ledger.EstimateTokens(line)
+			if c := r.Caveat(); c != "" {
+				fmt.Fprintf(&b, "  %s\n", c)
+			}
 			continue
 		}
 		// Gate on the RAW body cost so a large-bodied memory degrades to title-only,
@@ -67,9 +70,15 @@ func formatSessionContext(results []memory.RecallResult, arch graph.Architecture
 		case used+ledger.EstimateTokens(fullCost) <= budgetCap:
 			b.WriteString(fullDisplay)
 			used += ledger.EstimateTokens(fullDisplay)
+			if c := r.Caveat(); c != "" {
+				fmt.Fprintf(&b, "  %s\n", c)
+			}
 		case used+ledger.EstimateTokens(titleOnly) <= budgetCap:
 			b.WriteString(titleOnly)
 			used += ledger.EstimateTokens(titleOnly)
+			if c := r.Caveat(); c != "" {
+				fmt.Fprintf(&b, "  %s\n", c)
+			}
 		}
 	}
 	if len(results) == 0 {

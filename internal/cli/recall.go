@@ -37,6 +37,7 @@ func Recall(ctx context.Context, a *app.App, w io.Writer, args []string) error {
 		Symbols:     splitCSV(*symbols),
 		Kind:        memory.Kind(*kind),
 		Branch:      a.Git.Branch,
+		Worktree:    a.Git.Worktree,
 		Limit:       *limit,
 		TokenBudget: *budget,
 	})
@@ -57,6 +58,9 @@ func Recall(ctx context.Context, a *app.App, w io.Writer, args []string) error {
 			// Indent continuation lines so multi-line bodies stay aligned under
 			// the bullet instead of rendering flush-left.
 			fmt.Fprintf(w, "    %s\n", strings.ReplaceAll(r.Record.Body, "\n", "\n    "))
+		}
+		if c := r.Caveat(); c != "" {
+			fmt.Fprintf(w, "    %s\n", c)
 		}
 	}
 	return nil

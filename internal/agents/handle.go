@@ -72,6 +72,7 @@ func handleSessionStart(ctx context.Context, a *app.App, ev Event) (Result, erro
 	budget := sessionBudget()
 	results, err := a.Engine.Recall(ctx, memory.RecallQuery{
 		Branch:      a.Git.Branch,
+		Worktree:    a.Git.Worktree,
 		Baseline:    true,
 		TokenBudget: budget,
 	})
@@ -172,7 +173,7 @@ func handleAugment(ctx context.Context, a *app.App, ev Event) (Result, error) {
 	}
 
 	if bugRes, err := a.Engine.Recall(ctx, memory.RecallQuery{
-		TaskHint: pattern, Kind: memory.KindBug, Branch: a.Git.Branch, Limit: 5,
+		TaskHint: pattern, Kind: memory.KindBug, Branch: a.Git.Branch, Worktree: a.Git.Worktree, Limit: 5,
 	}); err == nil {
 		var bugLines []string
 		for _, r := range bugRes {
