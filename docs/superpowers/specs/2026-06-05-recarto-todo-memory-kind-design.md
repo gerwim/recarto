@@ -98,7 +98,7 @@ Rejected alternatives:
 - New `TodosForCode(ctx, branch, files, symbols)` mirroring `BugsForCode`
   (`internal/memory/bugsurface.go`): active `kind='todo'` rows whose refs match a
   touched file/symbol, branch-visible, most-recently-updated first.
-- Wire into the same hook path that surfaces bugs on read/edit/grep so a
+- Wire into the same hook path that surfaces bugs on read/edit so a
   code-anchored todo reappears the moment its code is touched.
 - Code-anchored todos do **not** auto-resolve when their ref dangles — a moved or
   deleted file does not mean the work is done. (The existing worktree-aware
