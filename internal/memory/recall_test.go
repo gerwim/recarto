@@ -360,6 +360,45 @@ func TestBaselineRecallRespectsBudgetAndPinsFirst(t *testing.T) {
 	}
 }
 
+func TestBaselineRecallIncludesOpenTodo(t *testing.T) {
+	clk := clock.NewFake(time.UnixMilli(5_000_000))
+	e := newTestEngine(t, clk)
+	ctx := context.Background()
+
+	todoID, _, err := e.Record(ctx, NewMemory{
+		Kind: KindTodo, Title: "finish the parser", Body: "finish the parser work", Branch: "main", Source: "cli",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	doneID, _, _ := e.Record(ctx, NewMemory{
+		Kind: KindTodo, Title: "already finished", Body: "already finished work", Branch: "main", Source: "cli",
+	})
+	if _, err := e.CompleteTodo(ctx, doneID); err != nil {
+		t.Fatal(err)
+	}
+
+	results, err := e.Recall(ctx, RecallQuery{Branch: "main", Baseline: true, TokenBudget: 10000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sawOpen, sawDone bool
+	for _, r := range results {
+		switch r.Record.ID {
+		case todoID:
+			sawOpen = true
+		case doneID:
+			sawDone = true
+		}
+	}
+	if !sawOpen {
+		t.Error("open todo missing from session-start baseline recall")
+	}
+	if sawDone {
+		t.Error("done todo must not appear in baseline recall")
+	}
+}
+
 func TestRecallStampsLastUsedEpoch(t *testing.T) {
 	clk := clock.NewFake(time.UnixMilli(12_000_000))
 	e := newTestEngine(t, clk)
