@@ -11,6 +11,7 @@ import (
 	"git.gerwim.nl/gerwim/recarto/internal/graph"
 	"git.gerwim.nl/gerwim/recarto/internal/ledger"
 	"git.gerwim.nl/gerwim/recarto/internal/memory"
+	"git.gerwim.nl/gerwim/recarto/internal/snapshot"
 	"git.gerwim.nl/gerwim/recarto/internal/store"
 )
 
@@ -63,6 +64,9 @@ func handleSessionStart(ctx context.Context, a *app.App, ev Event) (Result, erro
 
 	// Warm the code graph for this worktree (best-effort, non-blocking).
 	_ = a.Graph.ReconcileIfStale(ctx, a.Git.Worktree, graph.NewSource(a.Git.Worktree), graph.WorktreeToken(a.Git.Worktree))
+
+	// Absorb a teammate's committed memory snapshot when it changed (best-effort).
+	_, _ = snapshot.SyncOnSessionStart(ctx, a.Engine, a.Store, a.Git.Worktree)
 
 	// Opportunistic memory compaction (best-effort, gated to once per interval,
 	// single-flight across worktrees). Runs before recall so this session's
