@@ -59,3 +59,37 @@ func TestImportMemoryInsertReinforceSkip(t *testing.T) {
 		t.Fatalf("reinforce must stamp current time, not the stale snapshot CreatedAt; got UpdatedAt=%d", rec2.UpdatedAt)
 	}
 }
+
+func TestImportReinforceKeepsHigherPinnedAndConfidence(t *testing.T) {
+	e := newTestEngine(t, clock.Real{})
+	ctx := context.Background()
+
+	// Existing local memory: unpinned, low confidence.
+	base := ImportMemory{
+		ID: "b1", Kind: KindLearning, Title: "t",
+		Body: "a durable learning about caching layers", Confidence: 0.5, CreatedAt: 1000,
+	}
+	if out, _, err := e.ImportMemory(ctx, base); err != nil || out != ImportInserted {
+		t.Fatalf("setup insert: out=%v err=%v", out, err)
+	}
+
+	// Incoming near-duplicate (different id): pinned + higher confidence.
+	inc := ImportMemory{
+		ID: "b2", Kind: KindLearning, Title: "t",
+		Body: "a durable learning about caching layers!", Confidence: 0.95, Pinned: true, CreatedAt: 2000,
+	}
+	out, id, err := e.ImportMemory(ctx, inc)
+	if err != nil || out != ImportReinforced {
+		t.Fatalf("want reinforced, got out=%v err=%v", out, err)
+	}
+	rec, _ := e.GetByID(ctx, id)
+	if rec == nil {
+		t.Fatal("reinforced record should exist")
+	}
+	if !rec.Pinned {
+		t.Fatalf("reinforce must keep the higher pinned (incoming was pinned): %+v", rec)
+	}
+	if rec.Confidence < 0.95 {
+		t.Fatalf("reinforce must keep the higher confidence 0.95, got %v", rec.Confidence)
+	}
+}

@@ -71,9 +71,21 @@ func (e *Engine) ImportMemory(ctx context.Context, im ImportMemory) (ImportOutco
 		}
 		if found {
 			outcome, retID = ImportReinforced, candID
-			return e.reinforce(ctx, c, candID, nm, now)
+			if rerr := e.reinforce(ctx, c, candID, nm, now); rerr != nil {
+				return rerr
+			}
+			// Spec §6: an incoming snapshot record keeps the HIGHER pinned/confidence
+			// of the two near-duplicates (reinforce alone only ratchets confidence +0.1
+			// and never pins).
+			_, uerr := c.ExecContext(ctx,
+				`UPDATE memories SET pinned = MAX(pinned, ?), confidence = MAX(confidence, ?) WHERE id=?`,
+				boolToInt(im.Pinned), clampConfidence(im.Confidence), candID)
+			return uerr
 		}
 
+		// insert stamps both created_at and updated_at from im.CreatedAt, so an
+		// imported memory preserves its original timestamps rather than appearing
+		// artificially fresh in recency-ranked recall.
 		if err := e.insert(ctx, c, im.ID, nm, searchText, sim, bands, im.CreatedAt); err != nil {
 			return err
 		}
