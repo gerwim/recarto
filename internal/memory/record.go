@@ -11,11 +11,12 @@ const (
 	KindDoNotRepeat Kind = "do_not_repeat"
 	KindBug         Kind = "bug"
 	KindAction      Kind = "action"
+	KindTodo        Kind = "todo"
 )
 
 var validKinds = map[Kind]bool{
 	KindPreference: true, KindLearning: true, KindDecision: true,
-	KindDoNotRepeat: true, KindBug: true, KindAction: true,
+	KindDoNotRepeat: true, KindBug: true, KindAction: true, KindTodo: true,
 }
 
 // Valid reports whether k is a known memory kind.

@@ -13,3 +13,12 @@ func TestKindValid(t *testing.T) {
 		t.Error(`"nonsense" should be invalid`)
 	}
 }
+
+func TestKindTodoIsValid(t *testing.T) {
+	if !KindTodo.Valid() {
+		t.Fatal("KindTodo should be a valid kind")
+	}
+	if KindTodo != "todo" {
+		t.Fatalf("KindTodo = %q, want \"todo\"", KindTodo)
+	}
+}
