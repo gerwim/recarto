@@ -8,7 +8,7 @@ import (
 )
 
 // schemaVersion is the number of applied migrations.
-const schemaVersion = 12
+const schemaVersion = 14
 
 // migrations are applied in order; index+1 becomes user_version.
 var migrations = []string{
@@ -341,6 +341,66 @@ UPDATE sqlite_master
      '''active'',''superseded'',''archived'',''done''')
  WHERE type='table' AND name='memories' AND sql NOT LIKE '%''done''%';
 PRAGMA writable_schema=RESET;
+`,
+	// v13 (index edges by file_id): the per-file rewrite path deletes a file's
+	// edges by file_id on every re-index (`DELETE FROM edges WHERE file_id=?`), and
+	// the resolver joins/filters edges by file_id; both were full table scans of
+	// edges. Add the covering index. Purely additive — the derived graph is left
+	// intact (no wipe), so existing stores gain the index without a rebuild.
+	`
+CREATE INDEX IF NOT EXISTS idx_edges_file ON edges(file_id);
+`,
+	// v14 (indexable receiver match): the call resolver's typed/static strategies
+	// matched a method to its declaring type with `qualified_name LIKE '%.T.name'`,
+	// a leading-wildcard scan run per same-name node — quadratic on large C# repos
+	// (S2 alone hit ~4 min on HotChocolate). nodes.parent_name stores a symbol's
+	// immediate enclosing scope (the second-to-last qualified_name segment) so the
+	// match becomes an indexed equality pre-filter `m.parent_name = lastseg(T)`.
+	// Indexer change (new stored column), so wipe the rebuildable graph + freshness
+	// token to force a rebuild that populates it. See the v5 comment for the
+	// standing convention.
+	//
+	// The graph is wiped here anyway, so rather than a non-re-runnable
+	// `ALTER TABLE ... ADD COLUMN`, the nodes table is dropped and recreated WITH the
+	// new column — making the whole migration idempotent (safe to replay, which the
+	// migration tests exercise by rolling user_version back). Children referencing
+	// nodes are emptied first so the DROP has no rows to violate; edges' foreign key
+	// re-binds to the recreated table by name.
+	`
+DELETE FROM nodes_fts;
+DELETE FROM nodes_fts_stem;
+DELETE FROM nodes_fts_tri;
+DELETE FROM edge_candidates;
+DELETE FROM type_bindings;
+DELETE FROM edges;
+DELETE FROM nodes;
+DELETE FROM files;
+DELETE FROM meta WHERE key LIKE 'graph_token:%';
+
+DROP TABLE nodes;
+CREATE TABLE nodes (
+  id             TEXT PRIMARY KEY,
+  file_id        TEXT NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+  kind           TEXT NOT NULL,
+  name           TEXT NOT NULL,
+  qualified_name TEXT NOT NULL DEFAULT '',
+  parent_name    TEXT NOT NULL DEFAULT '',
+  signature      TEXT NOT NULL DEFAULT '',
+  start_byte     INTEGER NOT NULL,
+  end_byte       INTEGER NOT NULL,
+  start_line     INTEGER NOT NULL,
+  end_line       INTEGER NOT NULL
+);
+CREATE INDEX idx_nodes_file        ON nodes(file_id);
+CREATE INDEX idx_nodes_name        ON nodes(name);
+CREATE INDEX idx_nodes_qname       ON nodes(qualified_name);
+CREATE INDEX idx_nodes_name_parent ON nodes(name, parent_name);
+
+-- Composite seek for the typed-receiver strategy's binding lookup
+-- (tb.file_id = ? AND tb.name = ?): with only the single-column file_id index the
+-- name was a residual scan, and at large scale the planner abandoned the good plan
+-- and built a transient index instead (S2 spiked from ~2s to >3min on HotChocolate).
+CREATE INDEX IF NOT EXISTS idx_type_bindings_file_name ON type_bindings(file_id, name);
 `,
 }
 

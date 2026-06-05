@@ -117,39 +117,51 @@ var callStrategies = []string{
 const stratInterface = `
 INSERT OR IGNORE INTO edge_candidates(edge_id, dst_node_id, confidence, method)
 SELECT ed.id, m.id, 0.5, 'iface'
-  FROM edges ed
-  JOIN files ef ON ef.id = ed.file_id
-  JOIN nodes src ON src.id = ed.src_node_id
-  JOIN type_bindings tb ON tb.file_id = ed.file_id
+  FROM files ef
+  CROSS JOIN edges ed ON ed.file_id = ef.id
+       AND ed.kind = 'calls' AND ed.dst_recv <> ''
+  CROSS JOIN nodes src ON src.id = ed.src_node_id
+  CROSS JOIN type_bindings tb ON tb.file_id = ed.file_id
        AND tb.name = ed.dst_recv
        AND tb.scope_start_byte <= src.start_byte
        AND src.end_byte <= tb.scope_end_byte
-  JOIN nodes iface ON iface.name = tb.type_name AND iface.kind IN ('interface','class')
-  JOIN edges ext ON ext.kind = 'extends' AND ext.dst_node_id = iface.id
-  JOIN edges cm  ON cm.kind = 'contains' AND cm.src_node_id = ext.src_node_id
-  JOIN nodes m   ON m.id = cm.dst_node_id AND m.kind = 'method' AND m.name = ed.dst_name
+  CROSS JOIN nodes iface ON iface.name = tb.type_name AND iface.kind IN ('interface','class')
+  CROSS JOIN edges ext ON ext.kind = 'extends' AND ext.dst_node_id = iface.id
+  CROSS JOIN edges cm  ON cm.kind = 'contains' AND cm.src_node_id = ext.src_node_id
+  CROSS JOIN nodes m   ON m.id = cm.dst_node_id AND m.kind = 'method' AND m.name = ed.dst_name
   JOIN files mf  ON mf.id = m.file_id
- WHERE ed.kind = 'calls' AND ed.dst_recv <> ''
-   AND ef.worktree = ? AND mf.worktree = ?`
+ WHERE ef.worktree = ? AND mf.worktree = ?`
 
 // stratStatic (S3): the receiver token is itself a type name T (Foo.Create());
 // bind to T.<method>. Confidence 0.9. A receiver that is a variable (no matching
 // type-qualified node) simply yields no rows here.
+// The join order is fully pinned with CROSS JOIN, driving from the worktree's
+// files into their call edges (via idx_edges_file) and only then to same-name
+// nodes. Without this the SQLite planner flips, at large repo scale, to building
+// an AUTOMATIC transient index over all edges and driving from every node — a
+// catastrophic plan (≈250x slower) that the pinned order avoids. Inner joins are
+// commutative, so pinning changes only the plan, never the result.
 const stratStatic = `
 INSERT OR IGNORE INTO edge_candidates(edge_id, dst_node_id, confidence, method)
 SELECT ed.id, m.id, 0.9, 'static'
-  FROM edges ed
-  JOIN files ef ON ef.id = ed.file_id
+  FROM files ef
+  CROSS JOIN edges ed ON ed.file_id = ef.id
+       AND ed.kind = 'calls' AND ed.dst_recv <> ''
   -- m.name = ed.dst_name drives the join via idx_nodes_name (the qualified_name
   -- last segment is always the node name, so this is a result-preserving prefilter
   -- that avoids a full nodes scan for the leading-wildcard LIKE below).
-  JOIN nodes m  ON m.name = ed.dst_name
+  CROSS JOIN nodes m ON m.name = ed.dst_name
+       -- Indexed pre-filter (idx_nodes_name_parent): the LIKE below can only match
+       -- when m's enclosing scope equals the receiver's last segment, so requiring
+       -- it up front is result-preserving but turns a per-row wildcard scan into an
+       -- index seek. The LIKE/equals still confirms the full (possibly multi-segment)
+       -- receiver suffix.
+       AND m.parent_name = substr(ed.dst_recv, length(rtrim(ed.dst_recv, replace(ed.dst_recv,'.',''))) + 1)
        AND m.kind IN ('method','property','constructor','function')
        AND ( m.qualified_name = ed.dst_recv || '.' || ed.dst_name
              OR m.qualified_name LIKE '%.' || ed.dst_recv || '.' || ed.dst_name )
   JOIN files mf ON mf.id = m.file_id
- WHERE ed.kind = 'calls' AND ed.dst_recv <> ''
-   AND ef.worktree = ? AND mf.worktree = ?
+ WHERE ef.worktree = ? AND mf.worktree = ?
    AND ( ef.language = mf.language
          OR ( ef.language IN ('typescript','tsx','javascript')
               AND mf.language IN ('typescript','tsx','javascript') ) )`
@@ -162,38 +174,42 @@ SELECT ed.id, m.id, 0.9, 'static'
 const stratSelf = `
 INSERT OR IGNORE INTO edge_candidates(edge_id, dst_node_id, confidence, method)
 SELECT ed.id, m.id, 0.95, 'self'
-  FROM edges ed
-  JOIN files ef ON ef.id = ed.file_id
-  JOIN edges pc ON pc.kind = 'contains' AND pc.dst_node_id = ed.src_node_id
-  JOIN edges cm ON cm.kind = 'contains' AND cm.src_node_id = pc.src_node_id
-  JOIN nodes m  ON m.id = cm.dst_node_id
+  FROM files ef
+  CROSS JOIN edges ed ON ed.file_id = ef.id
+       AND ed.kind = 'calls' AND (ed.dst_recv = '' OR ed.dst_recv = 'this')
+  CROSS JOIN edges pc ON pc.kind = 'contains' AND pc.dst_node_id = ed.src_node_id
+  CROSS JOIN edges cm ON cm.kind = 'contains' AND cm.src_node_id = pc.src_node_id
+  CROSS JOIN nodes m ON m.id = cm.dst_node_id
        AND m.kind IN ('method','property','constructor')
        AND m.name = ed.dst_name
- WHERE ed.kind = 'calls' AND (ed.dst_recv = '' OR ed.dst_recv = 'this')
-   AND ef.worktree = ?
+ WHERE ef.worktree = ?
    AND ? IS NOT NULL`
 
 // stratTypedReceiver (S2): the receiver identifier resolves, via a type_binding
 // in scope at the call (the binding's scope contains the calling method's span —
 // edges.src_node_id), to type T; bind to T.<method>. Confidence 0.9.
+// Join order fully pinned (see stratStatic) to avoid the planner's large-scale
+// plan flip; drives files -> call edges -> scope binding -> same-name nodes.
 const stratTypedReceiver = `
 INSERT OR IGNORE INTO edge_candidates(edge_id, dst_node_id, confidence, method)
 SELECT ed.id, m.id, 0.9, 'typed'
-  FROM edges ed
-  JOIN files ef  ON ef.id = ed.file_id
-  JOIN nodes src ON src.id = ed.src_node_id
-  JOIN type_bindings tb ON tb.file_id = ed.file_id
+  FROM files ef
+  CROSS JOIN edges ed ON ed.file_id = ef.id
+       AND ed.kind = 'calls' AND ed.dst_recv <> ''
+  CROSS JOIN nodes src ON src.id = ed.src_node_id
+  CROSS JOIN type_bindings tb ON tb.file_id = ed.file_id
        AND tb.name = ed.dst_recv
        AND tb.scope_start_byte <= src.start_byte
        AND src.end_byte <= tb.scope_end_byte
   -- m.name = ed.dst_name drives the join via idx_nodes_name (see stratStatic).
-  JOIN nodes m  ON m.name = ed.dst_name
+  CROSS JOIN nodes m ON m.name = ed.dst_name
+       -- Indexed pre-filter on the declaring scope; see stratStatic.
+       AND m.parent_name = substr(tb.type_name, length(rtrim(tb.type_name, replace(tb.type_name,'.',''))) + 1)
        AND m.kind IN ('method','property','constructor','function')
        AND ( m.qualified_name = tb.type_name || '.' || ed.dst_name
              OR m.qualified_name LIKE '%.' || tb.type_name || '.' || ed.dst_name )
   JOIN files mf ON mf.id = m.file_id
- WHERE ed.kind = 'calls' AND ed.dst_recv <> ''
-   AND ef.worktree = ? AND mf.worktree = ?
+ WHERE ef.worktree = ? AND mf.worktree = ?
    AND ( ef.language = mf.language
          OR ( ef.language IN ('typescript','tsx','javascript')
               AND mf.language IN ('typescript','tsx','javascript') ) )`
@@ -214,13 +230,22 @@ SELECT edge_id, dst_node_id, CASE WHEN cnt = 1 THEN 0.45 ELSE 0.2 END, 'name' FR
       CASE WHEN substr(mf.path,1,instr(mf.path,'/')) = substr(ef.path,1,instr(ef.path,'/'))
            THEN 0 ELSE 1 END,
       m.id) AS rn
-  FROM edges ed
-  JOIN files ef ON ef.id = ed.file_id
-  JOIN nodes m  ON m.kind IN ('method','property','constructor','function')
+  FROM files ef
+  CROSS JOIN edges ed ON ed.file_id = ef.id
+                AND ed.kind = 'calls' AND ed.dst_name <> ''
+                -- Skip the name-only fallback for hyper-common names (ToString,
+                -- Equals, Id, ...) that match more than 50 callables: it would pick
+                -- 10 arbitrary 0.2-confidence targets (pure noise), and the full
+                -- (edge x same-name) product for those names is exactly what makes S5
+                -- materialize a multi-GB sort and blow up on large codebases.
+                AND ed.dst_name NOT IN (
+                      SELECT name FROM nodes
+                       WHERE kind IN ('method','property','constructor','function')
+                       GROUP BY name HAVING COUNT(*) > 50 )
+  CROSS JOIN nodes m ON m.kind IN ('method','property','constructor','function')
                AND m.name = ed.dst_name
   JOIN files mf ON mf.id = m.file_id
-  WHERE ed.kind = 'calls' AND ed.dst_name <> ''
-    AND ef.worktree = ? AND mf.worktree = ?
+  WHERE ef.worktree = ? AND mf.worktree = ?
     AND ( ef.language = mf.language
           OR ( ef.language IN ('typescript','tsx','javascript')
                AND mf.language IN ('typescript','tsx','javascript') ) )

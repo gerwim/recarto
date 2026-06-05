@@ -27,11 +27,71 @@ func (e *Engine) IndexFile(ctx context.Context, worktree, path string, src []byt
 	hash := sha256hex(src)
 	now := e.clk.Now().UnixMilli()
 	return e.st.WriteTx(ctx, func(c store.Conn) error {
-		return e.writeFileGraph(ctx, c, worktree, path, lang, res, hash, mtime, size, now)
+		st, err := prepareWriteStmts(ctx, c)
+		if err != nil {
+			return err
+		}
+		defer st.Close()
+		return e.writeFileGraph(ctx, c, st, worktree, path, lang, res, hash, mtime, size, now)
 	})
 }
 
-func (e *Engine) writeFileGraph(ctx context.Context, c store.Conn, worktree, path, lang string,
+// writeStmts holds the per-row INSERT statements of the file-graph write path,
+// prepared once per transaction so a batch of files reuses them (compiling each
+// statement once instead of once per row — a large saving with the pure-Go
+// SQLite driver). All statements are bound to the transaction's connection.
+type writeStmts struct {
+	node     *sql.Stmt
+	fts      *sql.Stmt
+	ftsStem  *sql.Stmt
+	ftsTri   *sql.Stmt
+	edge     *sql.Stmt
+	binding  *sql.Stmt
+	contains *sql.Stmt
+}
+
+// prepareWriteStmts compiles the hot insert statements on c. The caller must
+// Close the result before the transaction commits.
+func prepareWriteStmts(ctx context.Context, c store.Conn) (*writeStmts, error) {
+	var s writeStmts
+	var err error
+	prep := func(q string) *sql.Stmt {
+		if err != nil {
+			return nil
+		}
+		var st *sql.Stmt
+		st, err = c.PrepareContext(ctx, q)
+		return st
+	}
+	s.node = prep(`INSERT INTO nodes(id,file_id,kind,name,qualified_name,parent_name,signature,
+		   start_byte,end_byte,start_line,end_line)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?)`)
+	s.fts = prep(`INSERT INTO nodes_fts(node_id,name,qualified_name) VALUES (?,?,?)`)
+	s.ftsStem = prep(`INSERT INTO nodes_fts_stem(node_id,name,qualified_name) VALUES (?,?,?)`)
+	s.ftsTri = prep(`INSERT INTO nodes_fts_tri(node_id,content) VALUES (?,?)`)
+	s.edge = prep(`INSERT INTO edges(id,src_node_id,dst_node_id,dst_name,dst_recv,kind,file_id,line)
+		 VALUES (?,?,?,?,?,?,?,?)`)
+	s.binding = prep(`INSERT INTO type_bindings(id,file_id,name,type_name,scope_start_byte,scope_end_byte)
+		 VALUES (?,?,?,?,?,?)`)
+	s.contains = prep(`INSERT INTO edges(id,src_node_id,dst_node_id,dst_name,kind,file_id,line)
+		 VALUES (?,?,?,?,?,?,?)`)
+	if err != nil {
+		s.Close()
+		return nil, err
+	}
+	return &s, nil
+}
+
+// Close releases the prepared statements (safe on a partially-prepared set).
+func (s *writeStmts) Close() {
+	for _, st := range []*sql.Stmt{s.node, s.fts, s.ftsStem, s.ftsTri, s.edge, s.binding, s.contains} {
+		if st != nil {
+			_ = st.Close()
+		}
+	}
+}
+
+func (e *Engine) writeFileGraph(ctx context.Context, c store.Conn, st *writeStmts, worktree, path, lang string,
 	res parse.Result, hash string, mtime, size, now int64) error {
 	// Upsert the files row and obtain its id.
 	var fileID string
@@ -93,11 +153,8 @@ func (e *Engine) writeFileGraph(ctx context.Context, c store.Conn, worktree, pat
 		if s.RecvType != "" && !strings.Contains(qn, ".") {
 			qn = s.RecvType + "." + s.Name
 		}
-		if _, err := c.ExecContext(ctx,
-			`INSERT INTO nodes(id,file_id,kind,name,qualified_name,signature,
-			   start_byte,end_byte,start_line,end_line)
-			 VALUES (?,?,?,?,?,?,?,?,?,?)`,
-			spans[i].id, fileID, s.Kind, s.Name, qn, "", // signature: reserved for a future version
+		if _, err := st.node.ExecContext(ctx,
+			spans[i].id, fileID, s.Kind, s.Name, qn, parentSegment(qn), "", // signature: reserved for a future version
 			int64(s.StartByte), int64(s.EndByte), int64(s.StartLine), int64(s.EndLine)); err != nil {
 			return err
 		}
@@ -110,28 +167,20 @@ func (e *Engine) writeFileGraph(ctx context.Context, c store.Conn, worktree, pat
 		// same identifier-split content; the trigram broadener stores the raw name +
 		// qualified name for substring matching.
 		ftsName, ftsQN := ftsText(s.Name), ftsText(qn)
-		if _, err := c.ExecContext(ctx,
-			`INSERT INTO nodes_fts(node_id,name,qualified_name) VALUES (?,?,?)`,
-			spans[i].id, ftsName, ftsQN); err != nil {
+		if _, err := st.fts.ExecContext(ctx, spans[i].id, ftsName, ftsQN); err != nil {
 			return err
 		}
-		if _, err := c.ExecContext(ctx,
-			`INSERT INTO nodes_fts_stem(node_id,name,qualified_name) VALUES (?,?,?)`,
-			spans[i].id, ftsName, ftsQN); err != nil {
+		if _, err := st.ftsStem.ExecContext(ctx, spans[i].id, ftsName, ftsQN); err != nil {
 			return err
 		}
-		if _, err := c.ExecContext(ctx,
-			`INSERT INTO nodes_fts_tri(node_id,content) VALUES (?,?)`,
-			spans[i].id, s.Name+" "+qn); err != nil {
+		if _, err := st.ftsTri.ExecContext(ctx, spans[i].id, s.Name+" "+qn); err != nil {
 			return err
 		}
 	}
 
 	// Insert edges, attributing each to the innermost enclosing node.
 	for _, ed := range res.Edges {
-		if _, err := c.ExecContext(ctx,
-			`INSERT INTO edges(id,src_node_id,dst_node_id,dst_name,dst_recv,kind,file_id,line)
-			 VALUES (?,?,?,?,?,?,?,?)`,
+		if _, err := st.edge.ExecContext(ctx,
 			ids.New(), nullStr(enclosing(spans, ed.StartByte)), nil, ed.DstName, ed.Recv, ed.Kind,
 			fileID, int64(ed.Line)); err != nil {
 			return err
@@ -157,9 +206,7 @@ func (e *Engine) writeFileGraph(ctx context.Context, c store.Conn, worktree, pat
 				}
 			}
 		}
-		if _, err := c.ExecContext(ctx,
-			`INSERT INTO type_bindings(id,file_id,name,type_name,scope_start_byte,scope_end_byte)
-			 VALUES (?,?,?,?,?,?)`,
+		if _, err := st.binding.ExecContext(ctx,
 			ids.New(), fileID, b.Name, b.TypeName, int64(scStart), int64(scEnd)); err != nil {
 			return err
 		}
@@ -174,9 +221,7 @@ func (e *Engine) writeFileGraph(ctx context.Context, c store.Conn, worktree, pat
 		if pid == "" {
 			continue
 		}
-		if _, err := c.ExecContext(ctx,
-			`INSERT INTO edges(id,src_node_id,dst_node_id,dst_name,kind,file_id,line)
-			 VALUES (?,?,?,?,?,?,?)`,
+		if _, err := st.contains.ExecContext(ctx,
 			ids.New(), pid, child.id, "", "contains",
 			fileID, int64(res.Symbols[i].StartLine)); err != nil {
 			return err

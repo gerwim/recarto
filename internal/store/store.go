@@ -20,6 +20,10 @@ type Conn interface {
 	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
 	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
 	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+	// PrepareContext lets a hot write loop compile a statement once and reuse it
+	// across many rows in the same transaction (the prepared Stmt is bound to this
+	// connection, so it participates in the open BEGIN IMMEDIATE).
+	PrepareContext(ctx context.Context, query string) (*sql.Stmt, error)
 }
 
 // Store wraps the SQLite connection pool plus an in-process write mutex.
@@ -65,6 +69,20 @@ func open(path string, busyTimeoutMs int) (*Store, error) {
 
 // Close closes the underlying pool.
 func (s *Store) Close() error { return s.DB.Close() }
+
+// Checkpoint flushes the WAL into the main database file and truncates the WAL,
+// bounding on-disk growth during a long sequence of writes (e.g. a full graph
+// index, where the WAL would otherwise accumulate every inserted row until the
+// next passive auto-checkpoint). PRAGMA wal_checkpoint returns a status row
+// (busy, log frames, checkpointed frames); a non-zero busy is not an error — it
+// just means a reader held the WAL and the truncation will happen on a later
+// call — so only a genuine statement failure is surfaced.
+func (s *Store) Checkpoint(ctx context.Context) error {
+	var busy, logFrames, checkpointed int
+	err := s.DB.QueryRowContext(ctx, `PRAGMA wal_checkpoint(TRUNCATE)`).
+		Scan(&busy, &logFrames, &checkpointed)
+	return err
+}
 
 // maxWriteRetries bounds how many extra times WriteTx restarts a transaction
 // that could not acquire the write lock. busy_timeout already blocks each

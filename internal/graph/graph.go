@@ -7,6 +7,7 @@ package graph
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"strings"
 
 	"git.gerwim.nl/gerwim/recarto/internal/clock"
 	"git.gerwim.nl/gerwim/recarto/internal/ledger"
@@ -80,6 +81,23 @@ func containingParent(spans []span, child span) string {
 		}
 	}
 	return best
+}
+
+// parentSegment returns a symbol's immediate enclosing scope name: the
+// second-to-last dotted segment of its qualified name (e.g. "A.B.C.method" -> "C",
+// "Type.method" -> "Type", "method" -> ""). Stored on each node so the call
+// resolver can match a method to its declaring type with an indexed equality
+// instead of a leading-wildcard LIKE over qualified_name.
+func parentSegment(qn string) string {
+	last := strings.LastIndexByte(qn, '.')
+	if last < 0 {
+		return "" // top-level: no enclosing scope
+	}
+	head := qn[:last]
+	if prev := strings.LastIndexByte(head, '.'); prev >= 0 {
+		return head[prev+1:]
+	}
+	return head
 }
 
 // nullStr maps "" -> SQL NULL.
