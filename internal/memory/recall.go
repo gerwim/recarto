@@ -34,13 +34,15 @@ type RecallQuery struct {
 	Baseline    bool   // session-start: also seed candidates with recent cerebrum memories (no query needed)
 	Limit       int    // max lexical candidates (0 → default)
 	TokenBudget int    // 0 → default
+	Worktree    string // current worktree absolute path, for ref-resolvability
 }
 
 // RecallResult is a selected memory with its score and per-signal breakdown.
 type RecallResult struct {
-	Record  *Record
-	Score   float64
-	Signals map[string]float64
+	Record       *Record
+	Score        float64
+	Signals      map[string]float64
+	DanglingRefs []Ref // code refs absent from the current worktree (nil if none)
 }
 
 // Recall scores and ranks memories by structural overlap, lexical (BM25),

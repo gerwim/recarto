@@ -18,6 +18,7 @@ type Engine struct {
 	led *ledger.Ledger
 	clk clock.Clock
 	lex Lexical
+	res RefResolver // optional; nil → dangling-ref check disabled
 }
 
 // New returns an Engine with the default FTS5 lexical backend.
