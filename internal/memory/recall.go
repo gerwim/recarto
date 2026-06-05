@@ -22,6 +22,10 @@ const (
 	recencyHalfLifeMs  = float64(14 * 24 * 60 * 60 * 1000) // 14 days
 	defaultTokenBudget = 1500
 	defaultLimit       = 50
+
+	// danglingDemotion multiplies the score of a non-pinned, non-bug memory whose
+	// every code ref is absent from the current worktree (spec §5.3).
+	danglingDemotion = 0.25
 )
 
 // RecallQuery is the input to Engine.Recall.
@@ -125,7 +129,21 @@ func (e *Engine) Recall(ctx context.Context, q RecallQuery) ([]RecallResult, err
 		score := (wStructural*sig["structural"] + wLexical*sig["lexical"] +
 			wRecency*sig["recency"] + wReinforcement*sig["reinforcement"] +
 			wBranch*sig["branch"]) * r.Confidence
-		scored = append(scored, RecallResult{Record: r, Score: score, Signals: sig})
+
+		var dangling []Ref
+		if e.res != nil && q.Worktree != "" {
+			code := codeRefsOf(r.Refs)
+			if len(code) > 0 {
+				if d, derr := e.res.Dangling(ctx, q.Worktree, code); derr == nil && len(d) > 0 {
+					dangling = d
+					privileged := r.Pinned || r.Kind == KindBug
+					if len(d) == len(code) && !privileged {
+						score *= danglingDemotion
+					}
+				}
+			}
+		}
+		scored = append(scored, RecallResult{Record: r, Score: score, Signals: sig, DanglingRefs: dangling})
 	}
 
 	budget := q.TokenBudget
