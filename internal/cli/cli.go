@@ -12,7 +12,7 @@ import (
 // known reports whether cmd is a CLI command that needs an open App.
 func known(cmd string) bool {
 	switch cmd {
-	case "status", "doctor", "remember", "recall", "bug", "memory", "serve", "hook", "index", "graph", "compact", "snapshot":
+	case "status", "doctor", "remember", "recall", "bug", "memory", "serve", "hook", "index", "graph", "compact", "snapshot", "todo":
 		return true
 	}
 	return false
@@ -42,7 +42,7 @@ func Run(args []string, out io.Writer) error {
 	}
 
 	if !known(cmd) {
-		return fmt.Errorf("unknown command %q (try: init serve hook status doctor remember recall bug memory index graph compact snapshot)", cmd)
+		return fmt.Errorf("unknown command %q (try: init serve hook status doctor remember recall bug memory index graph compact snapshot todo)", cmd)
 	}
 
 	a, err := app.Open(app.Config{})
@@ -85,6 +85,8 @@ func Run(args []string, out io.Writer) error {
 		return Compact(ctx, a, out, rest)
 	case "snapshot":
 		return Snapshot(ctx, a, out, rest)
+	case "todo":
+		return Todo(ctx, a, out, rest)
 	}
 	return nil // unreachable: known() gates the switch
 }
@@ -113,5 +115,6 @@ func usage(w io.Writer) error {
 	fmt.Fprintln(w, "  graph <sub>       query the code graph (search|callers|callees|arch|query|snippet)")
 	fmt.Fprintln(w, "  compact           prune/decay memory (--force --dry-run --budget-tokens)")
 	fmt.Fprintln(w, "  snapshot          export|import the committable team memory (.recarto/memory.jsonl)")
+	fmt.Fprintln(w, "  todo list|done    list open todos, or mark one done")
 	return nil
 }
