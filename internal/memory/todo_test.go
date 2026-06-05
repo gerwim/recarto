@@ -41,3 +41,58 @@ func TestCompleteTodoTransitionsActiveToDone(t *testing.T) {
 		t.Fatalf("CompleteTodo(unknown) = (%v, %v), want (false, nil)", ok, err)
 	}
 }
+
+func TestActiveTodosExcludesDone(t *testing.T) {
+	clk := clock.NewFake(time.UnixMilli(1_000_000))
+	e := newTestEngine(t, clk)
+	ctx := context.Background()
+
+	openID, _, _ := e.Record(ctx, NewMemory{Kind: KindTodo, Title: "open one", Body: "open one body", Branch: "main", Source: "cli"})
+	doneID, _, _ := e.Record(ctx, NewMemory{Kind: KindTodo, Title: "done one", Body: "done one body", Branch: "main", Source: "cli"})
+	if _, err := e.CompleteTodo(ctx, doneID); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := e.ActiveTodos(ctx, "main", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].ID != openID {
+		t.Fatalf("ActiveTodos returned %d rows; want only the open todo %s", len(got), openID)
+	}
+	_ = doneID
+}
+
+func TestTodosForCodeMatchesRef(t *testing.T) {
+	clk := clock.NewFake(time.UnixMilli(1_000_000))
+	e := newTestEngine(t, clk)
+	ctx := context.Background()
+
+	hitID, _, _ := e.Record(ctx, NewMemory{
+		Kind: KindTodo, Title: "refactor handler", Body: "refactor the handler",
+		Refs: []Ref{{Type: RefFile, Value: "internal/agents/handle.go"}}, Branch: "main", Source: "cli",
+	})
+	_, _, _ = e.Record(ctx, NewMemory{
+		Kind: KindTodo, Title: "other", Body: "other body",
+		Refs: []Ref{{Type: RefFile, Value: "internal/store/store.go"}}, Branch: "main", Source: "cli",
+	})
+
+	got, err := e.TodosForCode(ctx, "main", []string{"internal/agents/handle.go"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].ID != hitID {
+		t.Fatalf("TodosForCode returned %d rows; want only %s", len(got), hitID)
+	}
+
+	if _, err := e.CompleteTodo(ctx, hitID); err != nil {
+		t.Fatal(err)
+	}
+	got, err = e.TodosForCode(ctx, "main", []string{"internal/agents/handle.go"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("completed todo still surfaced: %d rows", len(got))
+	}
+}
