@@ -220,6 +220,7 @@ func searchBugs(ctx context.Context, a *app.App, in SearchBugsInput) (SearchBugs
 		TaskHint: in.Query,
 		Kind:     memory.KindBug,
 		Branch:   a.Git.Branch,
+		Worktree: a.Git.Worktree,
 	})
 	if err != nil {
 		return SearchBugsOutput{}, err
@@ -228,6 +229,7 @@ func searchBugs(ctx context.Context, a *app.App, in SearchBugsInput) (SearchBugs
 	for _, r := range results {
 		v := viewOf(r.Record)
 		v.Score = r.Score
+		v.Caveat = r.Caveat()
 		out.Bugs = append(out.Bugs, v)
 	}
 	return out, nil

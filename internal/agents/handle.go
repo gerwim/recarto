@@ -185,6 +185,9 @@ func handleAugment(ctx context.Context, a *app.App, ev Event) (Result, error) {
 			} else {
 				bugLines = append(bugLines, fmt.Sprintf("- ⚠ %s", r.Record.Title))
 			}
+			if c := r.Caveat(); c != "" {
+				bugLines = append(bugLines, "  "+c)
+			}
 		}
 		if len(bugLines) > 0 {
 			if b.Len() > 0 {

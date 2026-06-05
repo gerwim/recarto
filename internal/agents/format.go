@@ -58,6 +58,7 @@ func formatSessionContext(results []memory.RecallResult, arch graph.Architecture
 			used += ledger.EstimateTokens(line)
 			if c := r.Caveat(); c != "" {
 				fmt.Fprintf(&b, "  %s\n", c)
+				used += ledger.EstimateTokens(c)
 			}
 			continue
 		}
@@ -72,12 +73,14 @@ func formatSessionContext(results []memory.RecallResult, arch graph.Architecture
 			used += ledger.EstimateTokens(fullDisplay)
 			if c := r.Caveat(); c != "" {
 				fmt.Fprintf(&b, "  %s\n", c)
+				used += ledger.EstimateTokens(c)
 			}
 		case used+ledger.EstimateTokens(titleOnly) <= budgetCap:
 			b.WriteString(titleOnly)
 			used += ledger.EstimateTokens(titleOnly)
 			if c := r.Caveat(); c != "" {
 				fmt.Fprintf(&b, "  %s\n", c)
+				used += ledger.EstimateTokens(c)
 			}
 		}
 	}
