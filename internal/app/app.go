@@ -78,6 +78,7 @@ func Open(cfg Config) (*App, error) {
 		_ = st.Close()
 		return nil, err
 	}
+	eng.SetRefResolver(graphRefResolver{st: st})
 
 	a := &App{Git: gc, Store: st, Ledger: led, Engine: eng, Graph: gr, Clock: clk}
 	if err := a.writeMeta(context.Background()); err != nil {
