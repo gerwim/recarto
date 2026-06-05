@@ -47,4 +47,15 @@ func TestImportMemoryInsertReinforceSkip(t *testing.T) {
 	if out != ImportReinforced {
 		t.Fatalf("near-dup should reinforce, got %v", out)
 	}
+
+	rec2, _ := e.GetByID(ctx, "snap-1")
+	if rec2 == nil {
+		t.Fatal("snap-1 should still exist after reinforce")
+	}
+	if rec2.ReinforcementCount != 4 { // was 3, +1 from reinforce
+		t.Fatalf("reinforce should bump count to 4, got %d", rec2.ReinforcementCount)
+	}
+	if rec2.UpdatedAt <= 1000 {
+		t.Fatalf("reinforce must stamp current time, not the stale snapshot CreatedAt; got UpdatedAt=%d", rec2.UpdatedAt)
+	}
 }

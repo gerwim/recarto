@@ -51,6 +51,7 @@ func (e *Engine) ImportMemory(ctx context.Context, im ImportMemory) (ImportOutco
 	set := shingleSet(nm.Body)
 	bands := bandHashes(minHashSignature(set))
 	sim := simHash64(set)
+	now := e.clk.Now().UnixMilli()
 
 	outcome := ImportSkipped
 	retID := im.ID
@@ -70,7 +71,7 @@ func (e *Engine) ImportMemory(ctx context.Context, im ImportMemory) (ImportOutco
 		}
 		if found {
 			outcome, retID = ImportReinforced, candID
-			return e.reinforce(ctx, c, candID, nm, im.CreatedAt)
+			return e.reinforce(ctx, c, candID, nm, now)
 		}
 
 		if err := e.insert(ctx, c, im.ID, nm, searchText, sim, bands, im.CreatedAt); err != nil {
@@ -87,12 +88,15 @@ func (e *Engine) ImportMemory(ctx context.Context, im ImportMemory) (ImportOutco
 	if err != nil {
 		return ImportSkipped, "", err
 	}
+	if outcome != ImportSkipped {
+		_ = e.led.Incr(ctx, "lifetime", "memories_recorded", 1)
+	}
 	return outcome, retID, nil
 }
 
 func clampConfidence(c float64) float64 {
 	if c <= 0 {
-		return 1.0 // missing/zero → default
+		return 1.0 // missing/zero (or corrupt negative) → default full confidence
 	}
 	if c > 1.0 {
 		return 1.0
