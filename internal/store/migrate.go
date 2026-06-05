@@ -8,7 +8,7 @@ import (
 )
 
 // schemaVersion is the number of applied migrations.
-const schemaVersion = 11
+const schemaVersion = 12
 
 // migrations are applied in order; index+1 becomes user_version.
 var migrations = []string{
@@ -316,6 +316,31 @@ DELETE FROM edges;
 DELETE FROM nodes;
 DELETE FROM files;
 DELETE FROM meta WHERE key LIKE 'graph_token:%';
+`,
+	// v12 (todo kind): widen the memories CHECK constraints to admit kind='todo'
+	// and status='done'. SQLite cannot ALTER a CHECK, and a table rebuild is unsafe
+	// here (migrations run inside one BEGIN IMMEDIATE, so PRAGMA foreign_keys=OFF is
+	// a no-op, and dropping memories would cascade-delete memory_refs/memory_minhash).
+	// Instead edit the stored schema text via writable_schema, swapping ONLY the two
+	// CHECK value-lists with replace() — this preserves columns appended by earlier
+	// ALTER migrations. A bare UPDATE of sqlite_master does not invalidate other
+	// connections' cached schema parse, so we finish with writable_schema=RESET, which
+	// reloads the schema and bumps the cookie so every pooled connection reparses the
+	// widened CHECKs. The `sql NOT LIKE` guards keep the edit idempotent (safe to
+	// re-run). This is NOT a graph migration; the derived graph is left untouched.
+	`
+PRAGMA writable_schema=ON;
+UPDATE sqlite_master
+   SET sql = replace(sql,
+     '''preference'',''learning'',''decision'',''do_not_repeat'',''bug'',''action''',
+     '''preference'',''learning'',''decision'',''do_not_repeat'',''bug'',''action'',''todo''')
+ WHERE type='table' AND name='memories' AND sql NOT LIKE '%''todo''%';
+UPDATE sqlite_master
+   SET sql = replace(sql,
+     '''active'',''superseded'',''archived''',
+     '''active'',''superseded'',''archived'',''done''')
+ WHERE type='table' AND name='memories' AND sql NOT LIKE '%''done''%';
+PRAGMA writable_schema=RESET;
 `,
 }
 

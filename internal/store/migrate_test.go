@@ -140,8 +140,9 @@ func TestLatestGraphMigrationRebuildsIndex(t *testing.T) {
 	mustExec(t, st, `INSERT INTO edges(id,src_node_id,dst_node_id,dst_name,kind,file_id,line)
 		VALUES('e1','n1',NULL,'Bar','calls','f1',1)`)
 	mustExec(t, st, `INSERT INTO meta(key,value) VALUES('graph_token:/wt','tok')`)
-	// Pretend this store was written by the immediately-previous binary version.
-	mustExec(t, st, fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion-1))
+	// v11 is the last graph-rebuilding migration; v12 (todo CHECK widening) is not.
+	// Seed just before v11 so the reopen runs v11's graph wipe (and v12 after it).
+	mustExec(t, st, `PRAGMA user_version = 10`)
 	st.Close()
 
 	// Reopening with the current binary must invalidate the stale derived graph so
@@ -233,8 +234,10 @@ func TestV9MigrationPreservesMemories(t *testing.T) {
 	mustExec(t, st, `INSERT INTO files(id,worktree,path,language,content_hash,mtime,size,last_indexed_at)
 		VALUES('f1','/wt','A.cs','csharp','h',1,1,1)`)
 	mustExec(t, st, `INSERT INTO meta(key,value) VALUES('graph_token:/wt','tok')`)
-	// Simulate a store written by the previous binary, forcing v9 to re-run on reopen.
-	mustExec(t, st, fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion-1))
+	// v11 is the last graph-rebuilding migration; v12 (todo CHECK widening) is not.
+	// Seed just before v11 so the reopen runs a graph wipe and we can assert it
+	// preserved memories while clearing the rebuildable graph.
+	mustExec(t, st, `PRAGMA user_version = 10`)
 	st.Close()
 
 	st2, err := Open(p)
@@ -270,4 +273,56 @@ func TestMigrateAddsCompactionColumns(t *testing.T) {
 		t.Fatalf("compaction columns missing: %v", err)
 	}
 	rows.Close()
+}
+
+func TestMigrateV12AllowsTodoAndDone(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "store.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	// New kind accepted.
+	mustExec(t, st, `INSERT INTO memories(id,kind,title,body,created_at,updated_at)
+		VALUES('t1','todo','do the thing','body',1,1)`)
+	// New status accepted.
+	mustExec(t, st, `UPDATE memories SET status='done' WHERE id='t1'`)
+
+	// Old CHECKs still enforced: a bogus kind/status is rejected.
+	if _, err := st.DB.Exec(
+		`INSERT INTO memories(id,kind,created_at,updated_at) VALUES('x','bogus',1,1)`); err == nil {
+		t.Fatal("expected CHECK to still reject an invalid kind")
+	}
+	if _, err := st.DB.Exec(`UPDATE memories SET status='bogus' WHERE id='t1'`); err == nil {
+		t.Fatal("expected CHECK to still reject an invalid status")
+	}
+}
+
+func TestV12MigrationPreservesMemoriesAndColumns(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "store.db")
+	st, err := Open(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustExec(t, st, `INSERT INTO memories(id,kind,title,body,created_at,updated_at)
+		VALUES('m1','learning','keep me','body',1,1)`)
+	// A column added by an ALTER migration must survive the writable_schema edit.
+	mustExec(t, st, `UPDATE memories SET last_used_epoch=7 WHERE id='m1'`)
+	mustExec(t, st, fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion-1))
+	st.Close()
+
+	st2, err := Open(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st2.Close()
+	var epoch int
+	if err := st2.DB.QueryRow(`SELECT last_used_epoch FROM memories WHERE id='m1'`).Scan(&epoch); err != nil {
+		t.Fatalf("row/column lost after migration: %v", err)
+	}
+	if epoch != 7 {
+		t.Errorf("last_used_epoch = %d, want 7", epoch)
+	}
+	mustExec(t, st2, `INSERT INTO memories(id,kind,status,created_at,updated_at)
+		VALUES('t2','todo','done',1,1)`)
 }
