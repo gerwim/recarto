@@ -93,10 +93,11 @@ func (e *Engine) Epoch(ctx context.Context) (int64, error) {
 
 // evictable reports whether a kind may be archived by decay. do_not_repeat is
 // pinned; decision and bug carry durable rationale/fix history and are exempt
-// (they can still be deduped). Only action/preference/learning decay.
+// (they can still be deduped). action/preference/learning decay, and so do todos:
+// an untouched todo fades (reinforcing it via a near-dup record refreshes it).
 func evictable(k Kind) bool {
 	switch k {
-	case KindAction, KindPreference, KindLearning:
+	case KindAction, KindPreference, KindLearning, KindTodo:
 		return true
 	}
 	return false

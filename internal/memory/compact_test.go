@@ -372,6 +372,15 @@ func TestArchiveGCRespectsGrace(t *testing.T) {
 	}
 }
 
+func TestTodoIsEvictable(t *testing.T) {
+	if !evictable(KindTodo) {
+		t.Error("todo should be evictable so untouched todos decay")
+	}
+	if got := halfLifeEpochs(KindTodo); got != halfLifeStdEpochs {
+		t.Errorf("todo half-life = %v, want standard %v", got, halfLifeStdEpochs)
+	}
+}
+
 func TestCompactSingleFlightIsConsistent(t *testing.T) {
 	e := newTestEngine(t, clock.NewFake(time.UnixMilli(1_700_000_000_000)))
 	ctx := context.Background()
