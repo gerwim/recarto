@@ -37,7 +37,8 @@ func TestExportThenImportRoundTrip(t *testing.T) {
 	if err != nil || n != 1 {
 		t.Fatalf("export: n=%d err=%v", n, err)
 	}
-	if strings.Contains(buf.String(), "last_used_epoch") || strings.Contains(buf.String(), "recall_count") {
+	if strings.Contains(buf.String(), "last_used_epoch") || strings.Contains(buf.String(), "recall_count") ||
+		strings.Contains(buf.String(), "archived_epoch") {
 		t.Fatalf("snapshot must not contain local activity fields:\n%s", buf.String())
 	}
 
@@ -64,7 +65,9 @@ func TestImportIsIdempotent(t *testing.T) {
 	data := buf.Bytes()
 
 	dst := newEngine(t)
-	Import(ctx, dst, bytes.NewReader(data))
+	if _, _, _, err := Import(ctx, dst, bytes.NewReader(data)); err != nil {
+		t.Fatal(err)
+	}
 	_, _, skip, err := Import(ctx, dst, bytes.NewReader(data))
 	if err != nil {
 		t.Fatal(err)

@@ -30,6 +30,9 @@ type line struct {
 	Pinned             bool           `json:"pinned,omitempty"`
 	CreatedAt          int64          `json:"created_at"`
 	Extra              map[string]any `json:"extra,omitempty"`
+	// Worktree, last_used_epoch, recall_count, and archived_epoch are
+	// intentionally absent: they are local runtime/activity context, not
+	// portable knowledge. FTS/MinHash rows are recomputed on import.
 }
 
 type refLine struct {
