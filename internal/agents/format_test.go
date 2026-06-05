@@ -20,6 +20,15 @@ func TestFormatSessionContextIncludesCaveat(t *testing.T) {
 	}
 }
 
+func TestFormatTodoReminders(t *testing.T) {
+	out := formatTodoReminders("internal/agents/handle.go", []*memory.Record{
+		{Title: "refactor the dispatch"},
+	})
+	if !strings.Contains(out, "internal/agents/handle.go") || !strings.Contains(out, "refactor the dispatch") {
+		t.Fatalf("unexpected reminder text: %q", out)
+	}
+}
+
 func TestFormatSessionContextPinnedDNRIncludesCaveat(t *testing.T) {
 	results := []memory.RecallResult{{
 		Record: &memory.Record{

@@ -118,6 +118,9 @@ func handlePostRead(ctx context.Context, a *app.App, ev Event) (Result, error) {
 	if found, err := a.Engine.BugsForCode(ctx, a.Git.Branch, []string{rel}, nil); err == nil && len(found) > 0 {
 		msgs = append(msgs, formatBugWarnings(rel, found))
 	}
+	if found, err := a.Engine.TodosForCode(ctx, a.Git.Branch, []string{rel}, nil); err == nil && len(found) > 0 {
+		msgs = append(msgs, formatTodoReminders(rel, found))
+	}
 	if len(msgs) == 0 {
 		return Result{}, nil
 	}
@@ -144,6 +147,12 @@ func handlePostEdit(ctx context.Context, a *app.App, ev Event) (Result, error) {
 	// This matches stored refs by path and does not require the file on disk.
 	if found, berr := a.Engine.BugsForCode(ctx, a.Git.Branch, []string{rel}, nil); berr == nil && len(found) > 0 {
 		res.Context = formatBugWarnings(rel, found)
+	}
+	if found, berr := a.Engine.TodosForCode(ctx, a.Git.Branch, []string{rel}, nil); berr == nil && len(found) > 0 {
+		if res.Context != "" {
+			res.Context += "\n"
+		}
+		res.Context += formatTodoReminders(rel, found)
 	}
 	content, err := os.ReadFile(abs)
 	if err != nil {

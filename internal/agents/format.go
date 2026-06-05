@@ -133,6 +133,20 @@ func formatBugWarnings(loc string, bugs []*memory.Record) string {
 	return strings.Join(lines, "\n")
 }
 
+// formatTodoReminders renders open todos anchored to loc as one-line reminders,
+// the just-in-time counterpart to formatBugWarnings for the todo kind.
+func formatTodoReminders(loc string, todos []*memory.Record) string {
+	lines := make([]string, 0, len(todos))
+	for _, r := range todos {
+		title := r.Title
+		if title == "" {
+			title = "(untitled)"
+		}
+		lines = append(lines, fmt.Sprintf("📝 open todo for %s: %s", loc, title))
+	}
+	return strings.Join(lines, "\n")
+}
+
 // trimOneLine collapses a memory body to its first line, capped at cerebrumBodyMax
 // runes, for the budget-conscious cerebrum tier.
 func trimOneLine(s string) string {

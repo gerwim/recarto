@@ -92,6 +92,27 @@ func TestFormatSessionContextDegradesToTitles(t *testing.T) {
 	}
 }
 
+func TestPostReadSurfacesTodo(t *testing.T) {
+	a := newTestApp(t, "main")
+	ctx := context.Background()
+
+	rel := "internal/agents/handle.go"
+	if _, _, err := a.Engine.Record(ctx, memory.NewMemory{
+		Kind: memory.KindTodo, Title: "split this file", Body: "split handle.go",
+		Refs: []memory.Ref{{Type: memory.RefFile, Value: rel}}, Branch: a.Git.Branch, Source: "cli",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := handlePostRead(ctx, a, Event{Kind: KindPostRead, SessionID: "s1", FilePath: rel, ToolResult: "package agents"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(res.Context, "split this file") {
+		t.Fatalf("todo not surfaced on read; got: %q", res.Context)
+	}
+}
+
 func TestFormatSessionContextDropsEntryUnderTinyBudget(t *testing.T) {
 	results := []memory.RecallResult{
 		{Record: &memory.Record{Kind: memory.KindLearning, Title: "WontFitAtAll", Body: "body"}},
