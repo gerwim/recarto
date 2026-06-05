@@ -42,7 +42,7 @@ func Run(args []string, out io.Writer) error {
 	}
 
 	if !known(cmd) {
-		return fmt.Errorf("unknown command %q (try: init serve hook status doctor remember recall bug memory index graph compact)", cmd)
+		return fmt.Errorf("unknown command %q (try: init serve hook status doctor remember recall bug memory index graph compact snapshot)", cmd)
 	}
 
 	a, err := app.Open(app.Config{})
@@ -112,5 +112,6 @@ func usage(w io.Writer) error {
 	fmt.Fprintln(w, "  index             build/refresh the code graph for this worktree")
 	fmt.Fprintln(w, "  graph <sub>       query the code graph (search|callers|callees|arch|query|snippet)")
 	fmt.Fprintln(w, "  compact           prune/decay memory (--force --dry-run --budget-tokens)")
+	fmt.Fprintln(w, "  snapshot          export|import the committable team memory (.recarto/memory.jsonl)")
 	return nil
 }

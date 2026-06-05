@@ -78,11 +78,16 @@ func TestSnapshotExportThenImport(t *testing.T) {
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("snapshot file not written: %v", err)
 	}
-	if !strings.Contains(buf.String(), "1") {
-		t.Fatalf("export should report a count, got: %s", buf.String())
+	if !strings.Contains(buf.String(), "exported 1 memories") {
+		t.Fatalf("export should report a count of 1, got: %s", buf.String())
 	}
+	// Re-importing into the same store: the id already exists → 1 skipped.
+	buf.Reset()
 	if err := Snapshot(ctx, a, &buf, []string{"import"}); err != nil {
 		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), "1 skipped") {
+		t.Fatalf("re-import of same store should skip 1, got: %s", buf.String())
 	}
 }
 
