@@ -76,3 +76,45 @@ func TestImportIsIdempotent(t *testing.T) {
 		t.Fatalf("second import should skip the already-present record, got skip=%d", skip)
 	}
 }
+
+// TestSnapshotRoundTripsActiveTodoNotDone pins the spec's assumption that the team
+// snapshot needs no todo-specific handling: an active todo round-trips like any
+// memory, while a done todo is excluded because Export only emits active rows.
+func TestSnapshotRoundTripsActiveTodoNotDone(t *testing.T) {
+	ctx := context.Background()
+	src := newEngine(t)
+
+	openID, _, err := src.Record(ctx, memory.NewMemory{
+		Kind: memory.KindTodo, Title: "open work", Body: "open work body", Branch: "main", Source: "cli",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	doneID, _, _ := src.Record(ctx, memory.NewMemory{
+		Kind: memory.KindTodo, Title: "finished work", Body: "finished work body", Branch: "main", Source: "cli",
+	})
+	if _, err := src.CompleteTodo(ctx, doneID); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	if _, err := Export(ctx, src, &buf); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(buf.String(), doneID) {
+		t.Errorf("export should not include a done todo (only active rows export):\n%s", buf.String())
+	}
+
+	dst := newEngine(t)
+	if _, _, _, err := Import(ctx, dst, &buf); err != nil {
+		t.Fatal(err)
+	}
+	got, err := dst.ActiveTodos(ctx, "main", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Title != "open work" {
+		t.Fatalf("expected the open todo to round-trip; got %d rows", len(got))
+	}
+	_ = openID
+}
