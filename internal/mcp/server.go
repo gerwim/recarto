@@ -16,7 +16,7 @@ import (
 func NewServer(a *app.App) *sdk.Server {
 	s := sdk.NewServer(&sdk.Implementation{Name: "recarto", Version: version.Version}, nil)
 	addTool(s, a, "record_memory",
-		"Record (or reinforce a near-duplicate of) a memory: a preference, learning, decision, do_not_repeat, bug, or action.",
+		"Record (or reinforce a near-duplicate of) a memory: a preference, learning, decision, do_not_repeat, bug, action, or todo (open work that resurfaces until done).",
 		recordMemory)
 	addTool(s, a, "record_bug",
 		"Record a bug with its error message, root cause, and fix (a convenience wrapper over record_memory).",
@@ -33,6 +33,9 @@ func NewServer(a *app.App) *sdk.Server {
 	addTool(s, a, "list_memory",
 		"List stored memories, optionally filtered by kind and branch.",
 		listMemory)
+	addTool(s, a, "complete_todo",
+		"Mark a todo memory done (active → done) so it stops surfacing. No-op if the id is not an active todo.",
+		completeTodo)
 	addTool(s, a, "search_graph",
 		"Search the code graph for symbols (functions, methods, classes, types). Pass `query` as the concept in plain words; when searching by concept, also pass `candidate_symbols` — the identifier names you expect to exist (e.g. AddressLookup, Geocode). The names you supply are what make concept search land; any form works (PascalCase, interface-prefixed, snake_case, or plain words).",
 		searchGraph)

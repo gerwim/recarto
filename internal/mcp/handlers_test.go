@@ -8,6 +8,7 @@ import (
 
 	"git.gerwim.nl/gerwim/recarto/internal/app"
 	"git.gerwim.nl/gerwim/recarto/internal/clock"
+	"git.gerwim.nl/gerwim/recarto/internal/memory"
 )
 
 // fakeGit is a gitctx.Runner returning a fixed repo identity (no real git, no fs).
@@ -166,6 +167,32 @@ func TestRecordBugCapturesSymbols(t *testing.T) {
 	}
 	if len(bugs) != 1 || bugs[0].Title != "panic in Tokenize" {
 		t.Fatalf("want 1 bug by symbol, got %d: %+v", len(bugs), bugs)
+	}
+}
+
+func TestCompleteTodoHandler(t *testing.T) {
+	a := newTestApp(t, "main")
+	ctx := context.Background()
+
+	id, _, err := a.Engine.Record(ctx, memory.NewMemory{
+		Kind: memory.KindTodo, Title: "ship it", Body: "ship the feature", Source: "mcp",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := completeTodo(ctx, a, CompleteTodoInput{ID: id})
+	if err != nil || !out.Completed {
+		t.Fatalf("completeTodo = (%+v, %v), want Completed=true", out, err)
+	}
+	rec, _ := a.Engine.GetByID(ctx, id)
+	if rec.Status != "done" {
+		t.Errorf("status = %q, want \"done\"", rec.Status)
+	}
+
+	out, err = completeTodo(ctx, a, CompleteTodoInput{ID: "missing"})
+	if err != nil || out.Completed {
+		t.Fatalf("completeTodo(missing) = (%+v, %v), want Completed=false", out, err)
 	}
 }
 

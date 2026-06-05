@@ -133,6 +133,24 @@ func refsFrom(worktree string, files, symbols, tags []string) []memory.Ref {
 	return refs
 }
 
+// CompleteTodoInput is the argument to the complete_todo tool.
+type CompleteTodoInput struct {
+	ID string `json:"id" jsonschema:"id of the todo memory to mark done"`
+}
+
+// CompleteTodoOutput reports whether an active todo was transitioned to done.
+type CompleteTodoOutput struct {
+	Completed bool `json:"completed"`
+}
+
+func completeTodo(ctx context.Context, a *app.App, in CompleteTodoInput) (CompleteTodoOutput, error) {
+	ok, err := a.Engine.CompleteTodo(ctx, in.ID)
+	if err != nil {
+		return CompleteTodoOutput{}, err
+	}
+	return CompleteTodoOutput{Completed: ok}, nil
+}
+
 // viewOf projects a stored Record onto the wire shape (Score is set by callers).
 func viewOf(r *memory.Record) MemoryView {
 	return MemoryView{
