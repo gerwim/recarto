@@ -108,7 +108,8 @@ Rejected alternatives:
 
 - **`complete_todo(id)` MCP tool** + **`recarto todo done <id>` CLI**, both calling
   one engine method `CompleteTodo(ctx, id)` that transitions `active → done`.
-  (A `recarto todo list` read command is a nice-to-have, decided during planning.)
+- **`recarto todo list` CLI** read command: lists active, branch-visible todos
+  (id + title), so a human can see and act on open work outside an agent session.
 - **Decay if untouched:** add `KindTodo` to `evictable` (`internal/memory/compact.go`)
   with the **standard 30-epoch half-life** (`halfLifeStdEpochs`), slower than
   `action`'s 5 epochs. An untouched todo eventually archives; recording a
@@ -122,12 +123,32 @@ Rejected alternatives:
 - Baseline + task-hinted recall kind sets (recall.go).
 - `remember` CLI kind list + error/help string (`internal/cli/remember.go`).
 - `record_memory` MCP tool description (`internal/mcp/server.go`).
-- Agent instructions/format so agents know the `todo` kind and the complete tool
-  (`internal/agents/instructions.go`, `internal/agents/format.go`).
 - Snapshot export/import: **no kind-specific change** — it dedups by content and
   exports only active rows, so `done`/`archived` todos are naturally excluded and
   a new active kind flows through unchanged. (Confirm with an assertion during
   planning rather than new code.)
+
+## Agent Awareness Across Hosts (Claude / opencode / Copilot)
+
+The agent must *know* the `todo` kind and the complete tool exist. The
+architecture centralizes this, so there are **no per-host adapter edits** — every
+host (Claude Code, opencode, Copilot CLI) inherits from three shared points:
+
+1. **Guidance — one edit.** The canonical `Instructions` constant in
+   `internal/agents/instructions.go` is rendered into each host's instructions
+   file by `WriteInstructionsBlock` (Claude `CLAUDE.md`/`AGENTS.md`, opencode,
+   Copilot global instructions). Add a line covering: the `todo` kind (open work
+   that surfaces until done), `complete_todo` / `recarto todo done`, and that open
+   todos are injected at session start and on code contact. Re-running the
+   installer rewrites the recarto-delimited block in place. Keep `format.go`
+   in sync if it enumerates kinds for display.
+2. **The `complete_todo` MCP tool — one registration.** Registered once via
+   `addTool` in `internal/mcp/server.go`; available to every MCP-speaking host
+   automatically.
+3. **Surfacing — shared core.** Session-start baseline recall and JIT
+   `TodosForCode` are wired in `internal/agents/handle.go` (the same file that
+   wires `RecentBugs`/`BugsForCode`), which all host adapters call. No
+   opencode/copilot/claudecode-specific surfacing code is added.
 
 ## Testing (TDD throughout)
 
@@ -141,6 +162,9 @@ Rejected alternatives:
    surfaces at session start or on code contact.
 5. **Decay** — an untouched todo archives after enough epochs at the 30-epoch
    half-life; reinforcing it resets that.
+6. **Agent awareness** — the rendered `Instructions` block contains the `todo`
+   guidance (covers all hosts via the shared constant); `complete_todo` is among
+   the registered MCP tools; `recarto todo list` returns active todos.
 
 ## Out Of Scope
 
