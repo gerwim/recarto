@@ -10,7 +10,7 @@ import (
 // a worktree. The graph-backed implementation lives in internal/app and queries
 // the code graph (files/nodes) in the shared store; tests inject a fake. A nil
 // resolver, or one whose worktree has no graph rows, disables the check so recall
-// behaves exactly as before (graceful degradation).
+// behaves exactly as before (graceful degradation, spec §5.5).
 type RefResolver interface {
 	// Dangling returns the subset of refs whose referenced code is absent from
 	// worktree. Implementations MUST return nil (nothing dangles) when worktree
@@ -42,9 +42,9 @@ func (r RecallResult) Caveat() string {
 	for _, d := range r.DanglingRefs {
 		vals = append(vals, d.Value)
 	}
-	branch := r.Record.Branch
-	if branch == "" {
-		branch = "unknown"
+	branch := "unknown"
+	if r.Record != nil && r.Record.Branch != "" {
+		branch = r.Record.Branch
 	}
 	return fmt.Sprintf("⚠ references code not present in this worktree (branch %s): %s — may not apply to the current branch",
 		branch, strings.Join(vals, ", "))

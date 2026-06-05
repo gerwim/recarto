@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"strings"
 	"testing"
 )
 
@@ -36,21 +37,11 @@ func TestCaveatFormat(t *testing.T) {
 		DanglingRefs: []Ref{{Type: RefFile, Value: "internal/foo.go"}},
 	}
 	c := r.Caveat()
-	if c == "" || !contains(c, "feat/x") || !contains(c, "internal/foo.go") {
+	if c == "" || !strings.Contains(c, "feat/x") || !strings.Contains(c, "internal/foo.go") {
 		t.Fatalf("unexpected caveat: %q", c)
 	}
 	empty := RecallResult{Record: &Record{}}
 	if empty.Caveat() != "" {
 		t.Fatalf("want empty caveat for no dangling refs, got %q", empty.Caveat())
 	}
-}
-
-func contains(s, sub string) bool { return len(s) >= len(sub) && (indexOf(s, sub) >= 0) }
-func indexOf(s, sub string) int {
-	for i := 0; i+len(sub) <= len(s); i++ {
-		if s[i:i+len(sub)] == sub {
-			return i
-		}
-	}
-	return -1
 }
