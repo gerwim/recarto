@@ -40,6 +40,21 @@ func TestSyncImportsOnceThenSkipsUntilChanged(t *testing.T) {
 	if ins != 0 {
 		t.Fatalf("unchanged file should not re-import, got %d", ins)
 	}
+
+	// Changing the file (new record) must re-import on the next sync.
+	if err := os.WriteFile(path, []byte(
+		`{"id":"x","kind":"learning","title":"T","body":"shared knowledge","confidence":1,"created_at":1}`+"\n"+
+			`{"id":"y","kind":"learning","title":"T2","body":"more shared knowledge","confidence":1,"created_at":2}`+"\n",
+	), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ins, err = SyncOnSessionStart(ctx, eng, st, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ins != 1 {
+		t.Fatalf("changed file should import the new record, got %d", ins)
+	}
 }
 
 func TestSyncNoFileIsNoop(t *testing.T) {
