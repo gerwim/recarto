@@ -140,8 +140,9 @@ func TestLatestGraphMigrationRebuildsIndex(t *testing.T) {
 	mustExec(t, st, `INSERT INTO edges(id,src_node_id,dst_node_id,dst_name,kind,file_id,line)
 		VALUES('e1','n1',NULL,'Bar','calls','f1',1)`)
 	mustExec(t, st, `INSERT INTO meta(key,value) VALUES('graph_token:/wt','tok')`)
-	// v11 is the last graph-rebuilding migration; v12 (todo CHECK widening) is not.
-	// Seed just before v11 so the reopen runs v11's graph wipe (and v12 after it).
+	// Several later migrations wipe the derived graph (v11, and most recently v15's
+	// signature backfill). Seed an old user_version so the reopen re-runs that
+	// graph-wipe chain and clears the rows seeded above.
 	mustExec(t, st, `PRAGMA user_version = 10`)
 	st.Close()
 
