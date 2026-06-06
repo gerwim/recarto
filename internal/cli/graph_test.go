@@ -164,6 +164,41 @@ func TestGraphArchBudgets(t *testing.T) {
 	}
 }
 
+// TestGraphOutline proves `graph outline <file>` lists a file's symbols (kind,
+// name, line) in source order so an agent can grasp structure without reading the
+// whole file, and that it scopes strictly to the requested file.
+func TestGraphOutline(t *testing.T) {
+	a := newTestApp(t, "main")
+	wt := t.TempDir()
+	a.Git.Worktree = wt
+	os.WriteFile(filepath.Join(wt, "Svc.cs"),
+		[]byte("namespace N;\n"+
+			"public class Svc {\n"+
+			"  public void Alpha() {}\n"+
+			"  public int Beta(string s) => 0;\n"+
+			"}\n"), 0o644)
+	os.WriteFile(filepath.Join(wt, "Other.cs"),
+		[]byte("namespace N;\npublic class Other { public void Gamma() {} }\n"), 0o644)
+	if err := Index(context.Background(), a, &bytes.Buffer{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := Graph(context.Background(), a, &out, []string{"outline", "Svc.cs"}); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(out.Bytes(), []byte("Alpha")) || !bytes.Contains(out.Bytes(), []byte("Beta")) {
+		t.Errorf("graph outline output = %q, want Alpha and Beta", out.String())
+	}
+	// Must not leak symbols from a different file.
+	if bytes.Contains(out.Bytes(), []byte("Gamma")) {
+		t.Errorf("graph outline leaked Other.cs symbol Gamma: %q", out.String())
+	}
+	// Each line should carry a line number (path-less, since the file is fixed).
+	if !bytes.Contains(out.Bytes(), []byte(":3")) {
+		t.Errorf("graph outline should show line numbers; output = %q", out.String())
+	}
+}
+
 func TestGraphRequiresSubcommand(t *testing.T) {
 	a := newTestApp(t, "main")
 	if err := Graph(context.Background(), a, &bytes.Buffer{}, nil); err == nil {

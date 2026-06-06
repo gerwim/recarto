@@ -145,18 +145,19 @@ recarto recall [hint]     ranked, budgeted recall (--files --symbols --kind --li
 recarto bug add|search    record or search bug memories
 recarto memory show       render all active memory as markdown (--branch)
 recarto index             build/refresh the code graph for this worktree
-recarto graph <sub>       query the code graph (search|grep|callers|callees|impls|annotated|arch|query|snippet)
+recarto graph <sub>       query the code graph (search|grep|callers|callees|impls|annotated|outline|arch|query|snippet)
                           graph search [--symbol=Name ...] <concept words>  (candidate-guided)
                           graph impls <Type> [--super]  (implementations/subtypes; --super for supertypes)
                           graph annotated <Attribute>  (symbols decorated with [Attribute] / @decorator)
+                          graph outline <file>  (a file's symbols/signatures/lines, instead of reading it)
 recarto compact           prune/decay memory (--force --dry-run --budget-tokens)
 recarto serve             run the MCP server over stdio (used by the agents)
 ```
 
 MCP tools exposed by `recarto serve`: `record_memory`, `recall_memory`, `get_memory`,
 `list_memory`, `record_bug`, `search_bugs`, `search_graph`, `search_content`,
-`get_code_snippet`, `trace_call_path`, `find_implementations`, `find_annotated`,
-`get_architecture`, `query_graph`.
+`get_code_snippet`, `get_file_outline`, `trace_call_path`, `find_implementations`,
+`find_annotated`, `get_architecture`, `query_graph`.
 
 ## Verify it's working
 

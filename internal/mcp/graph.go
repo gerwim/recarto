@@ -272,6 +272,51 @@ func getCodeSnippet(ctx context.Context, a *app.App, in GetCodeSnippetInput) (Ge
 	}, nil
 }
 
+// --- get_file_outline ---
+
+type GetFileOutlineInput struct {
+	File string `json:"file" jsonschema:"repo-relative file path to outline"`
+}
+type OutlineSym struct {
+	Name          string `json:"name"`
+	QualifiedName string `json:"qualified_name,omitempty"`
+	Kind          string `json:"kind"`
+	Parent        string `json:"parent,omitempty"`    // enclosing symbol's name, when nested
+	Signature     string `json:"signature,omitempty"` // one-line declaration, when known
+	StartLine     int    `json:"start_line"`
+	EndLine       int    `json:"end_line,omitempty"`
+}
+type GetFileOutlineOutput struct {
+	Count   int          `json:"count"`
+	Symbols []OutlineSym `json:"symbols"`
+	Hint    string       `json:"hint,omitempty"`
+}
+
+// outlineMissHint distinguishes "file genuinely has no symbols" from the common
+// mistake of passing an absolute or mismatched path: the graph keys files by their
+// repo-relative path, so an absolute path or a wrong prefix silently returns none.
+const outlineMissHint = "No symbols. The file may be unindexed, or `file` may not match the indexed repo-relative path (pass a path relative to the repo root, e.g. src/Foo/Bar.cs — not an absolute path)."
+
+func getFileOutline(ctx context.Context, a *app.App, in GetFileOutlineInput) (GetFileOutlineOutput, error) {
+	ensureFresh(ctx, a)
+	syms, err := a.Graph.Outline(ctx, a.Git.Worktree, in.File)
+	if err != nil {
+		return GetFileOutlineOutput{}, err
+	}
+	out := GetFileOutlineOutput{Count: len(syms), Symbols: make([]OutlineSym, 0, len(syms))}
+	for _, s := range syms {
+		out.Symbols = append(out.Symbols, OutlineSym{
+			Name: s.Name, QualifiedName: s.QualifiedName, Kind: s.Kind,
+			Parent: s.ParentName, Signature: s.Signature,
+			StartLine: s.StartLine, EndLine: s.EndLine,
+		})
+	}
+	if out.Count == 0 {
+		out.Hint = outlineMissHint
+	}
+	return out, nil
+}
+
 // --- find_implementations ---
 
 type FindImplementationsInput struct {

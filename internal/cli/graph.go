@@ -13,7 +13,7 @@ import (
 // Graph dispatches `graph <sub>`: search | callers | callees | arch | query | snippet.
 func Graph(ctx context.Context, a *app.App, w io.Writer, args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("graph: subcommand required (search|grep|callers|callees|impls|annotated|arch|query|snippet)")
+		return fmt.Errorf("graph: subcommand required (search|grep|callers|callees|impls|annotated|outline|arch|query|snippet)")
 	}
 	wt := a.Git.Worktree
 	// Lazy reconcile so query results reflect the current checkout (spec §11).
@@ -216,6 +216,44 @@ func Graph(ctx context.Context, a *app.App, w io.Writer, args []string) error {
 				sym = "(file scope)"
 			}
 			fmt.Fprintf(w, "%s:%d  [%s %s]  %s\n", m.Path, m.Line, m.Kind, sym, m.Text)
+		}
+		return nil
+	case "outline", "file":
+		if len(rest) == 0 {
+			return fmt.Errorf("graph outline: <file> required")
+		}
+		path := rest[0]
+		syms, err := a.Graph.Outline(ctx, wt, path)
+		if err != nil {
+			return err
+		}
+		if len(syms) == 0 {
+			fmt.Fprintln(w, "(no symbols — file not indexed, or path differs from the indexed relative path)")
+			return nil
+		}
+		// Index symbol names so a child (parent_name matches a sibling) can be
+		// indented under its container — the structure is the point of an outline.
+		present := make(map[string]bool, len(syms))
+		for _, s := range syms {
+			present[s.Name] = true
+		}
+		// Print the path once as a header rather than on every row: repeating a
+		// long path per symbol is the bulk of the output and exactly the token
+		// cost this command exists to avoid (the path is already the argument).
+		fmt.Fprintf(w, "%s\n", path)
+		for _, s := range syms {
+			indent := ""
+			if s.ParentName != "" && present[s.ParentName] {
+				indent = "  "
+			}
+			name := s.Name
+			if sig := strings.TrimSpace(s.Signature); sig != "" && sig != s.Name {
+				if len(sig) > 100 {
+					sig = sig[:100] + "…"
+				}
+				name = sig
+			}
+			fmt.Fprintf(w, "%s[%s] %s  :%d\n", indent, s.Kind, name, s.StartLine)
 		}
 		return nil
 	case "snippet":

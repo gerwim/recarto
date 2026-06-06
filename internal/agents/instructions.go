@@ -35,6 +35,10 @@ per-repo SQLite cache outside the working tree.
   map), then ` + "`search_graph` / `query_graph`" + ` to locate symbols and
   ` + "`get_code_snippet`" + ` to read one instead of a whole file. A lookup miss is an
   empty result, not an error.
+- **Outline a file** with ` + "`get_file_outline`" + ` to see its symbols (kinds, names,
+  signatures, line ranges) in source order instead of reading the whole file; then
+  ` + "`get_code_snippet`" + ` the one you need. Prefer this over opening a large file to
+  find your way around it.
 - **Trace** with ` + "`trace_call_path`" + `: each hop is annotated with a confidence —
   trust high/typed/self hops; treat low/name hops as candidates to verify with
   ` + "`get_code_snippet`" + `.

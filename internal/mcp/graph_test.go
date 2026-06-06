@@ -76,6 +76,54 @@ func TestSearchContentHandler(t *testing.T) {
 	}
 }
 
+func TestGetFileOutlineHandler(t *testing.T) {
+	a := newTestApp(t, "main")
+	wt := t.TempDir()
+	a.Git.Worktree = wt
+	if err := os.WriteFile(filepath.Join(wt, "a.go"),
+		[]byte("package p\n\nfunc First(){}\n\nfunc Second(x int) int { return x }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Graph.Reconcile(context.Background(), wt, graph.FSSource{Root: wt}); err != nil {
+		t.Fatal(err)
+	}
+	out, err := getFileOutline(context.Background(), a, GetFileOutlineInput{File: "a.go"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Count < 2 {
+		t.Fatalf("outline count = %d, want >= 2: %+v", out.Count, out.Symbols)
+	}
+	var names []string
+	for _, s := range out.Symbols {
+		names = append(names, s.Name)
+	}
+	if !contains(names, "First") || !contains(names, "Second") {
+		t.Fatalf("outline names = %v, want First and Second", names)
+	}
+	if out.Hint != "" {
+		t.Errorf("non-empty outline should carry no hint, got %q", out.Hint)
+	}
+
+	// A path that doesn't match the indexed relative path returns the guidance hint.
+	miss, err := getFileOutline(context.Background(), a, GetFileOutlineInput{File: filepath.Join(wt, "a.go")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if miss.Count != 0 || miss.Hint == "" {
+		t.Errorf("absolute-path outline = %+v, want empty with a hint", miss)
+	}
+}
+
+func contains(ss []string, want string) bool {
+	for _, s := range ss {
+		if s == want {
+			return true
+		}
+	}
+	return false
+}
+
 // TestGraphHandlersMapping covers the projection/mapping logic of the other four
 // graph tools (trace/architecture/query/snippet), which the engine tests don't.
 func TestGraphHandlersMapping(t *testing.T) {
