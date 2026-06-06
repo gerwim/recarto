@@ -108,7 +108,9 @@ func (e *Engine) TraceCallPathFiltered(ctx context.Context, worktree, symbol, di
 		visited[s.NodeID] = true
 	}
 	if len(starts) > 1 {
-		rootLabel = CallNode{Name: symbol} // virtual: ambiguous, no single site
+		// Virtual aggregate root: ambiguous bare name, no single site. Preserve the
+		// kind when every definition agrees so a type dead-end is still detectable.
+		rootLabel = CallNode{Name: symbol, Kind: commonKind(starts)}
 	}
 
 	const traceNodeBudget = 40
@@ -158,7 +160,32 @@ func (e *Engine) TraceCallPathFiltered(ctx context.Context, worktree, symbol, di
 		}
 	}
 	walk(rootIDs, []CallNode{rootLabel}, visited, depth)
+	// Resolved-but-no-new-chains: the symbol matched real definitions, but every
+	// neighbor was already on the start frontier (a self-recursive method, or
+	// sibling overloads that only call one another). The walk appended nothing, so
+	// chains is empty — indistinguishable from a true miss, which surfaces render as
+	// "(no symbol named X)". Emit the root so the caller reports an honest dead-end
+	// ("no callers found") instead of falsely claiming the symbol does not exist.
+	if len(chains) == 0 {
+		chains = append(chains, []CallNode{rootLabel})
+	}
 	return chains, nil, nil
+}
+
+// commonKind returns the shared node kind across a set of same-named definitions,
+// or "" when they disagree. Used to label a virtual aggregate root so a type
+// dead-end stays detectable even when a bare name resolves to several nodes.
+func commonKind(nodes []CallNode) string {
+	if len(nodes) == 0 {
+		return ""
+	}
+	k := nodes[0].Kind
+	for _, n := range nodes[1:] {
+		if n.Kind != k {
+			return ""
+		}
+	}
+	return k
 }
 
 // nodesByName resolves a trace start symbol to every matching definition. A

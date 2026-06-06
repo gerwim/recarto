@@ -82,6 +82,42 @@ func TestSnippetByNameAmbiguousReturnsCandidates(t *testing.T) {
 	}
 }
 
+func TestSnippetByNameOverloadsReturnAllBodies(t *testing.T) {
+	e := newTestEngine(t)
+	ctx := context.Background()
+	wt := t.TempDir()
+	// Two overloads of Add share one qualified name (N.Calc.Add) — and one file.
+	// Neither a qualified name nor a file path can disambiguate them, so the old
+	// "ambiguous; re-run with a qualified name or the file" advice was unfollowable
+	// and forced the agent to read the whole file. The overloads ARE the answer:
+	// return every body in one result so the agent stays in recarto.
+	code := "namespace N;\nclass Calc {\n" +
+		"  public int Add(int a, int b) { return a + b; }\n" +
+		"  public string Add(string a, string b) { return a + b; }\n}"
+	writeFile(t, wt, "Calc.cs", code)
+	src, _ := FSSource{Root: wt}.Read("Calc.cs")
+	if err := e.IndexFile(ctx, wt, "Calc.cs", src, 1, int64(len(src))); err != nil {
+		t.Fatal(err)
+	}
+	res, cands, err := e.SnippetByName(ctx, wt, "Add")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Found {
+		t.Fatalf("overloaded Add should resolve to a combined snippet, got Found=false cands=%v", cands)
+	}
+	if len(cands) != 0 {
+		t.Errorf("a resolved overload set must not also return candidates, got %v", cands)
+	}
+	if !strings.Contains(res.Snippet, "int Add(int a, int b)") || !strings.Contains(res.Snippet, "string Add(string a, string b)") {
+		t.Errorf("combined snippet must contain BOTH overloads, got:\n%s", res.Snippet)
+	}
+	// Each body must be locatable: the per-overload location header carries file:line.
+	if !strings.Contains(res.Snippet, "Calc.cs:3") || !strings.Contains(res.Snippet, "Calc.cs:4") {
+		t.Errorf("combined snippet must label each overload with its file:line, got:\n%s", res.Snippet)
+	}
+}
+
 func TestSnippetByNameQualifiedDisambiguates(t *testing.T) {
 	e := newTestEngine(t)
 	ctx := context.Background()

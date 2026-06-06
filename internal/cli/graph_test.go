@@ -55,6 +55,36 @@ func TestGraphQueryBareNameMatchesName(t *testing.T) {
 	}
 }
 
+// TestGraphQuerySpaceFormFlags proves that space-separated flags (--kind class) —
+// a very common LLM habit — are honoured exactly like the documented --kind=class
+// form. Previously they were silently swallowed as positionals, so the filter AND
+// the limit were ignored and the agent got a flood of unfiltered, unranked results
+// (in a real repo, generated-code noise) that pushed it to shell grep.
+func TestGraphQuerySpaceFormFlags(t *testing.T) {
+	a := newTestApp(t, "main")
+	wt := t.TempDir()
+	a.Git.Worktree = wt
+	os.WriteFile(filepath.Join(wt, "a.go"), []byte("package p\ntype Authenticate struct{}\nfunc AuthenticateUser(){}"), 0o644)
+	if err := Index(context.Background(), a, &bytes.Buffer{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	// Space form must filter to the type, excluding the function — identical to the
+	// --kind=type form.
+	var space, eq bytes.Buffer
+	if err := Graph(context.Background(), a, &space, []string{"query", "Authenticate", "--kind", "type"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := Graph(context.Background(), a, &eq, []string{"query", "Authenticate", "--kind=type"}); err != nil {
+		t.Fatal(err)
+	}
+	if space.String() != eq.String() {
+		t.Errorf("space-form flags must match = form:\n space: %q\n eq:    %q", space.String(), eq.String())
+	}
+	if !bytes.Contains(space.Bytes(), []byte("Authenticate")) || bytes.Contains(space.Bytes(), []byte("AuthenticateUser")) {
+		t.Errorf("--kind type must keep the type and exclude the function, got %q", space.String())
+	}
+}
+
 func TestGraphCalleesAnnotated(t *testing.T) {
 	a := newTestApp(t, "main")
 	wt := t.TempDir()
@@ -133,6 +163,17 @@ func TestGraphImplementations(t *testing.T) {
 	if !bytes.Contains(out.Bytes(), []byte("EnglishGreeter")) ||
 		!bytes.Contains(out.Bytes(), []byte("FrenchGreeter")) {
 		t.Errorf("graph impls output = %q, want both implementers", out.String())
+	}
+	// A trailing --limit flag must be honoured as a flag, not folded into the type
+	// name (which silently corrupted it to "IGreeter --limit=5" → no matches and a
+	// fallback to grep). The implementers must still appear.
+	var flagged bytes.Buffer
+	if err := Graph(context.Background(), a, &flagged, []string{"impls", "IGreeter", "--limit", "5"}); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(flagged.Bytes(), []byte("EnglishGreeter")) ||
+		!bytes.Contains(flagged.Bytes(), []byte("FrenchGreeter")) {
+		t.Errorf("impls with a trailing --limit flag must still find implementers, got %q", flagged.String())
 	}
 }
 

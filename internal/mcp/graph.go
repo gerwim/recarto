@@ -9,6 +9,17 @@ import (
 	"git.gerwim.nl/gerwim/recarto/internal/graph"
 )
 
+// leafName returns the last dotted segment of a (possibly qualified) symbol — the
+// identifier to feed a word-boundary reference search. "A.B.Create" → "Create".
+func leafName(sym string) string {
+	for i := len(sym) - 1; i >= 0; i-- {
+		if sym[i] == '.' {
+			return sym[i+1:]
+		}
+	}
+	return sym
+}
+
 // ensureFresh lazily reconciles the worktree's graph so query results reflect the
 // current checkout (spec §11 query-time freshness). Best-effort: a reconcile
 // failure must not fail the query — stale results beat no results.
@@ -128,13 +139,22 @@ func traceCallPath(ctx context.Context, a *app.App, in TraceCallPathInput) (Trac
 		}
 		out.Chains = append(out.Chains, hops)
 	}
-	// Dead-end on a type: a single root-only chain whose root is a type kind has no
-	// call edges because calls target its methods. Steer to the queries that answer
-	// "who uses this type" so the agent stays in the graph instead of grepping.
-	if len(chains) == 1 && len(chains[0]) == 1 && graph.IsTypeKind(chains[0][0].Kind) {
+	// Dead-end: a single root-only chain means the symbol resolved but no call edge
+	// was traversed. Steer the agent to the query that answers its real question so
+	// it stays in the graph instead of grepping.
+	if len(chains) == 1 && len(chains[0]) == 1 {
 		root := chains[0][0]
-		out.Hint = fmt.Sprintf("%s is a type (%s); call traces follow methods, not the declaration. Use find_implementations(%q) for implementers, search_content(%q) for references, or trace_call_path on a specific %s.<Method>.",
-			root.Name, root.Kind, root.Name, root.Name, root.Name)
+		switch {
+		case graph.IsTypeKind(root.Kind):
+			// Calls target a type's methods, not its declaration.
+			out.Hint = fmt.Sprintf("%s is a type (%s); call traces follow methods, not the declaration. Use find_implementations(%q) for implementers, search_content(%q) for references, or trace_call_path on a specific %s.<Method>.",
+				root.Name, root.Kind, root.Name, root.Name, root.Name)
+		case dir == "callers":
+			// Resolved method with no callers: an entrypoint, or call sites bind
+			// dynamically/through an interface and weren't statically resolved.
+			out.Hint = fmt.Sprintf("%s resolved but has no callers in the graph — it may be an entrypoint, or callers bind dynamically and weren't statically resolved. Use search_content(%q) to find textual references.",
+				root.Name, leafName(root.Name))
+		}
 	}
 	return out, nil
 }

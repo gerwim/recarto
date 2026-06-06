@@ -17,6 +17,11 @@ func Graph(ctx context.Context, a *app.App, w io.Writer, args []string) error {
 		return fmt.Errorf("graph: subcommand required (search|grep|callers|callees|impls|annotated|outline|arch|query|snippet)")
 	}
 	sub, rest := args[0], args[1:]
+	// Accept space-separated flags (--kind class) as equivalent to the documented
+	// --kind=class form. LLMs routinely emit the space form; without this it was
+	// silently swallowed as a positional, so the filter AND limit were ignored and
+	// the agent got a flood of unfiltered results that pushed it back to shell grep.
+	rest = coalesceValueFlags(rest)
 	// Discoverability: an agent cannot read the source, so the flags (regex,
 	// ignore-case, glob, …) must be reachable from the CLI itself. `graph help`
 	// or `graph <sub> --help` prints the usage block and exits before any work.
@@ -98,9 +103,17 @@ func Graph(ctx context.Context, a *app.App, w io.Writer, args []string) error {
 		if len(chains) == 1 && len(chains[0]) == 1 {
 			root := chains[0][0]
 			fmt.Fprintf(w, "(no %s found for %s)\n", dir, sym)
-			if graph.IsTypeKind(root.Kind) {
+			switch {
+			case graph.IsTypeKind(root.Kind):
 				fmt.Fprintf(w, "%s is a type (%s); call traces follow methods, not the declaration. Try: `graph impls %s` (implementers), `graph grep -r '\\b%s\\b'` (references), or `graph callers %s.<Method>`\n",
 					sym, root.Kind, sym, sym, sym)
+			case dir == "callers":
+				// A method that resolved but has no callers in the graph: it may be an
+				// entrypoint (a public API, test, or DI-invoked handler), or its call
+				// sites bind dynamically/through an interface and weren't statically
+				// resolved. Steer to a reference search that is still inside recarto
+				// (`graph grep`) so the agent doesn't reach for shell grep.
+				fmt.Fprintf(w, "it may be an entrypoint, or callers bind dynamically and weren't statically resolved; `graph grep -r '\\b%s\\b'` finds textual references.\n", leafName(sym))
 			}
 			return nil
 		}
@@ -165,16 +178,27 @@ func Graph(ctx context.Context, a *app.App, w io.Writer, args []string) error {
 			return fmt.Errorf("graph %s: symbol required", sub)
 		}
 		dir := "down"
+		implLimit := 50
 		var sym []string
 		for _, tok := range rest {
-			switch tok {
-			case "--super", "--up":
+			switch {
+			case tok == "--super" || tok == "--up":
 				dir = "up"
+			case strings.HasPrefix(tok, "--limit="):
+				implLimit, _ = strconv.Atoi(strings.TrimPrefix(tok, "--limit="))
+			case strings.HasPrefix(tok, "-"):
+				// An unrecognized flag: skip it rather than folding it into the type
+				// name, which silently corrupted the query to "IFoo --limit=5" → no
+				// matches and a fallback to grep.
+				continue
 			default:
 				sym = append(sym, tok)
 			}
 		}
-		rels, err := a.Graph.Implementations(ctx, wt, strings.Join(sym, " "), dir, 50)
+		if implLimit <= 0 {
+			implLimit = 50
+		}
+		rels, err := a.Graph.Implementations(ctx, wt, strings.Join(sym, " "), dir, implLimit)
 		if err != nil {
 			return err
 		}
@@ -198,7 +222,22 @@ func Graph(ctx context.Context, a *app.App, w io.Writer, args []string) error {
 		if len(rest) == 0 {
 			return fmt.Errorf("graph %s: attribute name required", sub)
 		}
-		syms, err := a.Graph.Annotated(ctx, wt, strings.Join(rest, " "), 50)
+		annLimit := 50
+		var attr []string
+		for _, tok := range rest {
+			switch {
+			case strings.HasPrefix(tok, "--limit="):
+				annLimit, _ = strconv.Atoi(strings.TrimPrefix(tok, "--limit="))
+			case strings.HasPrefix(tok, "-"):
+				continue // skip stray flags, don't fold them into the attribute name
+			default:
+				attr = append(attr, tok)
+			}
+		}
+		if annLimit <= 0 {
+			annLimit = 50
+		}
+		syms, err := a.Graph.Annotated(ctx, wt, strings.Join(attr, " "), annLimit)
 		if err != nil {
 			return err
 		}
@@ -386,6 +425,43 @@ func Graph(ctx context.Context, a *app.App, w io.Writer, args []string) error {
 	}
 }
 
+// valueFlags are the graph flags that take a value. A bare occurrence of one of
+// these (space form, "--kind class") is rewritten to its = form so the existing
+// "--flag=" parsing in every subcommand handles it uniformly. Boolean flags
+// (-r/-i/--regex/--ignore-case/--super/--up) are absent and so are never coalesced.
+var valueFlags = map[string]bool{
+	"--symbol": true, "--kind": true, "--lang": true, "--limit": true,
+	"--glob": true, "--max-per-file": true, "--name": true, "--path": true,
+	"--edge": true, "--edge-dir": true,
+}
+
+// coalesceValueFlags rewrites "--flag value" → "--flag=value" for known value
+// flags, leaving "--flag=value", boolean flags, and positionals untouched. A
+// trailing value flag with no following token, or one followed by another flag,
+// is left as-is (it then falls through to that subcommand's own handling).
+func coalesceValueFlags(args []string) []string {
+	out := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		tok := args[i]
+		if valueFlags[tok] && i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+			out = append(out, tok+"="+args[i+1])
+			i++
+			continue
+		}
+		out = append(out, tok)
+	}
+	return out
+}
+
+// leafName returns the last dotted segment of a (possibly qualified) symbol —
+// the identifier to feed a word-boundary grep. "A.B.Create" → "Create".
+func leafName(sym string) string {
+	if i := strings.LastIndex(sym, "."); i >= 0 && i < len(sym)-1 {
+		return sym[i+1:]
+	}
+	return sym
+}
+
 // isHelpToken reports whether a token requests usage.
 func isHelpToken(tok string) bool {
 	return tok == "help" || tok == "-h" || tok == "--help"
@@ -420,8 +496,8 @@ const graphUsage = `recarto graph <sub> — query the code graph
       --max-per-file=<n>            max matches per file (default 5)
   callers <symbol>                  who calls a function/method
   callees <symbol>                  what a function/method calls
-  impls <type> [--super|--up]       implementers (or supertypes) of an interface/base
-  annotated <attr>                  symbols carrying an attribute/decorator
+  impls <type> [--super|--up] [--limit=<n>]  implementers (or supertypes) of an interface/base
+  annotated <attr> [--limit=<n>]    symbols carrying an attribute/decorator
   outline <file>                    a file's symbols (kind, signature, line) in order
   arch [scope]                      module/dependency map
   query [name] [flags]              structured lookup; bare name = substring on name/qualified-name
@@ -429,6 +505,9 @@ const graphUsage = `recarto graph <sub> — query the code graph
       --path=<p> --limit=<n>        filter by exact file path / cap results
       --edge=<kind> --edge-dir=in|out  keep only nodes with such an edge (calls, imports, …)
   snippet <symbol> | <file> <symbol>  exact source for a symbol (file optional)
+                                    overloads (one name, one file) print together
+
+Flags accept either form: --kind=class or --kind class.
 
 Tip: for precise references to a type, use ` + "`grep -r '\\bName\\b'`" + ` (word boundaries)
 rather than a bare substring, which also matches NameFactory, GetName, etc.

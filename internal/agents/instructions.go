@@ -38,7 +38,9 @@ per-repo SQLite cache outside the working tree.
   (the ` + "`file`" + ` is optional) and resolves it by name across the repo — the usual
   next step after a search returns a name, so you needn't know the path. If the
   bare name is ambiguous it returns ` + "`candidates`" + ` (path/line/qualified_name);
-  re-query with a qualified name (usually unique) or add the file.
+  re-query with a qualified name (usually unique) or add the file. Overloads of one
+  method (same qualified name, same file) come back together in a single snippet —
+  no disambiguation needed.
 - **Orient first** in unfamiliar code with ` + "`get_architecture`" + ` (module/file/symbol
   map), then ` + "`search_graph` / `query_graph`" + ` to locate symbols and
   ` + "`get_code_snippet`" + ` to read one instead of a whole file. A lookup miss is an
@@ -60,6 +62,9 @@ per-repo SQLite cache outside the working tree.
   ` + "`get_code_snippet`" + `. Tracing a *type* (class/interface/record) dead-ends —
   calls target its methods, not its declaration — so it returns a ` + "`hint`" + `: use
   ` + "`find_implementations`" + ` for implementers and ` + "`search_content`" + ` for references.
+  A resolved symbol with no edges returns an honest dead-end (a root-only chain plus
+  a ` + "`hint`" + `), never an empty result — so "no callers" means it has none (an
+  entrypoint, or dynamically-bound call sites), not that the symbol is unknown.
 - **Find implementations** of an interface or base type with ` + "`find_implementations`" + `
   (direction ` + "`down`" + ` for subtypes/implementers, ` + "`up`" + ` for supertypes) instead of
   grepping for ` + "`: TypeName`" + ` — implementers don't share the interface's name, so

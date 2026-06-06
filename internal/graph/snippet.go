@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"git.gerwim.nl/gerwim/recarto/internal/ledger"
 )
@@ -72,9 +73,111 @@ SELECT f.path, n.start_line, n.kind, n.qualified_name
 	case len(cands) == 1:
 		res, err := e.Snippet(ctx, worktree, cands[0].Path, symbol)
 		return res, nil, err
+	case isOverloadSet(cands):
+		// Every match is the same logical symbol in one file: an overload set. Neither
+		// a qualified name nor the file can pick one out, so bouncing the caller with
+		// an "ambiguous" prompt is a dead end that forces a whole-file read. The
+		// overloads ARE the answer — return all their bodies so the agent stays in
+		// recarto.
+		return e.overloadSnippet(ctx, worktree, cands)
 	default:
 		return SnippetResult{Found: false}, cands, nil
 	}
+}
+
+// isOverloadSet reports whether every candidate is the same logical symbol — one
+// qualified name in one file: a method overload set. That is exactly the case the
+// candidate list cannot disambiguate (same qualified name AND same file), so it is
+// safe to merge. Same-name symbols in *different* files keep their file as a
+// disambiguator and stay ambiguous; a bare/empty qualified name is never merged.
+func isOverloadSet(cands []SnippetCandidate) bool {
+	if len(cands) < 2 {
+		return false
+	}
+	qn, path := cands[0].QualifiedName, cands[0].Path
+	if qn == "" || !strings.Contains(qn, ".") {
+		return false // a bare name is not a reliable identity; treat as ambiguous
+	}
+	for _, c := range cands[1:] {
+		if c.QualifiedName != qn || c.Path != path {
+			return false
+		}
+	}
+	return true
+}
+
+// maxOverloadBodies caps how many overload bodies are inlined into one combined
+// snippet; beyond this the remaining locations are listed so a pathological
+// overload set cannot blow the token budget.
+const maxOverloadBodies = 10
+
+// overloadSnippet concatenates the source of each overload (same qualified name),
+// each preceded by a "// path:line" header so every body stays individually
+// locatable. The result is Found=true with no candidates: the caller renders the
+// combined snippet exactly like a single hit.
+func (e *Engine) overloadSnippet(ctx context.Context, worktree string, cands []SnippetCandidate) (SnippetResult, []SnippetCandidate, error) {
+	var b strings.Builder
+	fmt.Fprintf(&b, "// %s — %d overloads\n", cands[0].QualifiedName, len(cands))
+	shown := cands
+	var overflow []SnippetCandidate
+	if len(cands) > maxOverloadBodies {
+		shown, overflow = cands[:maxOverloadBodies], cands[maxOverloadBodies:]
+	}
+	startLine, endLine := 0, 0
+	for i, c := range shown {
+		body, sl, el, err := e.snippetAt(ctx, worktree, c.Path, c.StartLine)
+		if err != nil {
+			return SnippetResult{}, nil, err
+		}
+		if i == 0 {
+			startLine = sl
+		}
+		endLine = el
+		if i > 0 {
+			b.WriteString("\n")
+		}
+		fmt.Fprintf(&b, "// %s:%d\n%s\n", c.Path, sl, body)
+	}
+	for _, c := range overflow {
+		fmt.Fprintf(&b, "// … also at %s:%d\n", c.Path, c.StartLine)
+	}
+	// Tokens saved = the whole file the agent would otherwise have read minus this
+	// combined snippet. isOverloadSet guarantees every overload shares one file, so
+	// reading it once is the correct baseline.
+	if content, err := os.ReadFile(filepath.Join(worktree, filepath.FromSlash(cands[0].Path))); err == nil {
+		if saved := ledger.EstimateTokens(string(content)) - ledger.EstimateTokens(b.String()); saved > 0 {
+			_ = e.led.Incr(ctx, "lifetime", "graph_tokens_saved", int64(saved))
+		}
+	}
+	_ = e.led.Incr(ctx, "lifetime", "graph_queries", 1)
+	return SnippetResult{
+		Found: true, StartLine: startLine, EndLine: endLine,
+		QualifiedName: cands[0].QualifiedName, Snippet: b.String(),
+	}, nil, nil
+}
+
+// snippetAt returns the exact source of the definition at path:startLine, using
+// its stored byte range. Unlike Snippet (keyed by name, LIMIT 1), it pins a single
+// overload by location so each member of an overload set is individually reachable.
+func (e *Engine) snippetAt(ctx context.Context, worktree, path string, startLine int) (string, int, int, error) {
+	var sb, eb int64
+	var sl, el int
+	err := e.st.DB.QueryRowContext(ctx, `
+SELECT n.start_byte, n.end_byte, n.start_line, n.end_line
+  FROM nodes n JOIN files f ON f.id = n.file_id
+ WHERE f.worktree = ? AND f.path = ? AND n.start_line = ?
+ LIMIT 1`, worktree, path, startLine).Scan(&sb, &eb, &sl, &el)
+	if err != nil {
+		return "", 0, 0, err
+	}
+	content, err := os.ReadFile(filepath.Join(worktree, filepath.FromSlash(path)))
+	if err != nil {
+		return "", 0, 0, err
+	}
+	if sb < 0 || eb > int64(len(content)) || sb > eb {
+		return "", 0, 0, fmt.Errorf("graph: stale byte range at %s:%d (reindex needed)", path, startLine)
+	}
+	return string(content[sb:eb]), sl, el, nil
 }
 
 // collapseOwnedConstructors drops a constructor candidate when one of the other

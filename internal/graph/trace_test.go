@@ -101,6 +101,43 @@ func TestTraceCallersAggregatesAmbiguousBareName(t *testing.T) {
 	}
 }
 
+func TestTraceCallersResolvedDeadEndIsNotAMiss(t *testing.T) {
+	e := newTestEngine(t)
+	ctx := context.Background()
+	// A self-recursive method whose ONLY caller is itself. Its single caller edge
+	// points back to a node already on the start frontier, so the walk skips it and
+	// appends no chain. Historically this collapsed to chains==0 — indistinguishable
+	// from "symbol not found", which the CLI rendered as "(no symbol named X)" and
+	// the MCP as an empty result with no suggestions. That falsely tells the agent
+	// the symbol does not exist and pushes it to grep. A resolved symbol must instead
+	// yield a root-only chain so the surface can report an honest "no callers found".
+	src := []byte("namespace N;\nclass Svc { public void Loop() { Loop(); } }")
+	if err := e.IndexFile(ctx, "/wt", "Svc.cs", src, 1, int64(len(src))); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.Resolve(ctx, "/wt"); err != nil {
+		t.Fatal(err)
+	}
+	chains, suggestions, err := e.TraceCallPathFiltered(ctx, "/wt", "Loop", "callers", 3, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Resolved ⇒ must not look like a miss: exactly the root, no spurious suggestions.
+	if len(chains) == 0 {
+		t.Fatalf("resolved symbol 'Loop' must yield a root-only chain, got chains=0 suggestions=%v (looks like 'not found')", suggestions)
+	}
+	if len(suggestions) != 0 {
+		t.Errorf("a resolved symbol must not emit did-you-mean suggestions, got %v", suggestions)
+	}
+	if len(chains) != 1 || len(chains[0]) != 1 || chains[0][0].Name != "Loop" {
+		t.Errorf("want single root-only chain [Loop], got %v", chains)
+	}
+	// The root must carry its real kind so type dead-ends can still be detected.
+	if chains[0][0].Kind == "" {
+		t.Errorf("root-only dead-end chain must preserve the node kind, got empty")
+	}
+}
+
 func TestTraceCallPathCallersRespectsResolution(t *testing.T) {
 	e := newTestEngine(t)
 	ctx := context.Background()

@@ -159,6 +159,36 @@ func TestTraceCallPathTypeHint(t *testing.T) {
 	}
 }
 
+// TestTraceCallPathMethodCallersDeadEnd proves that a resolved method whose only
+// caller is itself (self-recursion → the caller node is already on the frontier)
+// returns a root-only chain with a reference-search hint — not an empty result
+// that reads as "symbol not found" and pushes the agent to grep.
+func TestTraceCallPathMethodCallersDeadEnd(t *testing.T) {
+	a := newTestApp(t, "main")
+	wt := t.TempDir()
+	a.Git.Worktree = wt
+	if err := os.WriteFile(filepath.Join(wt, "f.cs"),
+		[]byte("namespace N;\nclass Svc { public void Loop() { Loop(); } }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Graph.Reconcile(context.Background(), wt, graph.FSSource{Root: wt}); err != nil {
+		t.Fatal(err)
+	}
+	out, err := traceCallPath(context.Background(), a, TraceCallPathInput{Symbol: "Loop", Direction: "callers"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Chains) == 0 {
+		t.Fatalf("resolved method must return a root-only chain, got empty (reads as 'not found'): %+v", out)
+	}
+	if len(out.Suggestions) != 0 {
+		t.Errorf("resolved method must not emit did-you-mean suggestions, got %v", out.Suggestions)
+	}
+	if out.Hint == "" || !strings.Contains(out.Hint, "search_content") {
+		t.Fatalf("method-callers dead-end = %+v, want a hint steering to search_content", out)
+	}
+}
+
 func contains(ss []string, want string) bool {
 	for _, s := range ss {
 		if s == want {
