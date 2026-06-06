@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestSignaturePopulatedOnIndex(t *testing.T) {
@@ -184,5 +185,26 @@ func TestIndexFilePopulatesQualifiedNameBlockNamespace(t *testing.T) {
 	}
 	if qn != "Ordia.Domain.Appointment.Handle" {
 		t.Errorf("qualified_name(Handle)=%q, want Ordia.Domain.Appointment.Handle", qn)
+	}
+}
+
+func TestSignatureOfRuneSafeCap(t *testing.T) {
+	// A first line longer than max whose byte-cap boundary lands inside a
+	// multibyte rune must still yield valid UTF-8 (cap on a rune boundary).
+	// 14-byte ASCII prefix then 2-byte 'é' runes; cap=15 lands inside the first é.
+	src := []byte("func f() { /* " + strings.Repeat("é", 200) + " */ }")
+	got := signatureOf(src, 0, 15)
+	if !utf8.ValidString(got) {
+		t.Fatalf("signatureOf produced invalid UTF-8: %q", got)
+	}
+	if len(got) > 15 {
+		t.Errorf("byte cap exceeded: %d bytes", len(got))
+	}
+	// Trimming + no-newline + past-EOF basics.
+	if s := signatureOf([]byte("\tfunc Greet()\nbody"), 1, 200); s != "func Greet()" {
+		t.Errorf("trim/newline: got %q", s)
+	}
+	if s := signatureOf([]byte("xy"), 9, 200); s != "" {
+		t.Errorf("past EOF: got %q", s)
 	}
 }

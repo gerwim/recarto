@@ -104,7 +104,9 @@ func signatureOf(src []byte, start uint, max int) string {
 	}
 	s := strings.TrimSpace(string(line))
 	if len(s) > max {
-		s = s[:max]
+		// Cap is by bytes; dropping an incomplete trailing rune (a multibyte rune
+		// split at the boundary) keeps the result valid UTF-8.
+		s = strings.ToValidUTF8(s[:max], "")
 	}
 	return s
 }
