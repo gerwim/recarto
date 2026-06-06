@@ -70,23 +70,20 @@ forget_memory(id: string, reason?: string) -> { forgotten: bool }
 ```
 
 Backed by a new `Engine.Forget(ctx, id, reason)`:
-- **Soft-delete:** set the row's `status` to a new non-active value `'forgotten'`
-  and remove it from the lexical FTS index via the existing `lex.Delete`
-  (`internal/memory/lexical.go:39`).
-- Soft (not hard) delete because recall already filters `status != "active"`
-  (`internal/memory/recall.go:109`), so a forgotten memory stops surfacing with no
-  new filter; the snapshot/sync path stays consistent; and the act is auditable
-  (`reason` retained).
-- No-op returning `forgotten:false` when the id is unknown or already inactive —
-  mirrors `complete_todo`'s no-op contract (`internal/mcp/handlers.go:146`).
+- **Hard-delete:** remove the memory row (and its refs) and drop it from the
+  lexical FTS index, reusing the existing `deleteMemoryRows`
+  (`internal/memory/compact.go:147`) and `lex.Delete`
+  (`internal/memory/lexical.go:39`) — the same teardown `gcSuperseded` already
+  performs. The memory is gone, not tombstoned.
+- `reason` is an **optional, advisory** argument: it lets the model articulate why
+  it is forgetting, but it is **not persisted** (there is no row to retain it on).
+  It may be recorded to the ledger/logs but carries no storage contract.
+- No-op returning `forgotten:false` when the id is unknown — mirrors
+  `complete_todo`'s no-op contract (`internal/mcp/handlers.go:146`).
 
-**Status taxonomy.** `'forgotten'` joins the existing `active`/`done`/`superseded`/
-`archived` set. It is distinct from `archived` (faded via decay) and `superseded`
-(replaced by a newer memory): `forgotten` means **explicitly removed as wrong**.
-
-**Tests.** Forget round-trips (`forgotten:true` then a subsequent recall/list
-excludes it; the FTS index no longer matches its text); forgetting an unknown id
-returns `forgotten:false`; forgetting an already-`done` todo returns `false`.
+**Tests.** Forget round-trips (`forgotten:true` then a subsequent recall/list/get
+finds nothing; the FTS index no longer matches its text); forgetting an unknown id
+returns `forgotten:false`.
 
 ---
 
