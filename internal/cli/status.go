@@ -42,7 +42,7 @@ func Status(ctx context.Context, a *app.App, w io.Writer) error {
 	for _, m := range []string{
 		"memories_recorded", "memories_recalled", "recall_tokens_injected",
 		"recall_misses", "reads", "repeated_reads_blocked",
-		"repeated_augments_blocked",
+		"repeated_augments_blocked", "large_reads_nudged",
 	} {
 		v, err := a.Ledger.Get(ctx, "lifetime", m)
 		if err != nil {

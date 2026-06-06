@@ -57,7 +57,9 @@ per-repo SQLite cache outside the working tree.
 - **Outline a file** with ` + "`get_file_outline`" + ` to see its symbols (kinds, names,
   signatures, line ranges) in source order instead of reading the whole file; then
   ` + "`get_code_snippet`" + ` the one you need. Prefer this over opening a large file to
-  find your way around it.
+  find your way around it. If you do read a large indexed file whole, Recarto emits a
+  one-time nudge with its symbol count — treat that whole-file read as the expensive
+  path and switch to ` + "`get_file_outline`/`get_code_snippet`" + ` for the rest of that file.
 - **Grep without leaving the graph** with ` + "`search_content`" + ` for arbitrary text
   (string literals, error messages, config keys, TODOs). It searches the *whole*
   worktree honoring ` + "`.gitignore`" + ` — not just parsed code but config, build, docs

@@ -31,6 +31,15 @@ func TestInstructionsExplainJustInTimeAnchoring(t *testing.T) {
 	}
 }
 
+func TestInstructionsWarnAboutLargeWholeFileReads(t *testing.T) {
+	// Agents should know Recarto nudges them toward the graph when they read a large
+	// indexed file whole, so the nudge reads as a known guardrail rather than noise.
+	lower := strings.ToLower(Instructions)
+	if !strings.Contains(lower, "whole-file") || !strings.Contains(lower, "nudge") {
+		t.Error("Instructions should warn that a large whole-file read is wasteful and Recarto will nudge toward the graph")
+	}
+}
+
 func TestInstructionsAdvertiseFullToolset(t *testing.T) {
 	for _, want := range []string{
 		"get_architecture", "query_graph", "list_memory", "get_memory",

@@ -64,6 +64,94 @@ func TestHandlePostReadWarnsOnRepeat(t *testing.T) {
 	}
 }
 
+// largeReadResult returns a tool-result string whose estimated token count is
+// safely above the large-read nudge threshold.
+func largeReadResult() string { return strings.Repeat("abcd ", 4000) } // ~5263 tokens
+
+func TestHandlePostReadNudgesGraphForLargeIndexedFile(t *testing.T) {
+	a := newTestApp(t, "main")
+	ctx := context.Background()
+	wt := a.Git.Worktree
+	src := []byte("package p\n\nfunc Alpha() {}\n\nfunc Beta() int { return 1 }\n\nfunc Gamma() {}\n")
+	if err := a.Graph.IndexFile(ctx, wt, "big.go", src, 1, int64(len(src))); err != nil {
+		t.Fatal(err)
+	}
+	ev := Event{Kind: KindPostRead, Agent: "claude-code", SessionID: "s1", FilePath: wt + "/big.go", ToolResult: largeReadResult()}
+	res, err := Handle(ctx, a, ev)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(res.Context, "get_file_outline") || !strings.Contains(res.Context, "get_code_snippet") {
+		t.Errorf("expected graph-navigation nudge for a large indexed file:\n%s", res.Context)
+	}
+	if n, _ := a.Ledger.Get(ctx, "lifetime", "large_reads_nudged"); n != 1 {
+		t.Errorf("large_reads_nudged = %d, want 1", n)
+	}
+}
+
+func TestHandlePostReadNoGraphNudgeForSmallRead(t *testing.T) {
+	a := newTestApp(t, "main")
+	ctx := context.Background()
+	wt := a.Git.Worktree
+	src := []byte("package p\n\nfunc Alpha() {}\n")
+	if err := a.Graph.IndexFile(ctx, wt, "small.go", src, 1, int64(len(src))); err != nil {
+		t.Fatal(err)
+	}
+	ev := Event{Kind: KindPostRead, Agent: "claude-code", SessionID: "s1", FilePath: wt + "/small.go", ToolResult: "package p"}
+	res, err := Handle(ctx, a, ev)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(res.Context, "get_file_outline") {
+		t.Errorf("small read should not trigger the graph nudge:\n%s", res.Context)
+	}
+}
+
+func TestHandlePostReadNoGraphNudgeForUnindexedFile(t *testing.T) {
+	a := newTestApp(t, "main")
+	ctx := context.Background()
+	wt := a.Git.Worktree
+	// Large read, but the file is not in the graph (e.g. a data/text file), so
+	// get_file_outline/get_code_snippet offer no cheaper alternative — stay silent.
+	ev := Event{Kind: KindPostRead, Agent: "claude-code", SessionID: "s1", FilePath: wt + "/data.bin", ToolResult: largeReadResult()}
+	res, err := Handle(ctx, a, ev)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(res.Context, "get_file_outline") {
+		t.Errorf("unindexed file should not trigger the graph nudge:\n%s", res.Context)
+	}
+}
+
+func TestHandlePostReadGraphNudgeOncePerFile(t *testing.T) {
+	a := newTestApp(t, "main")
+	ctx := context.Background()
+	wt := a.Git.Worktree
+	src := []byte("package p\n\nfunc Alpha() {}\n\nfunc Beta() {}\n")
+	if err := a.Graph.IndexFile(ctx, wt, "big.go", src, 1, int64(len(src))); err != nil {
+		t.Fatal(err)
+	}
+	ev := Event{Kind: KindPostRead, Agent: "claude-code", SessionID: "s1", FilePath: wt + "/big.go", ToolResult: largeReadResult()}
+	if _, err := Handle(ctx, a, ev); err != nil {
+		t.Fatal(err)
+	}
+	// The second read of the same file gets the stronger repeated-read warning and
+	// must not also re-inject the (now-redundant) graph nudge.
+	second, err := Handle(ctx, a, ev)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(second.Context, "already read") {
+		t.Errorf("repeat read should warn:\n%s", second.Context)
+	}
+	if strings.Contains(second.Context, "get_file_outline") {
+		t.Errorf("repeat read should not re-inject the graph nudge:\n%s", second.Context)
+	}
+	if n, _ := a.Ledger.Get(ctx, "lifetime", "large_reads_nudged"); n != 1 {
+		t.Errorf("large_reads_nudged = %d, want 1 (nudge once per file)", n)
+	}
+}
+
 func TestAugmentSuppressesRepeatedPattern(t *testing.T) {
 	a := newTestApp(t, "main")
 	ctx := context.Background()

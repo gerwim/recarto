@@ -16,6 +16,7 @@ import (
 // bounded by line caps; cerebrumReserve keeps headroom for them.
 const (
 	sessionStartBudget = 1500
+	largeReadTokens    = 2000 // a read above this is "large enough" to steer toward the graph
 	recentBugLimit     = 5
 	archModuleLimit    = 8   // caps both the module list and the dependency-edge list of the map
 	cerebrumReserve    = 256 // headroom for the map (~165 tok) + recent-bugs (~60 tok) tiers
@@ -31,6 +32,18 @@ func sessionBudget() int {
 		}
 	}
 	return sessionStartBudget
+}
+
+// largeReadThreshold is the estimated-token bar above which a first whole-file read
+// earns a nudge toward the cheaper graph navigation tools: RECARTO_LARGE_READ_TOKENS
+// if set to a positive integer, else the default.
+func largeReadThreshold() int {
+	if v := os.Getenv("RECARTO_LARGE_READ_TOKENS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return largeReadTokens
 }
 
 // formatSessionContext renders the tiered session-start block: pinned do_not_repeat

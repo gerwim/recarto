@@ -159,6 +159,19 @@ func handlePostRead(ctx context.Context, a *app.App, ev Event) (Result, error) {
 			"Rely on the earlier read instead of reading it again.", file, n, tokens))
 	}
 	rel := memory.RelFileRef(a.Git.Worktree, file)
+	// First whole-file read of a large, graph-indexed file: nudge toward the cheaper
+	// navigation tools. Whole-file reads of big files are the dominant token sink, and
+	// the graph offers a structural alternative only when the file actually has symbols.
+	// Gated to the first read (n == 1) because a repeat already gets the stronger
+	// "rely on the earlier read" warning above — so this fires at most once per file.
+	if n == 1 && tokens >= int64(largeReadThreshold()) {
+		if syms, err := a.Graph.Outline(ctx, a.Git.Worktree, rel); err == nil && len(syms) > 0 {
+			_ = a.Ledger.Incr(ctx, "lifetime", "large_reads_nudged", 1)
+			msgs = append(msgs, fmt.Sprintf("Recarto: %s is large (~%d tokens, %d symbols indexed). "+
+				"Next time use get_file_outline for its structure or get_code_snippet to read one symbol, "+
+				"instead of reading the whole file.", rel, tokens, len(syms)))
+		}
+	}
 	if found, err := a.Engine.BugsForCode(ctx, a.Git.Branch, []string{rel}, nil); err == nil {
 		if found = dedupSurfaced(ctx, a, ev.SessionID, found); len(found) > 0 {
 			msgs = append(msgs, formatBugWarnings(rel, found))
