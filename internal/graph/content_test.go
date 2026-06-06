@@ -123,3 +123,53 @@ func TestSearchContentFilters(t *testing.T) {
 		t.Fatalf("path glob: got %+v, want only b.cs", csOnly)
 	}
 }
+
+// TestSearchContentMetaReportsTruncation proves the meta channel reports the true
+// total match count and that both the global limit and the per-file cap are
+// surfaced — so an LLM treating grep as exhaustive learns the page is partial
+// instead of acting on a false-complete answer.
+func TestSearchContentMetaReportsTruncation(t *testing.T) {
+	e := newTestEngine(t)
+	ctx := context.Background()
+	wt := t.TempDir()
+	// a.go has 4 matching lines, b.go has 3 → 7 total matching lines.
+	indexInto(t, e, wt, "a.go", "package p\n// marker 1\n// marker 2\n// marker 3\n// marker 4\nfunc A() {}\n")
+	indexInto(t, e, wt, "b.go", "package p\n// marker 1\n// marker 2\n// marker 3\nfunc B() {}\n")
+
+	res, meta, err := e.SearchContentWithMeta(ctx, wt, "marker", ContentSearchOpts{MaxPerFile: 2, Limit: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if meta.Total != 7 {
+		t.Errorf("Total = %d, want 7 (every matching line, both caps ignored)", meta.Total)
+	}
+	if len(res) != 3 || meta.Shown != 3 {
+		t.Errorf("Shown = %d (len %d), want 3 (the global limit)", meta.Shown, len(res))
+	}
+	if !meta.Truncated {
+		t.Error("Truncated = false, want true (7 matches, only 3 shown)")
+	}
+	if !meta.PerFileCapped {
+		t.Error("PerFileCapped = false, want true (a.go had 4 > MaxPerFile 2)")
+	}
+}
+
+// TestSearchContentMetaNoTruncation proves a complete result set is reported as
+// such — no false truncation warning when every match is shown.
+func TestSearchContentMetaNoTruncation(t *testing.T) {
+	e := newTestEngine(t)
+	ctx := context.Background()
+	wt := t.TempDir()
+	indexInto(t, e, wt, "a.go", "package p\nfunc A() { /* unique_token */ }\n")
+
+	res, meta, err := e.SearchContentWithMeta(ctx, wt, "unique_token", ContentSearchOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res) != 1 || meta.Total != 1 || meta.Shown != 1 {
+		t.Errorf("meta = %+v, len = %d, want exactly one complete match", meta, len(res))
+	}
+	if meta.Truncated || meta.PerFileCapped {
+		t.Errorf("unexpected truncation flags: %+v", meta)
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 
 	"git.gerwim.nl/gerwim/recarto/internal/app"
@@ -32,7 +33,8 @@ func Graph(ctx context.Context, a *app.App, w io.Writer, args []string) error {
 			}
 			qwords = append(qwords, tok)
 		}
-		res, err := a.Graph.SearchGuided(ctx, wt, strings.Join(qwords, " "), syms, "", "", 20)
+		const searchLimit = 20
+		res, err := a.Graph.SearchGuided(ctx, wt, strings.Join(qwords, " "), syms, "", "", searchLimit)
 		if err != nil {
 			return err
 		}
@@ -43,6 +45,12 @@ func Graph(ctx context.Context, a *app.App, w io.Writer, args []string) error {
 		for _, r := range res {
 			fmt.Fprintf(w, "• [%s] %s  %s:%d\n", r.Kind, r.QualifiedName, r.Path, r.Line)
 		}
+		// A full page of ranked hits likely means more exist beyond the cap. Results
+		// are relevance-ordered, so the top page usually suffices — but say so rather
+		// than imply exhaustiveness, and point at the levers that sharpen the ranking.
+		if len(res) >= searchLimit {
+			fmt.Fprintf(w, "… showing top %d (more may match); narrow with --symbol=, a kind, or more specific terms\n", searchLimit)
+		}
 		return nil
 	case "callers", "callees":
 		if len(rest) == 0 {
@@ -52,9 +60,32 @@ func Graph(ctx context.Context, a *app.App, w io.Writer, args []string) error {
 		if sub == "callers" {
 			dir = "callers"
 		}
-		chains, err := a.Graph.TraceCallPath(ctx, wt, rest[0], dir, 4)
+		sym := rest[0]
+		chains, suggestions, err := a.Graph.TraceCallPathFiltered(ctx, wt, sym, dir, 4, 0)
 		if err != nil {
 			return err
+		}
+		// Symbol miss: the engine offers lenient candidates. Surfacing them keeps
+		// the agent inside recarto instead of reading a silent empty result as
+		// "nothing here" and falling back to grep.
+		if len(chains) == 0 {
+			fmt.Fprintf(w, "(no symbol named %q)\n", sym)
+			if len(suggestions) > 0 {
+				fmt.Fprintf(w, "did you mean: %s\n", strings.Join(suggestions, ", "))
+			}
+			return nil
+		}
+		// Dead-end: the symbol resolved but has no call edges (a single root-only
+		// chain). For a type this is expected — calls target its methods, not the
+		// declaration — so steer to the queries that *do* answer "who uses this".
+		if len(chains) == 1 && len(chains[0]) == 1 {
+			root := chains[0][0]
+			fmt.Fprintf(w, "(no %s found for %s)\n", dir, sym)
+			if graph.IsTypeKind(root.Kind) {
+				fmt.Fprintf(w, "%s is a type (%s); call traces follow methods, not the declaration. Try: `graph impls %s` (implementers), `graph grep %s` (references), or `graph callers %s.<Method>`\n",
+					sym, root.Kind, sym, sym, sym)
+			}
+			return nil
 		}
 		// Collapse byte-identical rendered chains. One ambiguous call site can yield
 		// several low-confidence name candidates that differ only by their (unshown)
@@ -195,6 +226,10 @@ func Graph(ctx context.Context, a *app.App, w io.Writer, args []string) error {
 				opts.PathGlob = strings.TrimPrefix(tok, "--glob=")
 			case strings.HasPrefix(tok, "--lang="):
 				opts.Language = strings.TrimPrefix(tok, "--lang=")
+			case strings.HasPrefix(tok, "--limit="):
+				opts.Limit, _ = strconv.Atoi(strings.TrimPrefix(tok, "--limit="))
+			case strings.HasPrefix(tok, "--max-per-file="):
+				opts.MaxPerFile, _ = strconv.Atoi(strings.TrimPrefix(tok, "--max-per-file="))
 			default:
 				pat = append(pat, tok)
 			}
@@ -202,7 +237,7 @@ func Graph(ctx context.Context, a *app.App, w io.Writer, args []string) error {
 		if len(pat) == 0 {
 			return fmt.Errorf("graph %s: pattern required", sub)
 		}
-		matches, err := a.Graph.SearchContent(ctx, wt, strings.Join(pat, " "), opts)
+		matches, meta, err := a.Graph.SearchContentWithMeta(ctx, wt, strings.Join(pat, " "), opts)
 		if err != nil {
 			return err
 		}
@@ -216,6 +251,16 @@ func Graph(ctx context.Context, a *app.App, w io.Writer, args []string) error {
 				sym = "(file scope)"
 			}
 			fmt.Fprintf(w, "%s:%d  [%s %s]  %s\n", m.Path, m.Line, m.Kind, sym, m.Text)
+		}
+		// A grep replacement must never present a capped page as the whole answer.
+		// Report the true total and how to widen so the agent can trust completeness.
+		if meta.Truncated {
+			note := fmt.Sprintf("… showing %d of %d matches", meta.Shown, meta.Total)
+			if meta.PerFileCapped {
+				note += " (some files capped — raise --max-per-file=)"
+			}
+			note += "; raise --limit= or narrow with --glob=/--lang="
+			fmt.Fprintln(w, note)
 		}
 		return nil
 	case "outline", "file":

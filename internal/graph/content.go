@@ -30,6 +30,16 @@ type ContentSearchOpts struct {
 	MaxPerFile int    // max matches per file (default 5)
 }
 
+// ContentMeta describes the completeness of a content search so a caller can tell
+// the LLM whether the page is exhaustive. Without it, the global/per-file caps
+// truncate silently and grep-style "I've seen every hit" reasoning is wrong.
+type ContentMeta struct {
+	Total         int  // every matching line across all matching files, both caps ignored
+	Shown         int  // number of matches actually returned (== len(result))
+	Truncated     bool // Total > Shown: some matches were withheld
+	PerFileCapped bool // at least one file had more matches than MaxPerFile
+}
+
 // nodeSpan carries a node's identity and byte range for enclosing-symbol lookup.
 type nodeSpan struct {
 	qn, kind   string
@@ -42,16 +52,26 @@ type nodeSpan struct {
 // text (string literals, error messages, config keys, call sites inside bodies),
 // but every hit is placed in the code graph.
 func (e *Engine) SearchContent(ctx context.Context, worktree, pattern string, opts ContentSearchOpts) ([]ContentMatch, error) {
+	matches, _, err := e.SearchContentWithMeta(ctx, worktree, pattern, opts)
+	return matches, err
+}
+
+// SearchContentWithMeta is SearchContent plus a ContentMeta describing whether
+// the returned page is complete. It counts every matching line (ignoring both the
+// global limit and the per-file cap) so the caller can report "showing N of M"
+// instead of presenting a silently-truncated page as the whole answer.
+func (e *Engine) SearchContentWithMeta(ctx context.Context, worktree, pattern string, opts ContentSearchOpts) ([]ContentMatch, ContentMeta, error) {
 	if opts.Limit <= 0 {
 		opts.Limit = 50
 	}
 	if opts.MaxPerFile <= 0 {
 		opts.MaxPerFile = 5
 	}
+	var meta ContentMeta
 
 	re, err := compilePattern(pattern, opts.Regex, opts.IgnoreCase)
 	if err != nil {
-		return nil, err
+		return nil, meta, err
 	}
 
 	q := `SELECT path FROM files WHERE worktree = ?`
@@ -63,14 +83,14 @@ func (e *Engine) SearchContent(ctx context.Context, worktree, pattern string, op
 	q += ` ORDER BY path`
 	rows, err := e.st.DB.QueryContext(ctx, q, args...)
 	if err != nil {
-		return nil, err
+		return nil, meta, err
 	}
 	var paths []string
 	for rows.Next() {
 		var p string
 		if err := rows.Scan(&p); err != nil {
 			rows.Close()
-			return nil, err
+			return nil, meta, err
 		}
 		if opts.PathGlob != "" && !globMatch(opts.PathGlob, p) {
 			continue
@@ -79,7 +99,7 @@ func (e *Engine) SearchContent(ctx context.Context, worktree, pattern string, op
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
-		return nil, err
+		return nil, meta, err
 	}
 
 	var hand, gen []ContentMatch
@@ -95,29 +115,35 @@ func (e *Engine) SearchContent(ctx context.Context, worktree, pattern string, op
 		}
 		spans, serr := e.fileSpans(ctx, worktree, p)
 		if serr != nil {
-			return nil, serr
+			return nil, meta, serr
 		}
 		bucket := &hand
 		if isGeneratedPath(p) {
 			bucket = &gen
 		}
-		perFile := 0
+		// fileMatches counts every matching line in this file; only the first
+		// MaxPerFile are attributed and kept. Counting past the cap is what lets
+		// meta.Total report the true match count instead of the capped page.
+		fileMatches := 0
 		var off int64
 		for _, line := range strings.SplitAfter(string(content), "\n") {
 			if loc := re.FindStringIndex(line); loc != nil {
-				*bucket = append(*bucket, ContentMatch{
-					Path:   p,
-					Line:   lineNumberAt(content, off),
-					Text:   capLine(strings.TrimSpace(strings.TrimRight(line, "\n"))),
-					Symbol: spans.symbolAt(off + int64(loc[0])),
-					Kind:   spans.kindAt(off + int64(loc[0])),
-				})
-				perFile++
-				if perFile >= opts.MaxPerFile {
-					break
+				fileMatches++
+				if fileMatches <= opts.MaxPerFile {
+					*bucket = append(*bucket, ContentMatch{
+						Path:   p,
+						Line:   lineNumberAt(content, off),
+						Text:   capLine(strings.TrimSpace(strings.TrimRight(line, "\n"))),
+						Symbol: spans.symbolAt(off + int64(loc[0])),
+						Kind:   spans.kindAt(off + int64(loc[0])),
+					})
 				}
 			}
 			off += int64(len(line))
+		}
+		meta.Total += fileMatches
+		if fileMatches > opts.MaxPerFile {
+			meta.PerFileCapped = true
 		}
 	}
 	// Generated-file matches sink below hand-written ones (mirrors search), then
@@ -127,8 +153,10 @@ func (e *Engine) SearchContent(ctx context.Context, worktree, pattern string, op
 	if len(out) > opts.Limit {
 		out = out[:opts.Limit]
 	}
+	meta.Shown = len(out)
+	meta.Truncated = meta.Total > meta.Shown
 	_ = e.led.Incr(ctx, "lifetime", "graph_queries", 1)
-	return out, nil
+	return out, meta, nil
 }
 
 // maxLineLen caps a returned match line so one pathological minified/generated

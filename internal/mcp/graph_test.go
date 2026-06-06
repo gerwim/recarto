@@ -115,6 +115,50 @@ func TestGetFileOutlineHandler(t *testing.T) {
 	}
 }
 
+// TestSearchContentHandlerReportsTruncation proves the MCP tool surfaces the true
+// total and truncation flags so an LLM client knows the page is partial.
+func TestSearchContentHandlerReportsTruncation(t *testing.T) {
+	a := newTestApp(t, "main")
+	wt := t.TempDir()
+	a.Git.Worktree = wt
+	if err := os.WriteFile(filepath.Join(wt, "a.go"),
+		[]byte("package p\n// hit\n// hit\n// hit\n// hit\n// hit\nfunc A(){}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Graph.Reconcile(context.Background(), wt, graph.FSSource{Root: wt}); err != nil {
+		t.Fatal(err)
+	}
+	out, err := searchContent(context.Background(), a, SearchContentInput{Pattern: "hit", Limit: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Total != 5 || out.Count != 2 || !out.Truncated {
+		t.Fatalf("meta = total %d count %d truncated %v, want 5/2/true", out.Total, out.Count, out.Truncated)
+	}
+}
+
+// TestTraceCallPathTypeHint proves tracing a type with no call edges returns a
+// hint steering to impls/grep instead of a bare empty chain.
+func TestTraceCallPathTypeHint(t *testing.T) {
+	a := newTestApp(t, "main")
+	wt := t.TempDir()
+	a.Git.Worktree = wt
+	if err := os.WriteFile(filepath.Join(wt, "f.cs"),
+		[]byte("namespace N;\npublic interface IFoo { void Bar(); }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Graph.Reconcile(context.Background(), wt, graph.FSSource{Root: wt}); err != nil {
+		t.Fatal(err)
+	}
+	out, err := traceCallPath(context.Background(), a, TraceCallPathInput{Symbol: "IFoo", Direction: "callers"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Hint == "" || !strings.Contains(out.Hint, "find_implementations") {
+		t.Fatalf("trace of a type = %+v, want a hint steering to find_implementations", out)
+	}
+}
+
 func contains(ss []string, want string) bool {
 	for _, s := range ss {
 		if s == want {

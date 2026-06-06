@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"fmt"
 	"math"
 
 	"git.gerwim.nl/gerwim/recarto/internal/app"
@@ -65,6 +66,16 @@ func searchGraph(ctx context.Context, a *app.App, in SearchGraphInput) (SearchGr
 	if out.Count == 0 && len(in.CandidateSymbols) == 0 {
 		out.Hint = weakResultHint
 	}
+	// A full page of ranked hits likely means more match beyond the cap. Results
+	// are relevance-ordered so the top page usually suffices, but flag it rather
+	// than imply exhaustiveness and name the levers that sharpen the ranking.
+	limit := in.Limit
+	if limit <= 0 {
+		limit = 20
+	}
+	if out.Count >= limit {
+		out.Hint = fmt.Sprintf("Showing the top %d by relevance; more may match. Narrow with candidate_symbols, a kind, a language, or more specific query terms.", limit)
+	}
 	return out, nil
 }
 
@@ -90,6 +101,10 @@ type TraceHop struct {
 type TraceCallPathOutput struct {
 	Chains      [][]TraceHop `json:"chains"`
 	Suggestions []string     `json:"suggestions,omitempty"`
+	// Hint steers the agent when a trace dead-ends on a type: call edges target a
+	// type's methods, not its declaration, so "who uses this type" is answered by
+	// find_implementations / search_content, not trace_call_path.
+	Hint string `json:"hint,omitempty"`
 }
 
 func traceCallPath(ctx context.Context, a *app.App, in TraceCallPathInput) (TraceCallPathOutput, error) {
@@ -112,6 +127,14 @@ func traceCallPath(ctx context.Context, a *app.App, in TraceCallPathInput) (Trac
 			}
 		}
 		out.Chains = append(out.Chains, hops)
+	}
+	// Dead-end on a type: a single root-only chain whose root is a type kind has no
+	// call edges because calls target its methods. Steer to the queries that answer
+	// "who uses this type" so the agent stays in the graph instead of grepping.
+	if len(chains) == 1 && len(chains[0]) == 1 && graph.IsTypeKind(chains[0][0].Kind) {
+		root := chains[0][0]
+		out.Hint = fmt.Sprintf("%s is a type (%s); call traces follow methods, not the declaration. Use find_implementations(%q) for implementers, search_content(%q) for references, or trace_call_path on a specific %s.<Method>.",
+			root.Name, root.Kind, root.Name, root.Name, root.Name)
 	}
 	return out, nil
 }
@@ -224,20 +247,29 @@ type ContentMatch struct {
 	Kind   string `json:"kind,omitempty"`   // enclosing definition's kind
 }
 type SearchContentOutput struct {
-	Count   int            `json:"count"`
+	Count   int            `json:"count"` // matches returned in this page
+	Total   int            `json:"total"` // every matching line, both caps ignored
 	Matches []ContentMatch `json:"matches"`
+	// Truncated reports that the page is partial (Total > Count): the agent must
+	// not treat these matches as the complete set. PerFileCapped flags that the
+	// per-file cap (max_per_file) withheld matches in at least one file.
+	Truncated     bool `json:"truncated,omitempty"`
+	PerFileCapped bool `json:"per_file_capped,omitempty"`
 }
 
 func searchContent(ctx context.Context, a *app.App, in SearchContentInput) (SearchContentOutput, error) {
 	ensureFresh(ctx, a)
-	res, err := a.Graph.SearchContent(ctx, a.Git.Worktree, in.Pattern, graph.ContentSearchOpts{
+	res, meta, err := a.Graph.SearchContentWithMeta(ctx, a.Git.Worktree, in.Pattern, graph.ContentSearchOpts{
 		Regex: in.Regex, IgnoreCase: in.IgnoreCase, PathGlob: in.PathGlob,
 		Language: in.Language, Limit: in.Limit, MaxPerFile: in.MaxPerFile,
 	})
 	if err != nil {
 		return SearchContentOutput{}, err
 	}
-	out := SearchContentOutput{Count: len(res), Matches: make([]ContentMatch, 0, len(res))}
+	out := SearchContentOutput{
+		Count: len(res), Total: meta.Total, Truncated: meta.Truncated, PerFileCapped: meta.PerFileCapped,
+		Matches: make([]ContentMatch, 0, len(res)),
+	}
 	for _, m := range res {
 		out.Matches = append(out.Matches, ContentMatch{
 			Path: m.Path, Line: m.Line, Text: m.Text, Symbol: m.Symbol, Kind: m.Kind,

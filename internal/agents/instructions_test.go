@@ -23,6 +23,7 @@ func TestInstructionsAdvertiseFullToolset(t *testing.T) {
 	for _, want := range []string{
 		"get_architecture", "query_graph", "list_memory", "get_memory",
 		"forget_memory", "confidence", "find_implementations",
+		"search_content", "get_file_outline", "find_annotated",
 	} {
 		if !strings.Contains(Instructions, want) {
 			t.Errorf("Instructions block missing %q", want)

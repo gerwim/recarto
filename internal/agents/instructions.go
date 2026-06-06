@@ -39,9 +39,16 @@ per-repo SQLite cache outside the working tree.
   signatures, line ranges) in source order instead of reading the whole file; then
   ` + "`get_code_snippet`" + ` the one you need. Prefer this over opening a large file to
   find your way around it.
+- **Grep without leaving the graph** with ` + "`search_content`" + ` for arbitrary text
+  (string literals, error messages, config keys, TODOs) — every hit comes back with
+  its enclosing symbol, and the result reports ` + "`total`/`truncated`" + ` so you know
+  whether the page is complete. Prefer it over a shell ` + "`grep`" + `; raise ` + "`limit`" + ` /
+  ` + "`max_per_file`" + ` (or narrow with ` + "`path_glob`/`language`" + `) when it says it truncated.
 - **Trace** with ` + "`trace_call_path`" + `: each hop is annotated with a confidence —
   trust high/typed/self hops; treat low/name hops as candidates to verify with
-  ` + "`get_code_snippet`" + `.
+  ` + "`get_code_snippet`" + `. Tracing a *type* (class/interface/record) dead-ends —
+  calls target its methods, not its declaration — so it returns a ` + "`hint`" + `: use
+  ` + "`find_implementations`" + ` for implementers and ` + "`search_content`" + ` for references.
 - **Find implementations** of an interface or base type with ` + "`find_implementations`" + `
   (direction ` + "`down`" + ` for subtypes/implementers, ` + "`up`" + ` for supertypes) instead of
   grepping for ` + "`: TypeName`" + ` — implementers don't share the interface's name, so

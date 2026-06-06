@@ -223,3 +223,32 @@ func TestTraceSuggestsOnMiss(t *testing.T) {
 		t.Fatalf("expected 'Greet' among suggestions, got %v", suggestions)
 	}
 }
+
+// TestTraceRootCarriesKind proves a trace that resolves a non-callable type
+// (here an interface) returns a single root-only chain whose node carries the
+// symbol's kind, so the caller can steer "find usages" to impls/grep instead of
+// reporting a misleading empty/bare result.
+func TestTraceRootCarriesKind(t *testing.T) {
+	e := newTestEngine(t)
+	ctx := context.Background()
+	src := []byte("namespace N;\npublic interface IFoo { void Bar(); }\n")
+	if err := e.IndexFile(ctx, "/wt", "f.cs", src, 1, int64(len(src))); err != nil {
+		t.Fatal(err)
+	}
+	chains, _, err := e.TraceCallPathFiltered(ctx, "/wt", "IFoo", "callers", 3, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(chains) != 1 || len(chains[0]) != 1 {
+		t.Fatalf("want one root-only chain for a type with no callers, got %v", chains)
+	}
+	if chains[0][0].Kind != "interface" {
+		t.Errorf("root kind = %q, want interface", chains[0][0].Kind)
+	}
+	if !IsTypeKind(chains[0][0].Kind) {
+		t.Errorf("IsTypeKind(%q) = false, want true", chains[0][0].Kind)
+	}
+	if IsTypeKind("method") {
+		t.Error("IsTypeKind(method) = true, want false")
+	}
+}

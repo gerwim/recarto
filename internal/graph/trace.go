@@ -30,11 +30,24 @@ func compactReceiver(s string) string {
 type CallNode struct {
 	NodeID     string
 	Name       string
+	Kind       string // node kind (method, class, interface, …); set on the root
 	Path       string
 	Line       int
 	Resolution string // how the edge into this hop resolved: self|typed|static|iface|name ("" for root)
 	Confidence string // high|medium|low ("" for root)
 	Receiver   string // receiver expression for an ambiguous hop, else ""
+}
+
+// IsTypeKind reports whether a node kind is a type declaration rather than a
+// callable. Call edges target callables (methods/functions), so tracing a type
+// yields no callers/callees — "who uses this type" is answered by impls/grep, and
+// callers know to steer there when the traced root is one of these kinds.
+func IsTypeKind(kind string) bool {
+	switch kind {
+	case "class", "interface", "record", "struct", "enum", "type", "trait":
+		return true
+	}
+	return false
 }
 
 // confLabel buckets a candidate confidence into a verbalizable band.
@@ -163,7 +176,7 @@ func (e *Engine) nodesByName(ctx context.Context, worktree, name string) ([]Call
 		suffix = "%." + name
 	}
 	rows, err := e.st.DB.QueryContext(ctx, `
-SELECT n.id, n.name, f.path, n.start_line, (n.qualified_name = ?) AS exact
+SELECT n.id, n.name, n.kind, f.path, n.start_line, (n.qualified_name = ?) AS exact
   FROM nodes n JOIN files f ON f.id = n.file_id
  WHERE f.worktree = ? AND (n.name = ? OR n.qualified_name = ? OR n.qualified_name LIKE ?)
  ORDER BY exact DESC, n.id
@@ -177,7 +190,7 @@ SELECT n.id, n.name, f.path, n.start_line, (n.qualified_name = ?) AS exact
 	for rows.Next() {
 		var n CallNode
 		var exact bool
-		if err := rows.Scan(&n.NodeID, &n.Name, &n.Path, &n.Line, &exact); err != nil {
+		if err := rows.Scan(&n.NodeID, &n.Name, &n.Kind, &n.Path, &n.Line, &exact); err != nil {
 			return nil, err
 		}
 		if exact && !qualified {

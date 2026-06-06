@@ -244,3 +244,80 @@ func TestGraphSearchSymbolFlag(t *testing.T) {
 		t.Errorf("graph search --symbol output = %q", out.String())
 	}
 }
+
+// TestGraphGrepReportsTruncation proves `graph grep` tells the agent when its
+// page is partial (the grep-replacement must never present a capped result as the
+// whole answer) and that --limit raises the cap.
+func TestGraphGrepReportsTruncation(t *testing.T) {
+	a := newTestApp(t, "main")
+	wt := t.TempDir()
+	a.Git.Worktree = wt
+	if err := os.WriteFile(filepath.Join(wt, "a.go"),
+		[]byte("package p\n// hit\n// hit\n// hit\n// hit\n// hit\nfunc A() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := Index(context.Background(), a, &bytes.Buffer{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := Graph(context.Background(), a, &out, []string{"grep", "--limit=2", "hit"}); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(out.Bytes(), []byte("of 5")) {
+		t.Errorf("grep did not report truncation (5 matches, 2 shown); output = %q", out.String())
+	}
+
+	// Raising the limit shows every match and drops the notice.
+	out.Reset()
+	if err := Graph(context.Background(), a, &out, []string{"grep", "--limit=50", "hit"}); err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(out.Bytes(), []byte("showing")) {
+		t.Errorf("grep reported truncation when all matches fit; output = %q", out.String())
+	}
+}
+
+// TestGraphCallersTypeHint proves tracing a type (no call edges) steers the agent
+// to impls/grep instead of emitting a bare, misleading single line.
+func TestGraphCallersTypeHint(t *testing.T) {
+	a := newTestApp(t, "main")
+	wt := t.TempDir()
+	a.Git.Worktree = wt
+	if err := os.WriteFile(filepath.Join(wt, "f.cs"),
+		[]byte("namespace N;\npublic interface IFoo { void Bar(); }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := Index(context.Background(), a, &bytes.Buffer{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := Graph(context.Background(), a, &out, []string{"callers", "IFoo"}); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(out.Bytes(), []byte("impls")) || !bytes.Contains(out.Bytes(), []byte("grep")) {
+		t.Errorf("callers of a type did not steer to impls/grep; output = %q", out.String())
+	}
+}
+
+// TestGraphCallersMissShowsSuggestions proves a misspelled trace symbol surfaces
+// the lenient candidates instead of printing nothing (the CLI previously
+// discarded the engine's suggestions, leaving the agent with a silent miss).
+func TestGraphCallersMissShowsSuggestions(t *testing.T) {
+	a := newTestApp(t, "main")
+	wt := t.TempDir()
+	a.Git.Worktree = wt
+	if err := os.WriteFile(filepath.Join(wt, "a.go"),
+		[]byte("package p\nfunc Greet(name string) string { return name }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := Index(context.Background(), a, &bytes.Buffer{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := Graph(context.Background(), a, &out, []string{"callers", "Gree"}); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(out.Bytes(), []byte("Greet")) {
+		t.Errorf("missed trace did not suggest 'Greet'; output = %q", out.String())
+	}
+}
