@@ -17,8 +17,7 @@ import (
 const (
 	sessionStartBudget = 1500
 	recentBugLimit     = 5
-	archModuleLimit    = 8
-	archDepLimit       = 8
+	archModuleLimit    = 8   // caps both the module list and the dependency-edge list of the map
 	cerebrumReserve    = 256 // headroom for the map (~165 tok) + recent-bugs (~60 tok) tiers
 	cerebrumBodyMax    = 160
 )
@@ -89,17 +88,15 @@ func formatSessionContext(results []memory.RecallResult, arch graph.Architecture
 	}
 
 	if len(arch.Modules) > 0 {
+		// Select the highest-signal modules/deps for the map rather than the
+		// alphabetically-first ones: rank product modules by file count and the
+		// heaviest dependency edges by reference count, demoting test projects.
+		mods, deps := graph.MapArchitecture(arch, archModuleLimit)
 		b.WriteString("\nCode map (modules):\n")
-		for i, m := range arch.Modules {
-			if i >= archModuleLimit {
-				break
-			}
+		for _, m := range mods {
 			fmt.Fprintf(&b, "- %s: %d files, %d symbols\n", m.Name, m.Files, m.Symbols)
 		}
-		for i, d := range arch.Deps {
-			if i >= archDepLimit {
-				break
-			}
+		for _, d := range deps {
 			fmt.Fprintf(&b, "  %s → %s (%d)\n", d.From, d.To, d.Count)
 		}
 		b.WriteString("Query the code graph (search/snippet/callers) instead of reading whole files; grep/glob auto-injects matching symbols.\n")

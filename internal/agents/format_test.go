@@ -29,6 +29,25 @@ func TestFormatTodoReminders(t *testing.T) {
 	}
 }
 
+func TestFormatSessionContextMapSelectsProductOverTestModules(t *testing.T) {
+	var mods []graph.Module
+	// Eight alphabetically-first test modules, each large by file count — exactly
+	// the noise the old "first 8 by name" map surfaced.
+	for _, n := range []string{
+		"Aaa.Tests", "Aab.Tests", "Aac.Tests", "Aad.Tests",
+		"Aae.Tests", "Aaf.Tests", "Aag.Tests", "Aah.Tests",
+	} {
+		mods = append(mods, graph.Module{Name: n, Files: 300, Symbols: 1000})
+	}
+	// One product module, alphabetically last and smaller — must still win a slot.
+	mods = append(mods, graph.Module{Name: "Zproduct", Files: 20, Symbols: 80})
+
+	out := formatSessionContext(nil, graph.Architecture{Modules: mods}, nil, 1500)
+	if !strings.Contains(out, "Zproduct") {
+		t.Fatalf("product module must be selected over test modules in the orientation map:\n%s", out)
+	}
+}
+
 func TestFormatSessionContextPinnedDNRIncludesCaveat(t *testing.T) {
 	results := []memory.RecallResult{{
 		Record: &memory.Record{

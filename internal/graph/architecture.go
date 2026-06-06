@@ -73,6 +73,60 @@ func BudgetArchitecture(arch Architecture, limit int) (mods []Module, deps []Mod
 	return mods, deps, totalMods, totalDeps, truncated
 }
 
+// MapArchitecture selects the highest-signal slice of an Architecture for the
+// compact session-start orientation map. It differs from BudgetArchitecture (which
+// ranks modules by symbol count for the full get_architecture tool) in two ways
+// that matter at a tight budget of a handful of modules:
+//
+//   - it ranks modules by FILE count, not symbols. Symbol count is inflated by
+//     generated clients and symbol-dense languages — a 43-file codegen module can
+//     carry 23k symbols — which crowds out the genuinely large hand-written modules
+//     an agent needs to orient. File count is the more robust size signal.
+//   - it demotes test modules below product modules, so the map leads with the
+//     code under development rather than its test projects (mirroring how search
+//     demotes test results).
+//
+// Within the kept set, modules are restored to name order and deps (ranked by
+// reference count) likewise, so the displayed output is stable. limit <= 0 keeps
+// everything. It never mutates arch.
+func MapArchitecture(arch Architecture, limit int) (mods []Module, deps []ModuleEdge) {
+	mods = append(mods, arch.Modules...)
+	sort.SliceStable(mods, func(i, j int) bool { return mods[i].Name < mods[j].Name })
+	sort.SliceStable(mods, func(i, j int) bool {
+		if ti, tj := isTestModuleName(mods[i].Name), isTestModuleName(mods[j].Name); ti != tj {
+			return !ti // product modules before test modules
+		}
+		return mods[i].Files > mods[j].Files
+	})
+	if limit > 0 && len(mods) > limit {
+		mods = mods[:limit]
+	}
+	sort.SliceStable(mods, func(i, j int) bool { return mods[i].Name < mods[j].Name })
+
+	deps = append(deps, arch.Deps...)
+	sort.SliceStable(deps, func(i, j int) bool {
+		// Demote edges touching a test module: "tests reference the code under test"
+		// is the heaviest edge in many repos yet says nothing about the product's
+		// architecture. Product→product coupling is the signal worth the budget.
+		ti := isTestModuleName(deps[i].From) || isTestModuleName(deps[i].To)
+		tj := isTestModuleName(deps[j].From) || isTestModuleName(deps[j].To)
+		if ti != tj {
+			return !ti
+		}
+		return deps[i].Count > deps[j].Count
+	})
+	if limit > 0 && len(deps) > limit {
+		deps = deps[:limit]
+	}
+	sort.SliceStable(deps, func(i, j int) bool {
+		if deps[i].From != deps[j].From {
+			return deps[i].From < deps[j].From
+		}
+		return deps[i].To < deps[j].To
+	})
+	return mods, deps
+}
+
 // projectRoots returns directories (relative to worktree, slash-separated,
 // longest-first) that hold a project marker (.csproj / package.json / go.mod).
 // They let a monorepo be grouped at project granularity instead of collapsing
