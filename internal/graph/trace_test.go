@@ -2,8 +2,73 @@ package graph
 
 import (
 	"context"
+	"strings"
 	"testing"
 )
+
+func TestCompactReceiver(t *testing.T) {
+	long := strings.Repeat("x", 100)
+	cases := []struct{ in, want string }{
+		{"", ""},
+		{"builder", "builder"},
+		{"a.b.c", "a.b.c"},
+		{"  spaced  ", "spaced"},
+		{"builder.Use(\n   x => y\n)", "builder.Use( x => y )"},
+		{long, long[:maxReceiverLen-1] + "…"},
+	}
+	for _, c := range cases {
+		got := compactReceiver(c.in)
+		if got != c.want {
+			t.Errorf("compactReceiver(%q) = %q, want %q", c.in, got, c.want)
+		}
+		if strings.ContainsAny(got, "\n\r\t") {
+			t.Errorf("compactReceiver(%q) leaked whitespace: %q", c.in, got)
+		}
+		if len([]rune(got)) > maxReceiverLen {
+			t.Errorf("compactReceiver(%q) len %d exceeds cap %d", c.in, len([]rune(got)), maxReceiverLen)
+		}
+	}
+}
+
+func TestTraceCallersAggregatesAmbiguousBareName(t *testing.T) {
+	e := newTestEngine(t)
+	ctx := context.Background()
+	// Two unrelated classes each define Handle(); each is called by a sibling in
+	// its own file (so Resolve binds each call to the same-file Handle). Asking
+	// for callers of the *bare* ambiguous name "Handle" must aggregate across BOTH
+	// definitions — not arbitrarily pick one (LIMIT 1) and miss the other.
+	a := []byte("namespace X;\nclass A { public void Handle() {} }\n" +
+		"class UseA { public void RunA() { var a = new A(); a.Handle(); } }")
+	if err := e.IndexFile(ctx, "/wt", "x/A.cs", a, 1, int64(len(a))); err != nil {
+		t.Fatal(err)
+	}
+	b := []byte("namespace Y;\nclass B { public void Handle() {} }\n" +
+		"class UseB { public void RunB() { var b = new B(); b.Handle(); } }")
+	if err := e.IndexFile(ctx, "/wt", "y/B.cs", b, 1, int64(len(b))); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.Resolve(ctx, "/wt"); err != nil {
+		t.Fatal(err)
+	}
+	chains, err := e.TraceCallPath(ctx, "/wt", "Handle", "callers", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sawA, sawB := false, false
+	for _, ch := range chains {
+		for _, n := range ch {
+			switch n.Name {
+			case "RunA":
+				sawA = true
+			case "RunB":
+				sawB = true
+			}
+		}
+	}
+	if !sawA || !sawB {
+		t.Errorf("callers of bare 'Handle' should aggregate both definitions: sawA=%v sawB=%v chains=%v", sawA, sawB, chains)
+	}
+}
 
 func TestTraceCallPathCallersRespectsResolution(t *testing.T) {
 	e := newTestEngine(t)

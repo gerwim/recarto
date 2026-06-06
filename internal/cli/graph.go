@@ -72,15 +72,27 @@ func Graph(ctx context.Context, a *app.App, w io.Writer, args []string) error {
 		}
 		return nil
 	case "arch":
-		arch, err := a.Graph.Architecture(ctx, wt, "")
+		scope := ""
+		if len(rest) > 0 {
+			scope = rest[0]
+		}
+		arch, err := a.Graph.Architecture(ctx, wt, scope)
 		if err != nil {
 			return err
 		}
-		for _, m := range arch.Modules {
+		// Budget identically to the MCP get_architecture tool: a large monorepo
+		// otherwise dumps thousands of long-tail dep edges (graphql-platform:
+		// 4,404 edges ≈ 90k tokens). Pass a scope arg to drill into omitted detail.
+		mods, deps, totalMods, totalDeps, truncated := graph.BudgetArchitecture(arch, 0)
+		for _, m := range mods {
 			fmt.Fprintf(w, "%-20s %d files  %d symbols\n", m.Name, m.Files, m.Symbols)
 		}
-		for _, d := range arch.Deps {
+		for _, d := range deps {
 			fmt.Fprintf(w, "  %s → %s  (%d)\n", d.From, d.To, d.Count)
+		}
+		if truncated {
+			fmt.Fprintf(w, "… showing %d/%d modules, %d/%d deps (highest-signal); pass a path scope to drill in\n",
+				len(mods), totalMods, len(deps), totalDeps)
 		}
 		return nil
 	case "impls", "implementations":

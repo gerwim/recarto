@@ -3,7 +3,6 @@ package mcp
 import (
 	"context"
 	"math"
-	"sort"
 
 	"git.gerwim.nl/gerwim/recarto/internal/app"
 	"git.gerwim.nl/gerwim/recarto/internal/graph"
@@ -141,46 +140,11 @@ type GetArchitectureOutput struct {
 	Truncated   bool         `json:"truncated,omitempty"` // true when the cap dropped lower-signal entries
 }
 
-// defaultArchLimit caps both the module list and the dependency-edge list of an
-// unscoped get_architecture call. On a large monorepo the dependency edges grow
-// near-quadratically with module count (a 331-module repo yielded 4,404 edges,
-// ~90k tokens) — almost all of it an incidental long tail of single-reference
-// edges. Bounding to the highest-signal entries keeps orientation intact at a
-// fraction of the tokens; `scope` recovers any detail the cap omits.
-const defaultArchLimit = 80
-
-// budgetArchitecture bounds an Architecture to at most `limit` modules and `limit`
-// dependency edges, selecting the highest-signal entries — modules by symbol count,
-// edges by reference count — then restoring name order within the kept subset so
-// output ordering is stable. It returns the kept slices, the pre-cap totals, and
-// whether anything was dropped.
+// budgetArchitecture delegates to graph.BudgetArchitecture so the CLI (`graph
+// arch`) and this handler bound their output identically. See that function for
+// the rationale behind the cap.
 func budgetArchitecture(arch graph.Architecture, limit int) (mods []graph.Module, deps []graph.ModuleEdge, totalMods, totalDeps int, truncated bool) {
-	if limit <= 0 {
-		limit = defaultArchLimit
-	}
-	totalMods, totalDeps = len(arch.Modules), len(arch.Deps)
-
-	mods = append(mods, arch.Modules...)
-	if len(mods) > limit {
-		sort.SliceStable(mods, func(i, j int) bool { return mods[i].Symbols > mods[j].Symbols })
-		mods = mods[:limit]
-		truncated = true
-	}
-	sort.SliceStable(mods, func(i, j int) bool { return mods[i].Name < mods[j].Name })
-
-	deps = append(deps, arch.Deps...)
-	if len(deps) > limit {
-		sort.SliceStable(deps, func(i, j int) bool { return deps[i].Count > deps[j].Count })
-		deps = deps[:limit]
-		truncated = true
-	}
-	sort.SliceStable(deps, func(i, j int) bool {
-		if deps[i].From != deps[j].From {
-			return deps[i].From < deps[j].From
-		}
-		return deps[i].To < deps[j].To
-	})
-	return mods, deps, totalMods, totalDeps, truncated
+	return graph.BudgetArchitecture(arch, limit)
 }
 
 func getArchitecture(ctx context.Context, a *app.App, in GetArchitectureInput) (GetArchitectureOutput, error) {

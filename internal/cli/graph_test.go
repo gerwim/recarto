@@ -5,6 +5,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 )
 
@@ -65,6 +66,40 @@ func TestGraphImplementations(t *testing.T) {
 	if !bytes.Contains(out.Bytes(), []byte("EnglishGreeter")) ||
 		!bytes.Contains(out.Bytes(), []byte("FrenchGreeter")) {
 		t.Errorf("graph impls output = %q, want both implementers", out.String())
+	}
+}
+
+// TestGraphArchBudgets proves `graph arch` caps its output on a large module set
+// (parity with the MCP get_architecture tool) instead of dumping every dep edge,
+// and reports the pre-cap totals so the map is still trustworthy.
+func TestGraphArchBudgets(t *testing.T) {
+	a := newTestApp(t, "main")
+	wt := t.TempDir()
+	a.Git.Worktree = wt
+	// 120 single-symbol modules (> the 80 default cap) via distinct top-level dirs.
+	for i := 0; i < 120; i++ {
+		dir := filepath.Join(wt, "m"+strconv.Itoa(i))
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "f.go"),
+			[]byte("package p\nfunc F"+strconv.Itoa(i)+"(){}"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := Index(context.Background(), a, &bytes.Buffer{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := Graph(context.Background(), a, &out, []string{"arch"}); err != nil {
+		t.Fatal(err)
+	}
+	moduleLines := bytes.Count(out.Bytes(), []byte(" files  "))
+	if moduleLines > 80 {
+		t.Errorf("graph arch emitted %d module lines, want <= 80 (budgeted)", moduleLines)
+	}
+	if !bytes.Contains(out.Bytes(), []byte("/120 modules")) {
+		t.Errorf("graph arch should report pre-cap module total; output tail = %q", out.String())
 	}
 }
 

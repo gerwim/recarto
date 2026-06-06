@@ -31,6 +31,48 @@ type Architecture struct {
 	Deps    []ModuleEdge
 }
 
+// DefaultArchLimit caps both the module list and the dependency-edge list of an
+// unbudgeted architecture map. On a large monorepo the dependency edges grow
+// near-quadratically with module count (a 331-module repo yielded 4,404 edges,
+// ~90k tokens) — almost all of it an incidental long tail of single-reference
+// edges. Bounding to the highest-signal entries keeps orientation intact at a
+// fraction of the tokens.
+const DefaultArchLimit = 80
+
+// BudgetArchitecture bounds an Architecture to at most `limit` modules and `limit`
+// dependency edges, selecting the highest-signal entries — modules by symbol count,
+// edges by reference count — then restoring name order within the kept subset so
+// output ordering is stable. It returns the kept slices, the pre-cap totals, and
+// whether anything was dropped. limit <= 0 uses DefaultArchLimit.
+func BudgetArchitecture(arch Architecture, limit int) (mods []Module, deps []ModuleEdge, totalMods, totalDeps int, truncated bool) {
+	if limit <= 0 {
+		limit = DefaultArchLimit
+	}
+	totalMods, totalDeps = len(arch.Modules), len(arch.Deps)
+
+	mods = append(mods, arch.Modules...)
+	if len(mods) > limit {
+		sort.SliceStable(mods, func(i, j int) bool { return mods[i].Symbols > mods[j].Symbols })
+		mods = mods[:limit]
+		truncated = true
+	}
+	sort.SliceStable(mods, func(i, j int) bool { return mods[i].Name < mods[j].Name })
+
+	deps = append(deps, arch.Deps...)
+	if len(deps) > limit {
+		sort.SliceStable(deps, func(i, j int) bool { return deps[i].Count > deps[j].Count })
+		deps = deps[:limit]
+		truncated = true
+	}
+	sort.SliceStable(deps, func(i, j int) bool {
+		if deps[i].From != deps[j].From {
+			return deps[i].From < deps[j].From
+		}
+		return deps[i].To < deps[j].To
+	})
+	return mods, deps, totalMods, totalDeps, truncated
+}
+
 // projectRoots returns directories (relative to worktree, slash-separated,
 // longest-first) that hold a project marker (.csproj / package.json / go.mod).
 // They let a monorepo be grouped at project granularity instead of collapsing
