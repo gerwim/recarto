@@ -9,8 +9,12 @@ import (
 // extGlobRE matches a wildcard basename ending in a file extension, e.g. "*.cs",
 // "*Foo*.ts" — the shape that marks a pattern as a file glob rather than a Grep
 // term. The extension is 1–5 alphanumerics so it never matches a regex like
-// "Add.*Projection" (which ends in an identifier, not a ".<ext>").
-var extGlobRE = regexp.MustCompile(`[*?][^/]*\.[A-Za-z0-9]{1,5}$`)
+// "Add.*Projection" (which ends in an identifier, not a ".<ext>"). The run between
+// the wildcard and the extension dot is restricted to identifier/wildcard chars
+// (no regex metacharacters), so an escaped-dot Grep regex like "import.*\.proto"
+// or "foo.*\.go" is NOT mistaken for a glob: the backslash before the extension
+// breaks the run, leaving the pattern to pass through to symbol search unchanged.
+var extGlobRE = regexp.MustCompile(`[*?][A-Za-z0-9_*?]*\.[A-Za-z0-9]{1,5}$`)
 
 // identRunRE captures maximal identifier runs used to recover a glob's stem.
 var identRunRE = regexp.MustCompile(`[A-Za-z0-9_]+`)
