@@ -103,11 +103,14 @@ func Graph(ctx context.Context, a *app.App, w io.Writer, args []string) error {
 		if len(rest) < 2 {
 			return fmt.Errorf("graph snippet: <file> <symbol> required")
 		}
-		snip, err := a.Graph.Snippet(ctx, wt, rest[0], rest[1])
+		res, err := a.Graph.Snippet(ctx, wt, rest[0], rest[1])
 		if err != nil {
 			return err
 		}
-		fmt.Fprintln(w, snip)
+		if !res.Found {
+			return fmt.Errorf("graph snippet: symbol %q not found in %s", rest[1], rest[0])
+		}
+		fmt.Fprintln(w, res.Snippet)
 		return nil
 	default:
 		return fmt.Errorf("graph: unknown subcommand %q", sub)

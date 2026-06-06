@@ -188,14 +188,21 @@ type GetCodeSnippetInput struct {
 	Symbol string `json:"symbol" jsonschema:"symbol name or qualified name"`
 }
 type GetCodeSnippetOutput struct {
-	Snippet string `json:"snippet"`
+	Found         bool   `json:"found"`
+	StartLine     int    `json:"start_line,omitempty"`
+	EndLine       int    `json:"end_line,omitempty"`
+	QualifiedName string `json:"qualified_name,omitempty"`
+	Snippet       string `json:"snippet,omitempty"`
 }
 
 func getCodeSnippet(ctx context.Context, a *app.App, in GetCodeSnippetInput) (GetCodeSnippetOutput, error) {
 	ensureFresh(ctx, a)
-	snip, err := a.Graph.Snippet(ctx, a.Git.Worktree, in.File, in.Symbol)
+	r, err := a.Graph.Snippet(ctx, a.Git.Worktree, in.File, in.Symbol)
 	if err != nil {
 		return GetCodeSnippetOutput{}, err
 	}
-	return GetCodeSnippetOutput{Snippet: snip}, nil
+	return GetCodeSnippetOutput{
+		Found: r.Found, StartLine: r.StartLine, EndLine: r.EndLine,
+		QualifiedName: r.QualifiedName, Snippet: r.Snippet,
+	}, nil
 }
