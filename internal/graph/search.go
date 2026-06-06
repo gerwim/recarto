@@ -87,7 +87,7 @@ func (e *Engine) SearchGuided(ctx context.Context, worktree, query string, candi
 	}
 
 	if e.emb == nil {
-		return dedupByName(lex, limit), nil
+		return dedupByName(demoteGenerated(lex, nil), limit), nil
 	}
 	// Dormant semantic tier (set only under -tags ORT). Best-effort.
 	vec, verr := e.vectorPass(ctx, worktree, query, kind, lang, limit*3)
@@ -119,7 +119,14 @@ func (e *Engine) mergeCandidates(ctx context.Context, worktree string, candidate
 		rankedList{weight: candidateSplitWeight, results: split},
 		rankedList{weight: exactWeight, results: lex},
 	)
-	return dedupByName(fused, limit), nil
+	// Sink generated-file matches below hand-written ones, but never demote a
+	// symbol whose name is one of the agent's exact candidate guesses — that
+	// precise landing is the strongest signal we have, generated or not.
+	protect := make(map[string]bool, len(candidates))
+	for _, c := range candidates {
+		protect[strings.ToLower(strings.TrimSpace(c))] = true
+	}
+	return dedupByName(demoteGenerated(fused, protect), limit), nil
 }
 
 // candidateExactPass returns symbols whose name OR qualified_name equals one of
@@ -200,6 +207,8 @@ SELECT n.id, n.name, n.qualified_name, n.kind, f.language, f.path, n.start_line,
 // name throughout so a same-name overload cluster cannot crowd the page. With no
 // vector candidates this degrades to a plain lexical dedup.
 func mergeHybrid(lex, vec []SearchResult, limit int) []SearchResult {
+	lex = demoteGenerated(lex, nil)
+	vec = demoteGenerated(vec, nil)
 	if len(vec) == 0 {
 		return dedupByName(lex, limit)
 	}
