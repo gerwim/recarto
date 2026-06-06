@@ -39,9 +39,14 @@ per-repo SQLite cache outside the working tree.
   implementation leads: hand-written product code outranks tests, generated code,
   and namespace/package declarations, so the top hits are usually what you want —
   ` + "`get_code_snippet`" + ` the first relevant one rather than re-running a shell grep.
+  Every list result (search/query/outline/impls/annotated) identifies a symbol by
+  its ` + "`qualified_name`" + ` — the precise, overload-safe form the symbol-taking tools
+  accept; its last segment is the short name, so the redundant ` + "`name`" + ` field is
+  omitted when derivable. Read ` + "`qualified_name`" + ` and feed it straight back to
+  ` + "`get_code_snippet`/`trace_call_path`/`find_*`" + `; don't expect a separate ` + "`name`" + `.
 - **Read one symbol, not the file**: ` + "`get_code_snippet`" + ` takes just a ` + "`symbol`" + `
   (the ` + "`file`" + ` is optional) and resolves it by name across the repo — the usual
-  next step after a search returns a name, so you needn't know the path. It accepts a
+  next step after a search returns a ` + "`qualified_name`" + `, so you needn't know the path. It accepts a
   bare name, a fully-qualified name, or a ` + "`Type.Method`" + ` suffix (e.g.
   ` + "`DefaultRequestExecutor.ExecuteAsync`" + `) — the exact identifier form
   ` + "`trace_call_path`/`callers`/`callees`" + ` print, so a name you copied from a trace

@@ -40,6 +40,17 @@ func TestInstructionsWarnAboutLargeWholeFileReads(t *testing.T) {
 	}
 }
 
+func TestInstructionsExplainQualifiedNameCanonical(t *testing.T) {
+	// List results omit the redundant short `name` and carry `qualified_name` as the
+	// canonical identifier (its last segment is the short name). Agents must know to
+	// read qualified_name and feed it back to the symbol-taking tools, rather than
+	// expecting a separate `name` field on every row.
+	lower := strings.ToLower(Instructions)
+	if !strings.Contains(lower, "last segment") || !strings.Contains(lower, "qualified_name") {
+		t.Error("Instructions should explain results carry qualified_name as the canonical identifier whose last segment is the short name")
+	}
+}
+
 func TestInstructionsAdvertiseFullToolset(t *testing.T) {
 	for _, want := range []string{
 		"get_architecture", "query_graph", "list_memory", "get_memory",
