@@ -81,7 +81,8 @@ type TraceHop struct {
 	Receiver   string `json:"receiver,omitempty"`   // receiver expr for an ambiguous hop
 }
 type TraceCallPathOutput struct {
-	Chains [][]TraceHop `json:"chains"`
+	Chains      [][]TraceHop `json:"chains"`
+	Suggestions []string     `json:"suggestions,omitempty"`
 }
 
 func traceCallPath(ctx context.Context, a *app.App, in TraceCallPathInput) (TraceCallPathOutput, error) {
@@ -90,11 +91,11 @@ func traceCallPath(ctx context.Context, a *app.App, in TraceCallPathInput) (Trac
 	if dir == "" {
 		dir = "callees"
 	}
-	chains, err := a.Graph.TraceCallPathFiltered(ctx, a.Git.Worktree, in.Symbol, dir, in.Depth, in.MinConfidence)
+	chains, suggestions, err := a.Graph.TraceCallPathFiltered(ctx, a.Git.Worktree, in.Symbol, dir, in.Depth, in.MinConfidence)
 	if err != nil {
 		return TraceCallPathOutput{}, err
 	}
-	out := TraceCallPathOutput{Chains: make([][]TraceHop, 0, len(chains))}
+	out := TraceCallPathOutput{Chains: make([][]TraceHop, 0, len(chains)), Suggestions: suggestions}
 	for _, ch := range chains {
 		hops := make([]TraceHop, len(ch))
 		for i, n := range ch {

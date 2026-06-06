@@ -152,3 +152,24 @@ func TestSearchGraphCandidateSymbolsAndHint(t *testing.T) {
 		t.Errorf("expected zero results with a hint, got count=%d hint=%q", miss.Count, miss.Hint)
 	}
 }
+
+func TestTraceCallPathSuggestions(t *testing.T) {
+	a := newTestApp(t, "main")
+	wt := t.TempDir()
+	a.Git.Worktree = wt
+	os.WriteFile(filepath.Join(wt, "a.go"),
+		[]byte("package p\nfunc Greet(name string) string { return name }"), 0o644)
+	if err := a.Graph.Reconcile(context.Background(), wt, graph.FSSource{Root: wt}); err != nil {
+		t.Fatal(err)
+	}
+	out, err := traceCallPath(context.Background(), a, TraceCallPathInput{Symbol: "Gree"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Chains) != 0 {
+		t.Errorf("expected no chains, got %v", out.Chains)
+	}
+	if len(out.Suggestions) == 0 {
+		t.Fatal("expected suggestions for a near-miss symbol")
+	}
+}

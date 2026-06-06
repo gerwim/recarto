@@ -35,22 +35,31 @@ func confLabel(c float64) string {
 // avoid explosion. Edges resolved by dst_node_id are followed directly;
 // unresolved edges fall back to matching dst_name to a node name.
 func (e *Engine) TraceCallPath(ctx context.Context, worktree, symbol, direction string, depth int) ([][]CallNode, error) {
-	return e.TraceCallPathFiltered(ctx, worktree, symbol, direction, depth, 0)
+	chains, _, err := e.TraceCallPathFiltered(ctx, worktree, symbol, direction, depth, 0)
+	return chains, err
 }
 
 // TraceCallPathFiltered is TraceCallPath with an explicit confidence floor:
 // minConf 0 uses the adaptive default (each call site shows its high/medium
 // candidates, or its low ones only when it has nothing better).
-func (e *Engine) TraceCallPathFiltered(ctx context.Context, worktree, symbol, direction string, depth int, minConf float64) ([][]CallNode, error) {
+func (e *Engine) TraceCallPathFiltered(ctx context.Context, worktree, symbol, direction string, depth int, minConf float64) ([][]CallNode, []string, error) {
 	if depth <= 0 {
 		depth = 3
 	}
 	start, err := e.nodeByName(ctx, worktree, symbol)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if start.NodeID == "" {
-		return nil, nil
+		// No exact match: offer lenient candidates (mirrors search_graph's hint)
+		// instead of a silent empty result.
+		var suggestions []string
+		if res, serr := e.SearchGuided(ctx, worktree, symbol, []string{symbol}, "", "", 5); serr == nil {
+			for _, r := range res {
+				suggestions = append(suggestions, r.Name)
+			}
+		}
+		return nil, suggestions, nil
 	}
 	_ = e.led.Incr(ctx, "lifetime", "graph_queries", 1)
 
@@ -99,7 +108,7 @@ func (e *Engine) TraceCallPathFiltered(ctx context.Context, worktree, symbol, di
 		}
 	}
 	walk(start, []CallNode{start}, map[string]bool{start.NodeID: true}, depth)
-	return chains, nil
+	return chains, nil, nil
 }
 
 func (e *Engine) nodeByName(ctx context.Context, worktree, name string) (CallNode, error) {

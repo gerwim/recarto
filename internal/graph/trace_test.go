@@ -102,3 +102,28 @@ func TestTraceCallPathCallees(t *testing.T) {
 		t.Errorf("chains = %v, want one A>B>C", chains)
 	}
 }
+
+func TestTraceSuggestsOnMiss(t *testing.T) {
+	e := newTestEngine(t)
+	ctx := context.Background()
+	src := []byte("package p\nfunc Greet(name string) string { return name }")
+	if err := e.IndexFile(ctx, "/wt", "sample.go", src, 1, int64(len(src))); err != nil {
+		t.Fatal(err)
+	}
+	chains, suggestions, err := e.TraceCallPathFiltered(ctx, "/wt", "Gree", "callees", 3, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(chains) != 0 {
+		t.Errorf("expected no chains for a missed symbol, got %v", chains)
+	}
+	found := false
+	for _, s := range suggestions {
+		if s == "Greet" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected 'Greet' among suggestions, got %v", suggestions)
+	}
+}
