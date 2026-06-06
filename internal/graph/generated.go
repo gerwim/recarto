@@ -85,3 +85,41 @@ func demoteGenerated(in []SearchResult, protect map[string]bool) []SearchResult 
 	}
 	return append(head, tail...)
 }
+
+// containerKinds are declaration kinds that name a scope rather than a navigable
+// unit of code — a C# namespace, a TS internal module. One is re-declared in
+// every file of the scope, so a concept query whose terms land in the scope name
+// (e.g. "execution pipeline" → namespace App.Execution.Pipeline) otherwise floods
+// the page with dozens of identical container rows that crowd out the classes and
+// methods the agent actually wants. They are deduped to one (see symbolKey) and
+// demoted here so concrete symbols always lead; the container still appears, last.
+var containerKinds = map[string]bool{
+	"namespace": true,
+}
+
+// demoteNamespaces stably partitions results so container (namespace) nodes sink
+// below concrete symbols, each group keeping its incoming order. Like
+// demoteGenerated it drops nothing — the container stays findable, just last — so
+// a concept query surfaces real code first without losing the namespace itself.
+func demoteNamespaces(in []SearchResult) []SearchResult {
+	anyContainer := false
+	for i := range in {
+		if containerKinds[in[i].Kind] {
+			anyContainer = true
+			break
+		}
+	}
+	if !anyContainer {
+		return in // no-op: preserve the input slice and its order
+	}
+	head := make([]SearchResult, 0, len(in))
+	var tail []SearchResult
+	for _, r := range in {
+		if containerKinds[r.Kind] {
+			tail = append(tail, r)
+		} else {
+			head = append(head, r)
+		}
+	}
+	return append(head, tail...)
+}

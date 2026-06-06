@@ -65,6 +65,7 @@ SELECT f.path, n.start_line, n.kind, n.qualified_name
 	if err := rows.Err(); err != nil {
 		return SnippetResult{}, nil, err
 	}
+	cands = collapseOwnedConstructors(cands)
 	switch {
 	case len(cands) == 0:
 		return SnippetResult{Found: false}, nil, nil
@@ -74,6 +75,52 @@ SELECT f.path, n.start_line, n.kind, n.qualified_name
 	default:
 		return SnippetResult{Found: false}, cands, nil
 	}
+}
+
+// collapseOwnedConstructors drops a constructor candidate when one of the other
+// candidates is the very type that declares it — i.e. the constructor's qualified
+// name is "<typeQN>.<ctorName>" and a type-like candidate has qualified name
+// "<typeQN>". In C#/Java a type and its constructor share the bare name, so a
+// file-less lookup for the type matched both and bounced the caller with a
+// spurious "ambiguous" prompt; the constructor's source is a subset of the type's
+// and is not a genuine alternative. Real ambiguity — two distinct same-named
+// types — is untouched, since neither type owns the other's constructor.
+func collapseOwnedConstructors(cands []SnippetCandidate) []SnippetCandidate {
+	typeQNs := make(map[string]bool, len(cands))
+	for _, c := range cands {
+		if typeLikeKinds[c.Kind] {
+			typeQNs[c.QualifiedName] = true
+		}
+	}
+	if len(typeQNs) == 0 {
+		return cands
+	}
+	out := cands[:0:0]
+	for _, c := range cands {
+		if c.Kind == "constructor" {
+			if i := lastDot(c.QualifiedName); i >= 0 && typeQNs[c.QualifiedName[:i]] {
+				continue // owned by a type already in the candidate set
+			}
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
+// typeLikeKinds are declaration kinds that own a constructor sharing their name.
+var typeLikeKinds = map[string]bool{
+	"class": true, "struct": true, "record": true,
+	"interface": true, "enum": true, "type": true,
+}
+
+// lastDot returns the index of the final '.' in s, or -1 if there is none.
+func lastDot(s string) int {
+	for i := len(s) - 1; i >= 0; i-- {
+		if s[i] == '.' {
+			return i
+		}
+	}
+	return -1
 }
 
 // Snippet returns the exact source for a symbol (by name or qualified_name) in a

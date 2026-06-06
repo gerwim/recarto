@@ -87,7 +87,7 @@ func (e *Engine) SearchGuided(ctx context.Context, worktree, query string, candi
 	}
 
 	if e.emb == nil {
-		return dedupBySymbol(demoteGenerated(lex, nil), limit), nil
+		return dedupBySymbol(reorderByValue(lex, nil), limit), nil
 	}
 	// Dormant semantic tier (set only under -tags ORT). Best-effort.
 	vec, verr := e.vectorPass(ctx, worktree, query, kind, lang, limit*3)
@@ -126,7 +126,22 @@ func (e *Engine) mergeCandidates(ctx context.Context, worktree string, candidate
 	for _, c := range candidates {
 		protect[strings.ToLower(strings.TrimSpace(c))] = true
 	}
-	return dedupBySymbol(demoteGenerated(fused, protect), limit), nil
+	return dedupBySymbol(reorderByValue(fused, protect), limit), nil
+}
+
+// reorderByValue applies the search-ranking demotions in priority order, sinking
+// less-navigable matches below the implementation an LLM almost always wants:
+//
+//	product code  >  tests  >  generated code  >  namespace containers
+//
+// Each tier is a stable partition (relative order preserved, nothing dropped), so
+// recall is intact and a query whose only matches are tests/generated/namespaces
+// is left untouched. protect holds the agent's exact candidate_symbols, which are
+// never demoted out of the test/generated tiers. The composition order is inside
+// out: demoteTests runs first so tests land above generated; demoteNamespaces runs
+// last so containers settle at the very bottom.
+func reorderByValue(in []SearchResult, protect map[string]bool) []SearchResult {
+	return demoteNamespaces(demoteGenerated(demoteTests(in, protect), protect))
 }
 
 // candidateExactPass returns symbols whose name OR qualified_name equals one of
@@ -208,8 +223,8 @@ SELECT n.id, n.name, n.qualified_name, n.kind, f.language, f.path, n.start_line,
 // tiers folds while distinct same-named symbols survive. With no vector candidates
 // this degrades to a plain lexical dedup.
 func mergeHybrid(lex, vec []SearchResult, limit int) []SearchResult {
-	lex = demoteGenerated(lex, nil)
-	vec = demoteGenerated(vec, nil)
+	lex = reorderByValue(lex, nil)
+	vec = reorderByValue(vec, nil)
 	if len(vec) == 0 {
 		return dedupBySymbol(lex, limit)
 	}
@@ -244,6 +259,13 @@ func mergeHybrid(lex, vec []SearchResult, limit int) []SearchResult {
 // language gives no qualifier (qualified name == bare name); overloads within one
 // type (same qualified name, same file) still fold to one navigable target.
 func symbolKey(r SearchResult) string {
+	// A container (namespace) is one logical scope re-declared once per file. Its
+	// QualifiedName == Name, so it would otherwise fall to the path-keyed branch
+	// and survive as N distinct rows. Key it by name alone so the per-file
+	// declarations fold to a single entry (see containerKinds / demoteNamespaces).
+	if containerKinds[r.Kind] {
+		return "c\x00" + strings.ToLower(r.Name)
+	}
 	if r.QualifiedName != "" && r.QualifiedName != r.Name {
 		return "q\x00" + strings.ToLower(r.QualifiedName)
 	}

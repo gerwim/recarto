@@ -114,6 +114,65 @@ func TestSnippetByNameQualifiedDisambiguates(t *testing.T) {
 	}
 }
 
+// TestSnippetByNameTypePreferredOverOwnConstructor: in C#/Java a type and its
+// constructor share the bare name, so a file-less snippet lookup for the type
+// matched both and bounced the agent with a spurious "ambiguous" disambiguation.
+// The constructor is owned by (nested in) the type, so it is not a real
+// alternative — the lookup resolves directly to the type's source.
+func TestSnippetByNameTypePreferredOverOwnConstructor(t *testing.T) {
+	e := newTestEngine(t)
+	ctx := context.Background()
+	wt := t.TempDir()
+	writeFile(t, wt, "Widget.cs", "namespace App;\n\npublic class Widget\n{\n    public Widget() { }\n\n    public void Run() { }\n}\n")
+	src, _ := FSSource{Root: wt}.Read("Widget.cs")
+	if err := e.IndexFile(ctx, wt, "Widget.cs", src, 1, int64(len(src))); err != nil {
+		t.Fatal(err)
+	}
+	res, cands, err := e.SnippetByName(ctx, wt, "Widget")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Found {
+		t.Fatalf("type should resolve directly over its own constructor, got candidates %v", cands)
+	}
+	if res.QualifiedName != "App.Widget" {
+		t.Fatalf("resolved to %q, want the class App.Widget (not its constructor)", res.QualifiedName)
+	}
+}
+
+// TestSnippetByNameGenuinelyAmbiguousTypesStillBounce guards that the constructor
+// collapse does NOT mask real ambiguity: two distinct same-named types remain a
+// genuine choice the agent must disambiguate.
+func TestSnippetByNameGenuinelyAmbiguousTypesStillBounce(t *testing.T) {
+	e := newTestEngine(t)
+	ctx := context.Background()
+	wt := t.TempDir()
+	a := []byte("namespace A;\n\npublic class Widget\n{\n    public Widget() { }\n}\n")
+	b := []byte("namespace B;\n\npublic class Widget\n{\n    public Widget() { }\n}\n")
+	if err := e.IndexFile(ctx, wt, "A.cs", a, 1, int64(len(a))); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.IndexFile(ctx, wt, "B.cs", b, 1, int64(len(b))); err != nil {
+		t.Fatal(err)
+	}
+	res, cands, err := e.SnippetByName(ctx, wt, "Widget")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Found {
+		t.Fatalf("two distinct Widget types must stay ambiguous, resolved to %q", res.QualifiedName)
+	}
+	// Exactly the two classes survive — both constructors collapse into their type.
+	if len(cands) != 2 {
+		t.Fatalf("want 2 type candidates, got %d: %v", len(cands), cands)
+	}
+	for _, c := range cands {
+		if c.Kind != "class" {
+			t.Errorf("candidate %q is %s, want the class (constructor should have collapsed)", c.QualifiedName, c.Kind)
+		}
+	}
+}
+
 func TestSnippetByNameMiss(t *testing.T) {
 	e := newTestEngine(t)
 	ctx := context.Background()

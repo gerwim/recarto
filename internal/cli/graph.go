@@ -31,17 +31,27 @@ func Graph(ctx context.Context, a *app.App, w io.Writer, args []string) error {
 	switch sub {
 	case "search":
 		var syms, qwords []string
+		searchLimit := 20
+		var searchKind, searchLang string
 		for _, tok := range rest {
-			if s, ok := strings.CutPrefix(tok, "--symbol="); ok {
-				if s != "" {
+			switch {
+			case strings.HasPrefix(tok, "--symbol="):
+				if s := strings.TrimPrefix(tok, "--symbol="); s != "" {
 					syms = append(syms, s)
 				}
-				continue
+			case strings.HasPrefix(tok, "--kind="):
+				searchKind = strings.TrimPrefix(tok, "--kind=")
+			case strings.HasPrefix(tok, "--lang="):
+				searchLang = strings.TrimPrefix(tok, "--lang=")
+			case strings.HasPrefix(tok, "--limit="):
+				if n, err := strconv.Atoi(strings.TrimPrefix(tok, "--limit=")); err == nil && n > 0 {
+					searchLimit = n
+				}
+			default:
+				qwords = append(qwords, tok)
 			}
-			qwords = append(qwords, tok)
 		}
-		const searchLimit = 20
-		res, err := a.Graph.SearchGuided(ctx, wt, strings.Join(qwords, " "), syms, "", "", searchLimit)
+		res, err := a.Graph.SearchGuided(ctx, wt, strings.Join(qwords, " "), syms, searchKind, searchLang, searchLimit)
 		if err != nil {
 			return err
 		}
@@ -206,11 +216,37 @@ func Graph(ctx context.Context, a *app.App, w io.Writer, args []string) error {
 		return nil
 	case "query":
 		spec := graph.QuerySpec{}
-		if len(rest) > 0 {
-			spec.Kind = rest[0]
+		var edgeKind, edgeDir string
+		var names []string
+		for _, tok := range rest {
+			switch {
+			case strings.HasPrefix(tok, "--kind="):
+				spec.Kind = strings.TrimPrefix(tok, "--kind=")
+			case strings.HasPrefix(tok, "--name="):
+				spec.NameLike = strings.TrimPrefix(tok, "--name=")
+			case strings.HasPrefix(tok, "--path="):
+				spec.Path = strings.TrimPrefix(tok, "--path=")
+			case strings.HasPrefix(tok, "--lang="):
+				spec.Language = strings.TrimPrefix(tok, "--lang=")
+			case strings.HasPrefix(tok, "--edge="):
+				edgeKind = strings.TrimPrefix(tok, "--edge=")
+			case strings.HasPrefix(tok, "--edge-dir="):
+				edgeDir = strings.TrimPrefix(tok, "--edge-dir=")
+			case strings.HasPrefix(tok, "--limit="):
+				spec.Limit, _ = strconv.Atoi(strings.TrimPrefix(tok, "--limit="))
+			default:
+				names = append(names, tok)
+			}
 		}
-		if len(rest) > 1 {
-			spec.NameLike = rest[1]
+		// A bare positional is the name to match — the common "find this symbol"
+		// case, and what `query <name>` documents. Without this, the first arg was
+		// silently read as a KIND filter, so `query OperationExecutionMiddleware`
+		// matched nothing and bounced the agent to shell grep. Explicit --name wins.
+		if spec.NameLike == "" && len(names) > 0 {
+			spec.NameLike = names[0]
+		}
+		if edgeKind != "" {
+			spec.Edge = &graph.EdgeFilter{Kind: edgeKind, Direction: edgeDir}
 		}
 		nodes, err := a.Graph.Query(ctx, wt, spec)
 		if err != nil {
@@ -371,7 +407,10 @@ func containsHelpToken(toks []string) bool {
 // are invisible and the agent falls back to shell grep.
 const graphUsage = `recarto graph <sub> — query the code graph
 
-  search <terms…> [--symbol=Name]   concept/identifier search (ranked)
+  search <terms…> [flags]           concept/identifier search (ranked)
+      --symbol=<Name>               candidate identifier you expect (repeatable; sharpens ranking)
+      --kind=<k> --lang=<l>         filter by node kind / language
+      --limit=<n>                   max results (default 20)
   grep <pattern> [flags]            full-text search, each hit with its enclosing symbol
       -r, --regex                   treat pattern as a regular expression (RE2)
       -i, --ignore-case             case-insensitive match
@@ -385,7 +424,10 @@ const graphUsage = `recarto graph <sub> — query the code graph
   annotated <attr>                  symbols carrying an attribute/decorator
   outline <file>                    a file's symbols (kind, signature, line) in order
   arch [scope]                      module/dependency map
-  query <name>                      look up a symbol by name
+  query [name] [flags]              structured lookup; bare name = substring on name/qualified-name
+      --kind=<k> --lang=<l>         filter by node kind / language
+      --path=<p> --limit=<n>        filter by exact file path / cap results
+      --edge=<kind> --edge-dir=in|out  keep only nodes with such an edge (calls, imports, …)
   snippet <symbol> | <file> <symbol>  exact source for a symbol (file optional)
 
 Tip: for precise references to a type, use ` + "`grep -r '\\bName\\b'`" + ` (word boundaries)

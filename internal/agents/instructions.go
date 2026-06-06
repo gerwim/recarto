@@ -30,7 +30,10 @@ per-repo SQLite cache outside the working tree.
 - Query the code graph with ` + "`search_graph` / `get_code_snippet` / `trace_call_path`" + `
   instead of reading whole files. When searching ` + "`search_graph`" + ` by concept, also
   pass ` + "`candidate_symbols`" + ` — the identifier names you expect (e.g. ` + "`AddressLookup`, `Geocode`" + `);
-  the names you supply are what make concept search land.
+  the names you supply are what make concept search land. Results are ranked so the
+  implementation leads: hand-written product code outranks tests, generated code,
+  and namespace/package declarations, so the top hits are usually what you want —
+  ` + "`get_code_snippet`" + ` the first relevant one rather than re-running a shell grep.
 - **Read one symbol, not the file**: ` + "`get_code_snippet`" + ` takes just a ` + "`symbol`" + `
   (the ` + "`file`" + ` is optional) and resolves it by name across the repo — the usual
   next step after a search returns a name, so you needn't know the path. If the

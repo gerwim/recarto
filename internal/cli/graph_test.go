@@ -26,6 +26,35 @@ func TestGraphSearch(t *testing.T) {
 	}
 }
 
+// TestGraphQueryBareNameMatchesName proves a bare positional to `graph query` is
+// treated as the symbol name (substring on name/qualified-name) — what the help
+// documents. Previously the first arg was read as a KIND filter, so querying a
+// real symbol name returned nothing and bounced the agent to shell grep.
+func TestGraphQueryBareNameMatchesName(t *testing.T) {
+	a := newTestApp(t, "main")
+	wt := t.TempDir()
+	a.Git.Worktree = wt
+	os.WriteFile(filepath.Join(wt, "a.go"), []byte("package p\nfunc Authenticate(){}"), 0o644)
+	if err := Index(context.Background(), a, &bytes.Buffer{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := Graph(context.Background(), a, &out, []string{"query", "Authenticate"}); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(out.Bytes(), []byte("Authenticate")) {
+		t.Errorf("graph query <name> should find the symbol, got %q", out.String())
+	}
+	// The --kind flag still constrains: a non-matching kind yields nothing.
+	out.Reset()
+	if err := Graph(context.Background(), a, &out, []string{"query", "Authenticate", "--kind=class"}); err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(out.Bytes(), []byte("Authenticate")) {
+		t.Errorf("graph query --kind=class should exclude the function, got %q", out.String())
+	}
+}
+
 func TestGraphCalleesAnnotated(t *testing.T) {
 	a := newTestApp(t, "main")
 	wt := t.TempDir()
