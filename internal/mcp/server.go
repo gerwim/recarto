@@ -47,7 +47,7 @@ func NewServer(a *app.App) *sdk.Server {
 		"Trace call chains to/from a symbol (direction: callers or callees). Each hop past the root is annotated with `resolution` (self/typed/static/iface/name — how the call was bound) and `confidence` (high/medium/low). Ambiguous low-confidence hops carry the `receiver` expression, appear as sibling branches (the candidate alternatives), and are not expanded further. By default confident hops are shown and low-confidence ones surface only when nothing better exists; set `min_confidence` (0–1) to raise the floor. Trust high/typed/self hops; treat low/name hops as candidates to verify with get_code_snippet.",
 		traceCallPathSchema(), traceCallPath)
 	addTool(s, a, "get_architecture",
-		"Summarize the codebase structure: modules with file and symbol counts.",
+		"Summarize the codebase structure: modules with file/symbol counts and the heaviest inter-module dependencies. The map is budgeted to the highest-signal entries (default 80 each; module_count/dep_count report the full totals, truncated flags a cap); raise `limit` for more or pass `scope` to drill into a subtree.",
 		getArchitecture)
 	addToolSchema(s, a, "query_graph",
 		"Run a structured query over the code graph (node filters + optional edge traversal).",

@@ -118,7 +118,7 @@ func recallMemory(ctx context.Context, a *app.App, in RecallMemoryInput) (Recall
 	}
 	for _, r := range set.Results {
 		v := viewOf(r.Record)
-		v.Score = r.Score
+		v.Score = roundScore(r.Score)
 		v.Caveat = r.Caveat()
 		v.MatchedOn = r.MatchedOn()
 		out.Memories = append(out.Memories, v)
@@ -256,7 +256,7 @@ func searchBugs(ctx context.Context, a *app.App, in SearchBugsInput) (SearchBugs
 	out := SearchBugsOutput{Count: len(results), Bugs: make([]MemoryView, 0, len(results))}
 	for _, r := range results {
 		v := viewOf(r.Record)
-		v.Score = r.Score
+		v.Score = roundScore(r.Score)
 		v.Caveat = r.Caveat()
 		v.MatchedOn = r.MatchedOn()
 		out.Bugs = append(out.Bugs, v)

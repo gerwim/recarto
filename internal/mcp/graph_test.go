@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -150,6 +151,101 @@ func TestSearchGraphCandidateSymbolsAndHint(t *testing.T) {
 	}
 	if miss.Count != 0 || miss.Hint == "" {
 		t.Errorf("expected zero results with a hint, got count=%d hint=%q", miss.Count, miss.Hint)
+	}
+}
+
+// TestBudgetArchitecture covers the pure budgeting helper that bounds the
+// get_architecture payload: it keeps the highest-signal modules (by symbol count)
+// and dependency edges (by reference count), reports the pre-cap totals, and flags
+// truncation — but preserves name ordering of whatever subset it keeps.
+func TestBudgetArchitecture(t *testing.T) {
+	var arch graph.Architecture
+	for i := 0; i < 150; i++ {
+		// Symbols increases with i, so the highest-i modules are the most significant.
+		arch.Modules = append(arch.Modules, graph.Module{
+			Name: fmt.Sprintf("mod%03d", i), Files: 1, Symbols: i,
+		})
+	}
+	for i := 0; i < 200; i++ {
+		arch.Deps = append(arch.Deps, graph.ModuleEdge{
+			From: fmt.Sprintf("a%03d", i), To: "x", Count: i,
+		})
+	}
+
+	mods, deps, totalMods, totalDeps, truncated := budgetArchitecture(arch, 50)
+	if totalMods != 150 || totalDeps != 200 {
+		t.Fatalf("totals = (%d,%d), want (150,200)", totalMods, totalDeps)
+	}
+	if !truncated {
+		t.Fatal("expected truncated=true")
+	}
+	if len(mods) != 50 || len(deps) != 50 {
+		t.Fatalf("kept (%d,%d), want (50,50)", len(mods), len(deps))
+	}
+	// Kept modules must be the 50 highest-symbol ones (i=100..149) — none smaller.
+	for _, m := range mods {
+		if m.Symbols < 100 {
+			t.Errorf("kept low-signal module %+v; should have dropped it", m)
+		}
+	}
+	// Kept deps must be the 50 highest-count ones (count 150..199).
+	for _, d := range deps {
+		if d.Count < 150 {
+			t.Errorf("kept low-signal dep %+v; should have dropped it", d)
+		}
+	}
+	// The kept subset is presented in name order, not significance order.
+	for i := 1; i < len(mods); i++ {
+		if mods[i-1].Name > mods[i].Name {
+			t.Errorf("modules not name-sorted: %q before %q", mods[i-1].Name, mods[i].Name)
+		}
+	}
+
+	// Under the cap: everything kept, nothing truncated.
+	small := graph.Architecture{Modules: arch.Modules[:5], Deps: arch.Deps[:5]}
+	m2, d2, tm, td, trunc2 := budgetArchitecture(small, 50)
+	if trunc2 || len(m2) != 5 || len(d2) != 5 || tm != 5 || td != 5 {
+		t.Errorf("small arch: got trunc=%v mods=%d deps=%d totals=(%d,%d)", trunc2, len(m2), len(d2), tm, td)
+	}
+}
+
+// TestGetArchitectureReportsTotals verifies the handler surfaces pre-cap totals so
+// the agent knows the full size even when the payload is budgeted.
+func TestGetArchitectureReportsTotals(t *testing.T) {
+	a := newTestApp(t, "main")
+	wt := t.TempDir()
+	a.Git.Worktree = wt
+	if err := os.WriteFile(filepath.Join(wt, "a.go"),
+		[]byte("package p\nfunc A(){}\ntype T struct{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := a.Graph.Reconcile(ctx, wt, graph.FSSource{Root: wt}); err != nil {
+		t.Fatal(err)
+	}
+	out, err := getArchitecture(ctx, a, GetArchitectureInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.ModuleCount != len(out.Modules) {
+		t.Errorf("ModuleCount=%d but returned %d modules (should match when under cap)", out.ModuleCount, len(out.Modules))
+	}
+	if out.Truncated {
+		t.Errorf("tiny repo should not be truncated")
+	}
+}
+
+func TestRoundScore(t *testing.T) {
+	cases := map[float64]float64{
+		0.05245901639344262:  0.0525,
+		0.019047619047619046: 0.019,
+		2.0:                  2.0,
+		0:                    0,
+	}
+	for in, want := range cases {
+		if got := roundScore(in); got != want {
+			t.Errorf("roundScore(%v) = %v, want %v", in, got, want)
+		}
 	}
 }
 

@@ -2,6 +2,8 @@ package mcp
 
 import (
 	"context"
+	"math"
+	"sort"
 
 	"git.gerwim.nl/gerwim/recarto/internal/app"
 	"git.gerwim.nl/gerwim/recarto/internal/graph"
@@ -42,6 +44,12 @@ type SearchGraphOutput struct {
 // found nothing and supplied none. No server-side model is involved.
 const weakResultHint = "No matches. Retry search_graph with candidate_symbols set to the identifier names you'd expect for this concept (e.g. AddressLookup, Geocode) — any form works (PascalCase, interface-prefixed, snake_case, or plain words)."
 
+// roundScore trims a relevance score to 4 decimal places for the wire. Scores are
+// an ordinal ranking hint, and the ranking is already fixed at full precision
+// before projection, so this never reorders results — it only spares the LLM the
+// ~15 trailing digits of float64 noise (0.05245901639344262 → 0.0525) on every hit.
+func roundScore(s float64) float64 { return math.Round(s*1e4) / 1e4 }
+
 func searchGraph(ctx context.Context, a *app.App, in SearchGraphInput) (SearchGraphOutput, error) {
 	ensureFresh(ctx, a)
 	res, err := a.Graph.SearchGuided(ctx, a.Git.Worktree, in.Query, in.CandidateSymbols, in.Kind, in.Language, in.Limit)
@@ -52,7 +60,7 @@ func searchGraph(ctx context.Context, a *app.App, in SearchGraphInput) (SearchGr
 	for _, r := range res {
 		out.Results = append(out.Results, GraphSymbol{
 			Name: r.Name, QualifiedName: r.QualifiedName, Kind: r.Kind,
-			Path: r.Path, Signature: r.Signature, Line: r.Line, Score: r.Score,
+			Path: r.Path, Signature: r.Signature, Line: r.Line, Score: roundScore(r.Score),
 		})
 	}
 	if out.Count == 0 && len(in.CandidateSymbols) == 0 {
@@ -112,7 +120,8 @@ func traceCallPath(ctx context.Context, a *app.App, in TraceCallPathInput) (Trac
 // --- get_architecture ---
 
 type GetArchitectureInput struct {
-	Scope string `json:"scope,omitempty" jsonschema:"restrict to paths under this prefix"`
+	Scope string `json:"scope,omitempty" jsonschema:"restrict to paths under this prefix — the drill-down path for detail a budgeted top-level map omits"`
+	Limit int    `json:"limit,omitempty" jsonschema:"max modules and max dependency edges to return (0 = default 80). The map keeps the highest-signal entries (largest modules, heaviest dependencies); module_count/dep_count report the full pre-cap totals."`
 }
 type ArchModule struct {
 	Name    string `json:"name"`
@@ -125,8 +134,53 @@ type ModuleDep struct {
 	Count int    `json:"count"`
 }
 type GetArchitectureOutput struct {
-	Modules []ArchModule `json:"modules"`
-	Deps    []ModuleDep  `json:"deps,omitempty"`
+	Modules     []ArchModule `json:"modules"`
+	Deps        []ModuleDep  `json:"deps,omitempty"`
+	ModuleCount int          `json:"module_count"`        // total modules before the limit cap
+	DepCount    int          `json:"dep_count"`           // total dependency edges before the limit cap
+	Truncated   bool         `json:"truncated,omitempty"` // true when the cap dropped lower-signal entries
+}
+
+// defaultArchLimit caps both the module list and the dependency-edge list of an
+// unscoped get_architecture call. On a large monorepo the dependency edges grow
+// near-quadratically with module count (a 331-module repo yielded 4,404 edges,
+// ~90k tokens) — almost all of it an incidental long tail of single-reference
+// edges. Bounding to the highest-signal entries keeps orientation intact at a
+// fraction of the tokens; `scope` recovers any detail the cap omits.
+const defaultArchLimit = 80
+
+// budgetArchitecture bounds an Architecture to at most `limit` modules and `limit`
+// dependency edges, selecting the highest-signal entries — modules by symbol count,
+// edges by reference count — then restoring name order within the kept subset so
+// output ordering is stable. It returns the kept slices, the pre-cap totals, and
+// whether anything was dropped.
+func budgetArchitecture(arch graph.Architecture, limit int) (mods []graph.Module, deps []graph.ModuleEdge, totalMods, totalDeps int, truncated bool) {
+	if limit <= 0 {
+		limit = defaultArchLimit
+	}
+	totalMods, totalDeps = len(arch.Modules), len(arch.Deps)
+
+	mods = append(mods, arch.Modules...)
+	if len(mods) > limit {
+		sort.SliceStable(mods, func(i, j int) bool { return mods[i].Symbols > mods[j].Symbols })
+		mods = mods[:limit]
+		truncated = true
+	}
+	sort.SliceStable(mods, func(i, j int) bool { return mods[i].Name < mods[j].Name })
+
+	deps = append(deps, arch.Deps...)
+	if len(deps) > limit {
+		sort.SliceStable(deps, func(i, j int) bool { return deps[i].Count > deps[j].Count })
+		deps = deps[:limit]
+		truncated = true
+	}
+	sort.SliceStable(deps, func(i, j int) bool {
+		if deps[i].From != deps[j].From {
+			return deps[i].From < deps[j].From
+		}
+		return deps[i].To < deps[j].To
+	})
+	return mods, deps, totalMods, totalDeps, truncated
 }
 
 func getArchitecture(ctx context.Context, a *app.App, in GetArchitectureInput) (GetArchitectureOutput, error) {
@@ -135,11 +189,15 @@ func getArchitecture(ctx context.Context, a *app.App, in GetArchitectureInput) (
 	if err != nil {
 		return GetArchitectureOutput{}, err
 	}
-	out := GetArchitectureOutput{Modules: make([]ArchModule, 0, len(arch.Modules))}
-	for _, m := range arch.Modules {
+	mods, deps, totalMods, totalDeps, truncated := budgetArchitecture(arch, in.Limit)
+	out := GetArchitectureOutput{
+		Modules:     make([]ArchModule, 0, len(mods)),
+		ModuleCount: totalMods, DepCount: totalDeps, Truncated: truncated,
+	}
+	for _, m := range mods {
 		out.Modules = append(out.Modules, ArchModule{Name: m.Name, Files: m.Files, Symbols: m.Symbols})
 	}
-	for _, d := range arch.Deps {
+	for _, d := range deps {
 		out.Deps = append(out.Deps, ModuleDep{From: d.From, To: d.To, Count: d.Count})
 	}
 	return out, nil
