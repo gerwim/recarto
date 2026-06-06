@@ -27,6 +27,30 @@ func TestSearchGraphHandler(t *testing.T) {
 	}
 }
 
+func TestSearchGraphReturnsSignature(t *testing.T) {
+	a := newTestApp(t, "main")
+	wt := t.TempDir()
+	a.Git.Worktree = wt
+	os.WriteFile(filepath.Join(wt, "a.go"),
+		[]byte("package p\nfunc Greet(name string) string { return name }"), 0o644)
+	if err := a.Graph.Reconcile(context.Background(), wt, graph.FSSource{Root: wt}); err != nil {
+		t.Fatal(err)
+	}
+	out, err := searchGraph(context.Background(), a, SearchGraphInput{Query: "Greet"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, r := range out.Results {
+		if r.Name == "Greet" && strings.Contains(r.Signature, "func Greet(") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("no result carried the Greet signature: %+v", out.Results)
+	}
+}
+
 // TestGraphHandlersMapping covers the projection/mapping logic of the other four
 // graph tools (trace/architecture/query/snippet), which the engine tests don't.
 func TestGraphHandlersMapping(t *testing.T) {

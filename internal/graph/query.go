@@ -29,6 +29,7 @@ type QueryNode struct {
 	QualifiedName string
 	Kind          string
 	Path          string
+	Signature     string
 	Line          int
 }
 
@@ -40,7 +41,7 @@ func (e *Engine) Query(ctx context.Context, worktree string, spec QuerySpec) ([]
 	}
 	var b strings.Builder
 	b.WriteString(`
-SELECT n.id, n.name, n.qualified_name, n.kind, f.path, n.start_line
+SELECT n.id, n.name, n.qualified_name, n.kind, f.path, n.start_line, n.signature
   FROM nodes n JOIN files f ON f.id = n.file_id
  WHERE f.worktree = ?`)
 	args := []any{worktree}
@@ -80,7 +81,7 @@ SELECT n.id, n.name, n.qualified_name, n.kind, f.path, n.start_line
 	var out []QueryNode
 	for rows.Next() {
 		var n QueryNode
-		if err := rows.Scan(&n.NodeID, &n.Name, &n.QualifiedName, &n.Kind, &n.Path, &n.Line); err != nil {
+		if err := rows.Scan(&n.NodeID, &n.Name, &n.QualifiedName, &n.Kind, &n.Path, &n.Line, &n.Signature); err != nil {
 			return nil, err
 		}
 		out = append(out, n)

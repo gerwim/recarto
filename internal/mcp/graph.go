@@ -28,6 +28,7 @@ type GraphSymbol struct {
 	QualifiedName string  `json:"qualified_name"`
 	Kind          string  `json:"kind"`
 	Path          string  `json:"path"`
+	Signature     string  `json:"signature,omitempty"`
 	Line          int     `json:"line"`
 	Score         float64 `json:"score,omitempty"`
 }
@@ -51,7 +52,7 @@ func searchGraph(ctx context.Context, a *app.App, in SearchGraphInput) (SearchGr
 	for _, r := range res {
 		out.Results = append(out.Results, GraphSymbol{
 			Name: r.Name, QualifiedName: r.QualifiedName, Kind: r.Kind,
-			Path: r.Path, Line: r.Line, Score: r.Score,
+			Path: r.Path, Signature: r.Signature, Line: r.Line, Score: r.Score,
 		})
 	}
 	if out.Count == 0 && len(in.CandidateSymbols) == 0 {
@@ -175,7 +176,7 @@ func queryGraph(ctx context.Context, a *app.App, in QueryGraphInput) (QueryGraph
 	out := QueryGraphOutput{Count: len(nodes), Nodes: make([]GraphSymbol, 0, len(nodes))}
 	for _, n := range nodes {
 		out.Nodes = append(out.Nodes, GraphSymbol{
-			Name: n.Name, QualifiedName: n.QualifiedName, Kind: n.Kind, Path: n.Path, Line: n.Line,
+			Name: n.Name, QualifiedName: n.QualifiedName, Kind: n.Kind, Path: n.Path, Signature: n.Signature, Line: n.Line,
 		})
 	}
 	return out, nil
