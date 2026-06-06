@@ -228,3 +228,20 @@ func TestGetAndListMemory(t *testing.T) {
 		t.Errorf("list_memory(kind=decision) = %+v", list)
 	}
 }
+
+func TestForgetMemoryHandler(t *testing.T) {
+	a := newTestApp(t, "main")
+	ctx := context.Background()
+	rec, err := recordMemory(ctx, a, RecordMemoryInput{Kind: "learning", Body: "temp"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := forgetMemory(ctx, a, ForgetMemoryInput{ID: rec.ID, Reason: "test"})
+	if err != nil || !out.Forgotten {
+		t.Fatalf("forgetMemory = %+v, %v; want Forgotten=true", out, err)
+	}
+	miss, _ := forgetMemory(ctx, a, ForgetMemoryInput{ID: "nope"})
+	if miss.Forgotten {
+		t.Error("unknown id reported as forgotten")
+	}
+}

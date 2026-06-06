@@ -304,3 +304,22 @@ func listMemory(ctx context.Context, a *app.App, in ListMemoryInput) (ListMemory
 	}
 	return out, nil
 }
+
+// ForgetMemoryInput is the argument to the forget_memory tool.
+type ForgetMemoryInput struct {
+	ID     string `json:"id" jsonschema:"id of the memory to delete"`
+	Reason string `json:"reason,omitempty" jsonschema:"why it is being forgotten (advisory; not stored)"`
+}
+
+// ForgetMemoryOutput reports whether a memory was deleted.
+type ForgetMemoryOutput struct {
+	Forgotten bool `json:"forgotten"`
+}
+
+func forgetMemory(ctx context.Context, a *app.App, in ForgetMemoryInput) (ForgetMemoryOutput, error) {
+	ok, err := a.Engine.Forget(ctx, in.ID, in.Reason)
+	if err != nil {
+		return ForgetMemoryOutput{}, err
+	}
+	return ForgetMemoryOutput{Forgotten: ok}, nil
+}

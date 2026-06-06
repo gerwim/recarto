@@ -37,6 +37,9 @@ func NewServer(a *app.App) *sdk.Server {
 	addTool(s, a, "complete_todo",
 		"Mark a todo memory done (active → done) so it stops surfacing. No-op if the id is not an active todo.",
 		completeTodo)
+	addTool(s, a, "forget_memory",
+		"Delete a memory recorded in error (hard delete; the memory is gone). No-op if the id is unknown. To replace rather than remove, record a new memory with supersedes_id.",
+		forgetMemory)
 	addTool(s, a, "search_graph",
 		"Search the code graph for symbols (functions, methods, classes, types). Pass `query` as the concept in plain words; when searching by concept, also pass `candidate_symbols` — the identifier names you expect to exist (e.g. AddressLookup, Geocode). The names you supply are what make concept search land; any form works (PascalCase, interface-prefixed, snake_case, or plain words).",
 		searchGraph)
