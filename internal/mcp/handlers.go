@@ -23,8 +23,9 @@ type MemoryView struct {
 	Branch             string  `json:"branch,omitempty"`
 	Pinned             bool    `json:"pinned,omitempty"`
 	ReinforcementCount int     `json:"reinforcement_count,omitempty"`
-	Score              float64 `json:"score,omitempty"`
-	Caveat             string  `json:"caveat,omitempty"`
+	Score              float64  `json:"score,omitempty"`
+	Caveat             string   `json:"caveat,omitempty"`
+	MatchedOn          []string `json:"matched_on,omitempty"`
 }
 
 // RecordMemoryInput are the arguments to the record_memory tool. Fields without
@@ -85,12 +86,15 @@ type RecallMemoryInput struct {
 	Kind        string   `json:"kind,omitempty" jsonschema:"restrict to a single kind"`
 	Limit       int      `json:"limit,omitempty" jsonschema:"max candidates to consider"`
 	TokenBudget int      `json:"token_budget,omitempty" jsonschema:"token budget for the returned set"`
+	MinScore    float64  `json:"min_score,omitempty" jsonschema:"drop candidates scoring below this (0-1)"`
 }
 
 // RecallMemoryOutput is the result of the recall_memory tool.
 type RecallMemoryOutput struct {
-	Count    int          `json:"count"`
-	Memories []MemoryView `json:"memories"`
+	Count      int          `json:"count"`
+	Memories   []MemoryView `json:"memories"`
+	Truncated  bool         `json:"truncated"`
+	BudgetUsed int          `json:"budget_used"`
 }
 
 func recallMemory(ctx context.Context, a *app.App, in RecallMemoryInput) (RecallMemoryOutput, error) {
@@ -103,16 +107,20 @@ func recallMemory(ctx context.Context, a *app.App, in RecallMemoryInput) (Recall
 		Worktree:    a.Git.Worktree,
 		Limit:       in.Limit,
 		TokenBudget: in.TokenBudget,
+		MinScore:    in.MinScore,
 	})
 	if err != nil {
 		return RecallMemoryOutput{}, err
 	}
-	results := set.Results
-	out := RecallMemoryOutput{Count: len(results), Memories: make([]MemoryView, 0, len(results))}
-	for _, r := range results {
+	out := RecallMemoryOutput{
+		Count: len(set.Results), Memories: make([]MemoryView, 0, len(set.Results)),
+		Truncated: set.Truncated, BudgetUsed: set.TokensUsed,
+	}
+	for _, r := range set.Results {
 		v := viewOf(r.Record)
 		v.Score = r.Score
 		v.Caveat = r.Caveat()
+		v.MatchedOn = r.MatchedOn()
 		out.Memories = append(out.Memories, v)
 	}
 	return out, nil
@@ -250,6 +258,7 @@ func searchBugs(ctx context.Context, a *app.App, in SearchBugsInput) (SearchBugs
 		v := viewOf(r.Record)
 		v.Score = r.Score
 		v.Caveat = r.Caveat()
+		v.MatchedOn = r.MatchedOn()
 		out.Bugs = append(out.Bugs, v)
 	}
 	return out, nil

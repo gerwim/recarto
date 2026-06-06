@@ -115,6 +115,19 @@ func TestRecallMemoryHandler(t *testing.T) {
 	}
 }
 
+func TestRecallMemoryExposesMetadata(t *testing.T) {
+	a := newTestApp(t, "main")
+	ctx := context.Background()
+	_, _ = recordMemory(ctx, a, RecordMemoryInput{Kind: "learning", Body: "alpha beta gamma", Files: []string{"x.go"}})
+	out, err := recallMemory(ctx, a, RecallMemoryInput{TaskHint: "alpha beta gamma", Files: []string{"x.go"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Count == 0 || len(out.Memories[0].MatchedOn) == 0 {
+		t.Fatalf("expected matched_on populated, got %+v", out.Memories)
+	}
+}
+
 func TestRecordBugThenSearch(t *testing.T) {
 	a := newTestApp(t, "main")
 	ctx := context.Background()
