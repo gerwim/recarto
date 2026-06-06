@@ -23,6 +23,11 @@ per-repo SQLite cache outside the working tree.
 
 - At session start Recarto injects the most relevant memories for this branch.
 - **Record** knowledge with ` + "`record_memory`" + ` and bug fixes with ` + "`record_bug`" + `.
+- **Anchor** each memory to the files/symbols it concerns (the ` + "`record_memory`" + ` refs):
+  an anchored bug, do-not-repeat or decision resurfaces automatically the moment you
+  read or edit that code — just-in-time, costing no tokens until it is relevant, and
+  shown only once per session. Guidance with no refs only appears in the budgeted
+  session-start tier, so anchor anything you want to fire at the point of change.
 - **Recall** with ` + "`recall_memory`" + ` and ` + "`search_bugs`" + ` before changing code.
 - **Track open work** as a ` + "`todo`" + ` memory (` + "`record_memory`" + ` with kind ` + "`todo`" + `): it
   resurfaces at session start and when you touch its referenced files. Close it with
@@ -34,9 +39,14 @@ per-repo SQLite cache outside the working tree.
   implementation leads: hand-written product code outranks tests, generated code,
   and namespace/package declarations, so the top hits are usually what you want —
   ` + "`get_code_snippet`" + ` the first relevant one rather than re-running a shell grep.
+  Every list result (search/query/outline/impls/annotated) identifies a symbol by
+  its ` + "`qualified_name`" + ` — the precise, overload-safe form the symbol-taking tools
+  accept; its last segment is the short name, so the redundant ` + "`name`" + ` field is
+  omitted when derivable. Read ` + "`qualified_name`" + ` and feed it straight back to
+  ` + "`get_code_snippet`/`trace_call_path`/`find_*`" + `; don't expect a separate ` + "`name`" + `.
 - **Read one symbol, not the file**: ` + "`get_code_snippet`" + ` takes just a ` + "`symbol`" + `
   (the ` + "`file`" + ` is optional) and resolves it by name across the repo — the usual
-  next step after a search returns a name, so you needn't know the path. It accepts a
+  next step after a search returns a ` + "`qualified_name`" + `, so you needn't know the path. It accepts a
   bare name, a fully-qualified name, or a ` + "`Type.Method`" + ` suffix (e.g.
   ` + "`DefaultRequestExecutor.ExecuteAsync`" + `) — the exact identifier form
   ` + "`trace_call_path`/`callers`/`callees`" + ` print, so a name you copied from a trace
@@ -52,7 +62,9 @@ per-repo SQLite cache outside the working tree.
 - **Outline a file** with ` + "`get_file_outline`" + ` to see its symbols (kinds, names,
   signatures, line ranges) in source order instead of reading the whole file; then
   ` + "`get_code_snippet`" + ` the one you need. Prefer this over opening a large file to
-  find your way around it.
+  find your way around it. If you do read a large indexed file whole, Recarto emits a
+  one-time nudge with its symbol count — treat that whole-file read as the expensive
+  path and switch to ` + "`get_file_outline`/`get_code_snippet`" + ` for the rest of that file.
 - **Grep without leaving the graph** with ` + "`search_content`" + ` for arbitrary text
   (string literals, error messages, config keys, TODOs). It searches the *whole*
   worktree honoring ` + "`.gitignore`" + ` — not just parsed code but config, build, docs

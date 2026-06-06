@@ -2,7 +2,6 @@ package memory
 
 import (
 	"context"
-	"sort"
 
 	"git.gerwim.nl/gerwim/recarto/internal/store"
 )
@@ -64,47 +63,5 @@ func (e *Engine) ActiveTodos(ctx context.Context, branch string, limit int) ([]*
 // just-in-time todo surfacing in the read/edit hooks: a todo anchored to a
 // file/symbol reappears the moment that code is touched (mirrors BugsForCode).
 func (e *Engine) TodosForCode(ctx context.Context, branch string, files, symbols []string) ([]*Record, error) {
-	type qref struct{ t, v string }
-	var qrefs []qref
-	for _, f := range files {
-		qrefs = append(qrefs, qref{string(RefFile), f})
-	}
-	for _, s := range symbols {
-		qrefs = append(qrefs, qref{string(RefSymbol), s})
-	}
-	if len(qrefs) == 0 {
-		return nil, nil
-	}
-	idset := map[string]bool{}
-	for _, qr := range qrefs {
-		rows, err := e.st.DB.QueryContext(ctx,
-			`SELECT m.id FROM memory_refs r
-			   JOIN memories m ON m.id = r.memory_id
-			  WHERE r.ref_type=? AND r.ref_value=?
-			    AND m.kind='todo' AND m.status='active'
-			    AND (m.branch IS NULL OR m.branch=?)`,
-			qr.t, qr.v, branch)
-		if err != nil {
-			return nil, err
-		}
-		for rows.Next() {
-			var id string
-			if err := rows.Scan(&id); err != nil {
-				rows.Close()
-				return nil, err
-			}
-			idset[id] = true
-		}
-		if err := rows.Err(); err != nil {
-			rows.Close()
-			return nil, err
-		}
-		rows.Close()
-	}
-	recs, err := e.loadByIDs(ctx, idset)
-	if err != nil {
-		return nil, err
-	}
-	sort.Slice(recs, func(i, j int) bool { return recs[i].UpdatedAt > recs[j].UpdatedAt })
-	return recs, nil
+	return e.memoriesForCodeByKinds(ctx, branch, []Kind{KindTodo}, files, symbols)
 }

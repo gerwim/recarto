@@ -45,6 +45,39 @@ func TestAugmentInjectsSearchContext(t *testing.T) {
 	}
 }
 
+// TestAugmentSkipsFileGlobNoise guards the glob-noise fix: a Glob pattern like
+// "*.cs" is a path query, not a symbol query. Feeding its literal stem ("cs") to
+// symbol search injects irrelevant matches (e.g. a function named cs in a
+// minified bundle). The augment hook must inject nothing for a stemless file
+// glob, while still injecting for a real identifier search.
+func TestAugmentSkipsFileGlobNoise(t *testing.T) {
+	a := newTestApp(t, "main")
+	wt := t.TempDir()
+	a.Git.Worktree = wt
+	os.WriteFile(filepath.Join(wt, "a.go"), []byte("package p\nfunc cs(){}\nfunc Processor(){}"), 0o644)
+	pe := `{"session_id":"s1","tool_input":{"file_path":"` + filepath.Join(wt, "a.go") + `"}}`
+	PostEdit(context.Background(), a, strings.NewReader(pe), &bytes.Buffer{})
+
+	var globOut bytes.Buffer
+	glob := `{"session_id":"s1","tool_input":{"pattern":"*.cs"}}`
+	if err := Augment(context.Background(), a, strings.NewReader(glob), &globOut); err != nil {
+		t.Fatal(err)
+	}
+	if globOut.Len() != 0 {
+		t.Errorf("file-glob augment must inject nothing, got: %q", globOut.String())
+	}
+
+	// Regression guard: a genuine identifier search still injects its symbol.
+	var idOut bytes.Buffer
+	id := `{"session_id":"s2","tool_input":{"pattern":"Processor"}}`
+	if err := Augment(context.Background(), a, strings.NewReader(id), &idOut); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(idOut.String(), "Processor") {
+		t.Errorf("identifier augment should still inject the symbol, got: %q", idOut.String())
+	}
+}
+
 func TestPostEditSurfacesBugForEditedFile(t *testing.T) {
 	a := newTestApp(t, "main")
 	wt := t.TempDir()

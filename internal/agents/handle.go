@@ -87,7 +87,50 @@ func handleSessionStart(ctx context.Context, a *app.App, ev Event) (Result, erro
 	// Orientation map + recent bugs are best-effort tiers; failure omits the tier.
 	arch, _ := a.Graph.Architecture(ctx, a.Git.Worktree, "")
 	bugs, _ := a.Engine.RecentBugs(ctx, a.Git.Branch, recentBugLimit)
-	return Result{Context: formatSessionContext(results, arch, bugs, budget)}, nil
+	out, emitted := formatSessionContext(results, arch, bugs, budget)
+	// Mark every memory rendered into this block as surfaced for the session, so the
+	// just-in-time read/edit hooks won't re-inject a guardrail/bug/todo the agent can
+	// already see here. Memories dropped under budget stay unmarked and still surface
+	// when their code is touched.
+	markSurfaced(ctx, a, ev.SessionID, emitted)
+	return Result{Context: out}, nil
+}
+
+// markSurfaced records each memory id as surfaced for the session, mirroring the
+// per-id key dedupSurfaced consults so a later just-in-time hook treats them as
+// already shown. A no-op without a session (matching dedupSurfaced's passthrough).
+func markSurfaced(ctx context.Context, a *app.App, sessionID string, ids []string) {
+	if sessionID == "" {
+		return
+	}
+	scope := "session:" + sessionID
+	for _, id := range ids {
+		_ = a.Ledger.Incr(ctx, scope, "surfaced:"+id, 1)
+	}
+}
+
+// dedupSurfaced filters recs to those not yet surfaced in this session, marking the
+// returned ones as surfaced. A file/symbol-anchored memory re-found on every read or
+// edit of the same code would otherwise re-inject a block already sitting in the
+// transcript — pure token waste; this keeps each memory's just-in-time surfacing to
+// once per session. It is keyed by memory id, so a memory anchored to several files
+// surfaces at most once regardless of which file triggers it. With no session to
+// scope to it is a passthrough (mirrors the augment dedup).
+func dedupSurfaced(ctx context.Context, a *app.App, sessionID string, recs []*memory.Record) []*memory.Record {
+	if sessionID == "" || len(recs) == 0 {
+		return recs
+	}
+	scope := "session:" + sessionID
+	out := make([]*memory.Record, 0, len(recs))
+	for _, r := range recs {
+		metric := "surfaced:" + r.ID
+		if n, err := a.Ledger.Get(ctx, scope, metric); err == nil && n > 0 {
+			continue
+		}
+		_ = a.Ledger.Incr(ctx, scope, metric, 1)
+		out = append(out, r)
+	}
+	return out
 }
 
 // handlePostRead logs the read to the ledger and warns (non-blocking) when the same
@@ -116,11 +159,33 @@ func handlePostRead(ctx context.Context, a *app.App, ev Event) (Result, error) {
 			"Rely on the earlier read instead of reading it again.", file, n, tokens))
 	}
 	rel := memory.RelFileRef(a.Git.Worktree, file)
-	if found, err := a.Engine.BugsForCode(ctx, a.Git.Branch, []string{rel}, nil); err == nil && len(found) > 0 {
-		msgs = append(msgs, formatBugWarnings(rel, found))
+	// First whole-file read of a large, graph-indexed file: nudge toward the cheaper
+	// navigation tools. Whole-file reads of big files are the dominant token sink, and
+	// the graph offers a structural alternative only when the file actually has symbols.
+	// Gated to the first read (n == 1) because a repeat already gets the stronger
+	// "rely on the earlier read" warning above — so this fires at most once per file.
+	if n == 1 && tokens >= int64(largeReadThreshold()) {
+		if syms, err := a.Graph.Outline(ctx, a.Git.Worktree, rel); err == nil && len(syms) > 0 {
+			_ = a.Ledger.Incr(ctx, "lifetime", "large_reads_nudged", 1)
+			msgs = append(msgs, fmt.Sprintf("Recarto: %s is large (~%d tokens, %d symbols indexed). "+
+				"Next time use get_file_outline for its structure or get_code_snippet to read one symbol, "+
+				"instead of reading the whole file.", rel, tokens, len(syms)))
+		}
 	}
-	if found, err := a.Engine.TodosForCode(ctx, a.Git.Branch, []string{rel}, nil); err == nil && len(found) > 0 {
-		msgs = append(msgs, formatTodoReminders(rel, found))
+	if found, err := a.Engine.BugsForCode(ctx, a.Git.Branch, []string{rel}, nil); err == nil {
+		if found = dedupSurfaced(ctx, a, ev.SessionID, found); len(found) > 0 {
+			msgs = append(msgs, formatBugWarnings(rel, found))
+		}
+	}
+	if found, err := a.Engine.GuidanceForCode(ctx, a.Git.Branch, []string{rel}, nil); err == nil {
+		if found = dedupSurfaced(ctx, a, ev.SessionID, found); len(found) > 0 {
+			msgs = append(msgs, formatGuidance(rel, found))
+		}
+	}
+	if found, err := a.Engine.TodosForCode(ctx, a.Git.Branch, []string{rel}, nil); err == nil {
+		if found = dedupSurfaced(ctx, a, ev.SessionID, found); len(found) > 0 {
+			msgs = append(msgs, formatTodoReminders(rel, found))
+		}
 	}
 	if len(msgs) == 0 {
 		return Result{}, nil
@@ -144,17 +209,26 @@ func handlePostEdit(ctx context.Context, a *app.App, ev Event) (Result, error) {
 	rel = filepath.ToSlash(rel)
 
 	var res Result
-	// Surface any prior bug tied to this file before re-indexing (best-effort).
-	// This matches stored refs by path and does not require the file on disk.
-	if found, berr := a.Engine.BugsForCode(ctx, a.Git.Branch, []string{rel}, nil); berr == nil && len(found) > 0 {
-		res.Context = formatBugWarnings(rel, found)
-	}
-	if found, berr := a.Engine.TodosForCode(ctx, a.Git.Branch, []string{rel}, nil); berr == nil && len(found) > 0 {
-		if res.Context != "" {
-			res.Context += "\n"
+	// Surface any prior bug/guidance/todo tied to this file before re-indexing
+	// (best-effort). This matches stored refs by path and does not require the file
+	// on disk. Each is deduped per session so repeated edits don't re-inject.
+	var msgs []string
+	if found, berr := a.Engine.BugsForCode(ctx, a.Git.Branch, []string{rel}, nil); berr == nil {
+		if found = dedupSurfaced(ctx, a, ev.SessionID, found); len(found) > 0 {
+			msgs = append(msgs, formatBugWarnings(rel, found))
 		}
-		res.Context += formatTodoReminders(rel, found)
 	}
+	if found, berr := a.Engine.GuidanceForCode(ctx, a.Git.Branch, []string{rel}, nil); berr == nil {
+		if found = dedupSurfaced(ctx, a, ev.SessionID, found); len(found) > 0 {
+			msgs = append(msgs, formatGuidance(rel, found))
+		}
+	}
+	if found, berr := a.Engine.TodosForCode(ctx, a.Git.Branch, []string{rel}, nil); berr == nil {
+		if found = dedupSurfaced(ctx, a, ev.SessionID, found); len(found) > 0 {
+			msgs = append(msgs, formatTodoReminders(rel, found))
+		}
+	}
+	res.Context = strings.Join(msgs, "\n")
 	content, err := os.ReadFile(abs)
 	if err != nil {
 		return res, nil // file vanished between edit and hook; ignore
@@ -177,8 +251,31 @@ func handleAugment(ctx context.Context, a *app.App, ev Event) (Result, error) {
 		return Result{}, nil
 	}
 
+	// Session-scoped dedup: re-running the same Grep/Glob pattern would re-inject
+	// a symbol/bug block already sitting earlier in the transcript — pure token
+	// waste. Suppress the repeat (mirrors the repeated-read path) and nudge the
+	// agent to rely on the earlier injection instead.
+	scope := "session:" + ev.SessionID
+	metric := "augment:" + pattern
+	if ev.SessionID != "" {
+		if n, err := a.Ledger.Get(ctx, scope, metric); err == nil && n > 0 {
+			_ = a.Ledger.Incr(ctx, "lifetime", "repeated_augments_blocked", 1)
+			return Result{Context: fmt.Sprintf("You already searched %q this session — the matching symbols/bugs were surfaced earlier. "+
+				"Rely on that injection instead of re-searching.", pattern)}, nil
+		}
+	}
+
+	// A Glob pattern (e.g. "*.cs") is a path query, not a symbol query: searching
+	// symbols for its literal stem injects irrelevant matches (minified-bundle
+	// functions named "cs", etc.). Reduce file globs to their identifier stem and
+	// skip injection entirely for stemless ones; plain Grep terms pass through.
+	term, ok := augmentSearchTerm(pattern)
+	if !ok {
+		return Result{}, nil
+	}
+
 	var b strings.Builder
-	if res, err := a.Graph.Search(ctx, a.Git.Worktree, pattern, "", "", 8); err == nil && len(res) > 0 {
+	if res, err := a.Graph.Search(ctx, a.Git.Worktree, term, "", "", 8); err == nil && len(res) > 0 {
 		b.WriteString("Recarto code graph — symbols matching your search:\n")
 		for _, r := range res {
 			fmt.Fprintf(&b, "- [%s] %s  %s:%d\n", r.Kind, r.QualifiedName, r.Path, r.Line)
@@ -187,11 +284,25 @@ func handleAugment(ctx context.Context, a *app.App, ev Event) (Result, error) {
 	}
 
 	if set, err := a.Engine.Recall(ctx, memory.RecallQuery{
-		TaskHint: pattern, Kind: memory.KindBug, Branch: a.Git.Branch, Worktree: a.Git.Worktree, Limit: 5,
+		TaskHint: term, Kind: memory.KindBug, Branch: a.Git.Branch, Worktree: a.Git.Worktree, Limit: 5,
 	}); err == nil {
+		// Drop bugs already surfaced this session — at session-start, on a read/edit,
+		// or by an earlier search — so the same bug block is never injected twice
+		// (pure token waste). dedupSurfaced also marks the survivors, so a later
+		// read/edit of the same code stays quiet about a bug this search just showed.
+		var bugRecs []*memory.Record
+		for _, r := range set.Results {
+			if r.Record.Kind == memory.KindBug { // recall always includes pinned do_not_repeat
+				bugRecs = append(bugRecs, r.Record)
+			}
+		}
+		fresh := make(map[string]bool, len(bugRecs))
+		for _, r := range dedupSurfaced(ctx, a, ev.SessionID, bugRecs) {
+			fresh[r.ID] = true
+		}
 		var bugLines []string
 		for _, r := range set.Results {
-			if r.Record.Kind != memory.KindBug { // recall always includes pinned do_not_repeat
+			if r.Record.Kind != memory.KindBug || !fresh[r.Record.ID] {
 				continue
 			}
 			if fix, _ := r.Record.Extra["fix"].(string); fix != "" {
@@ -212,7 +323,14 @@ func handleAugment(ctx context.Context, a *app.App, ev Event) (Result, error) {
 		}
 	}
 
-	return Result{Context: b.String()}, nil
+	out := b.String()
+	// Mark the pattern as injected so a later repeat in this session is deduped.
+	// Only record when content was actually injected and the session is scoped,
+	// so the reminder never fires for an empty first result.
+	if out != "" && ev.SessionID != "" {
+		_ = a.Ledger.Incr(ctx, scope, metric, 1)
+	}
+	return Result{Context: out}, nil
 }
 
 // handleStop finalizes the session row and returns an advisory reminder.

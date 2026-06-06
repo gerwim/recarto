@@ -23,7 +23,7 @@ func TestStatusReportsIdentityCountsAndLedger(t *testing.T) {
 		t.Fatal(err)
 	}
 	out := buf.String()
-	for _, want := range []string{"branch:   main", "learning", "total", "memories_recorded"} {
+	for _, want := range []string{"branch:   main", "learning", "total", "memories_recorded", "repeated_augments_blocked"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("status output missing %q:\n%s", want, out)
 		}

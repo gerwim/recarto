@@ -142,3 +142,238 @@ func TestArchitectureDisambiguatesCollidingModuleNames(t *testing.T) {
 		t.Errorf("want distinct modules backend/App and frontend/App, got %+v", arch.Modules)
 	}
 }
+
+func TestMapArchitectureRanksByFilesDemotingTests(t *testing.T) {
+	arch := Architecture{Modules: []Module{
+		{Name: "Core", Files: 100, Symbols: 500},
+		{Name: "Core.Tests", Files: 200, Symbols: 900},      // most files, but a test module
+		{Name: "Generated.Client", Files: 5, Symbols: 9000}, // symbol-dense, few files (e.g. codegen)
+		{Name: "Data", Files: 50, Symbols: 300},
+		{Name: "Util", Files: 10, Symbols: 60},
+	}}
+	mods, _ := MapArchitecture(arch, 3)
+	if len(mods) != 3 {
+		t.Fatalf("want top-3 modules, got %d", len(mods))
+	}
+	got := map[string]bool{}
+	for _, m := range mods {
+		got[m.Name] = true
+	}
+	// Highest file-count product modules: Core(100), Data(50), Util(10). The
+	// symbol-dense Generated.Client (5 files) and the Core.Tests test module are
+	// demoted out of a tight orientation budget even though one has the most files
+	// and the other the most symbols.
+	for _, want := range []string{"Core", "Data", "Util"} {
+		if !got[want] {
+			t.Errorf("expected product module %q in top-3, got %v", want, got)
+		}
+	}
+	if got["Core.Tests"] {
+		t.Errorf("test module Core.Tests must be demoted out of top-3: %v", got)
+	}
+	if got["Generated.Client"] {
+		t.Errorf("symbol-dense Generated.Client must not crowd top-3 by file count: %v", got)
+	}
+	// Display is restored to name order for stability.
+	for i := 1; i < len(mods); i++ {
+		if mods[i-1].Name > mods[i].Name {
+			t.Errorf("kept modules not name-sorted for display: %+v", mods)
+		}
+	}
+}
+
+func TestMapArchitectureRanksDepsByCount(t *testing.T) {
+	arch := Architecture{Deps: []ModuleEdge{
+		{From: "A", To: "Z", Count: 1},
+		{From: "B", To: "Y", Count: 50},
+		{From: "C", To: "X", Count: 5},
+	}}
+	_, deps := MapArchitecture(arch, 2)
+	if len(deps) != 2 {
+		t.Fatalf("want top-2 deps, got %d", len(deps))
+	}
+	// Heaviest edges B→Y(50) and C→X(5) kept; A→Z(1) dropped; restored to name order.
+	if deps[0].From != "B" || deps[1].From != "C" {
+		t.Errorf("want heaviest edges B,C in name order, got %+v", deps)
+	}
+}
+
+func TestMapArchitectureDemotesTestEndpointDeps(t *testing.T) {
+	arch := Architecture{Deps: []ModuleEdge{
+		{From: "Core.Tests", To: "Core", Count: 9000}, // a test depending on code: obvious, low-signal
+		{From: "Api", To: "Core", Count: 10},          // genuine product→product coupling
+		{From: "Web", To: "Api.Tests", Count: 8000},   // product→test endpoint: also low-signal
+	}}
+	_, deps := MapArchitecture(arch, 1)
+	if len(deps) != 1 {
+		t.Fatalf("want top-1 dep, got %+v", deps)
+	}
+	// Despite the test edges having far higher counts, the product→product edge wins.
+	if deps[0].From != "Api" || deps[0].To != "Core" {
+		t.Errorf("want product edge Api→Core to outrank test-endpoint edges, got %+v", deps[0])
+	}
+}
+
+func TestMapArchitectureDemotesGeneratedSourceDeps(t *testing.T) {
+	// The heaviest edge in a repo is often a generated client's references into a
+	// shared abstractions module — codegen noise, not product architecture. An
+	// edge dominated by generated-source references must rank below genuine
+	// product→product coupling, mirroring test-endpoint demotion.
+	arch := Architecture{Deps: []ModuleEdge{
+		{From: "Client", To: "Types", Count: 9000, GeneratedFrom: 8900}, // codegen client refs
+		{From: "Api", To: "Core", Count: 10},                            // genuine product coupling
+	}}
+	_, deps := MapArchitecture(arch, 1)
+	if len(deps) != 1 {
+		t.Fatalf("want top-1 dep, got %+v", deps)
+	}
+	if deps[0].From != "Api" || deps[0].To != "Core" {
+		t.Errorf("want product edge Api→Core to outrank generated-sourced edge, got %+v", deps[0])
+	}
+}
+
+func TestMapArchitectureKeepsMostlyHandwrittenEdge(t *testing.T) {
+	// An edge with only a minority of generated-sourced references is genuine
+	// coupling and must keep ranking by count — the generated penalty applies only
+	// when generated references dominate the edge.
+	arch := Architecture{Deps: []ModuleEdge{
+		{From: "Api", To: "Core", Count: 100, GeneratedFrom: 10}, // mostly hand-written
+		{From: "X", To: "Y", Count: 50},
+	}}
+	_, deps := MapArchitecture(arch, 1)
+	if len(deps) != 1 {
+		t.Fatalf("want top-1 dep, got %+v", deps)
+	}
+	if deps[0].From != "Api" || deps[0].To != "Core" {
+		t.Errorf("mostly-handwritten edge should rank by count, got %+v", deps[0])
+	}
+}
+
+func TestMapArchitectureBackfillsEdgeEndpoints(t *testing.T) {
+	// A coupling hub and the abstraction it depends on are both small by file
+	// count, so neither makes the top-2-by-files module list — yet their edge is
+	// the heaviest in the repo. The displayed edge must not point at modules the
+	// map never lists, so the endpoints are backfilled with their real counts.
+	arch := Architecture{
+		Modules: []Module{
+			{Name: "big1", Files: 100, Symbols: 1000},
+			{Name: "big2", Files: 90, Symbols: 900},
+			{Name: "hub", Files: 5, Symbols: 800},
+			{Name: "abstractions", Files: 3, Symbols: 40},
+		},
+		Deps: []ModuleEdge{{From: "hub", To: "abstractions", Count: 9999}},
+	}
+	mods, deps := MapArchitecture(arch, 2)
+	if len(deps) != 1 {
+		t.Fatalf("want 1 edge, got %+v", deps)
+	}
+	got := map[string]int{}
+	for _, m := range mods {
+		got[m.Name] = m.Files
+	}
+	for _, d := range deps {
+		if _, ok := got[d.From]; !ok {
+			t.Errorf("edge endpoint %q missing from module list %v", d.From, got)
+		}
+		if _, ok := got[d.To]; !ok {
+			t.Errorf("edge endpoint %q missing from module list %v", d.To, got)
+		}
+	}
+	// Backfilled endpoints carry their real file counts, not zero placeholders.
+	if got["hub"] != 5 {
+		t.Errorf("backfilled hub Files=%d, want 5", got["hub"])
+	}
+	if got["abstractions"] != 3 {
+		t.Errorf("backfilled abstractions Files=%d, want 3", got["abstractions"])
+	}
+	// Display stays name-sorted for stability after backfill.
+	for i := 1; i < len(mods); i++ {
+		if mods[i-1].Name > mods[i].Name {
+			t.Errorf("modules not name-sorted after backfill: %+v", mods)
+		}
+	}
+}
+
+func TestMapArchitectureNoBackfillWhenCoherent(t *testing.T) {
+	// When every displayed edge already connects modules in the top-N list, the
+	// map is coherent and backfill must add nothing (the common case — only large
+	// monorepos diverge). This guards the no-op on the repos that are already fine.
+	arch := Architecture{
+		Modules: []Module{
+			{Name: "a", Files: 100, Symbols: 10},
+			{Name: "b", Files: 90, Symbols: 10},
+			{Name: "c", Files: 1, Symbols: 10},
+		},
+		Deps: []ModuleEdge{{From: "a", To: "b", Count: 50}},
+	}
+	mods, _ := MapArchitecture(arch, 2)
+	if len(mods) != 2 {
+		t.Errorf("coherent map must not backfill; got %d modules: %+v", len(mods), mods)
+	}
+}
+
+func TestModuleNamesUniqueBasenameStaysBare(t *testing.T) {
+	names := moduleNames([]string{"src/Foo", "tools/Bar"})
+	if names["src/Foo"] != "Foo" {
+		t.Errorf("unique basename should stay bare: got %q want %q", names["src/Foo"], "Foo")
+	}
+	if names["tools/Bar"] != "Bar" {
+		t.Errorf("unique basename should stay bare: got %q want %q", names["tools/Bar"], "Bar")
+	}
+}
+
+func TestModuleNamesCollisionUsesCompactSuffix(t *testing.T) {
+	// Mirrors graphql-platform: three projects sharing basename "Types" under a
+	// conventional ".../<area>/src/Types" layout. The disambiguated name must drop
+	// the generic "src" wrapper and keep only the shortest distinguishing suffix,
+	// not the full relative path.
+	roots := []string{
+		"src/HotChocolate/Core/src/Types",
+		"src/HotChocolate/MongoDb/src/Types",
+		"src/HotChocolate/Spatial/src/Types",
+	}
+	names := moduleNames(roots)
+	want := map[string]string{
+		"src/HotChocolate/Core/src/Types":    "Core/Types",
+		"src/HotChocolate/MongoDb/src/Types": "MongoDb/Types",
+		"src/HotChocolate/Spatial/src/Types": "Spatial/Types",
+	}
+	for r, w := range want {
+		if names[r] != w {
+			t.Errorf("moduleNames[%q] = %q, want %q", r, names[r], w)
+		}
+	}
+}
+
+func TestModuleNamesCollisionFallsBackWhenCleaningWouldMerge(t *testing.T) {
+	// Dropping "src" would collapse "a/src/Types" and "a/Types" into the same name,
+	// silently merging two distinct projects. The group must fall back to full paths
+	// rather than lose a module.
+	roots := []string{"a/src/Types", "a/Types"}
+	names := moduleNames(roots)
+	if names["a/src/Types"] == names["a/Types"] {
+		t.Fatalf("distinct roots must keep distinct names, both got %q", names["a/Types"])
+	}
+	if names["a/src/Types"] != "a/src/Types" || names["a/Types"] != "a/Types" {
+		t.Errorf("ambiguous cleaning should fall back to full paths, got %q and %q",
+			names["a/src/Types"], names["a/Types"])
+	}
+}
+
+func TestIsTestModuleNameConservative(t *testing.T) {
+	tests := map[string]bool{
+		"ApolloFederation.Tests":                true,
+		"src/HotChocolate/Core/test/Types.Test": true,
+		"Mocha.Tests":                           true,
+		"Core":                                  false,
+		"Types.Analyzers":                       false,
+		"CostAnalysis":                          false, // "analysis" must not match "test"-like
+		"Testing":                               false, // segment "testing" != "test"
+		"contest":                               false,
+	}
+	for name, want := range tests {
+		if got := isTestModuleName(name); got != want {
+			t.Errorf("isTestModuleName(%q) = %v, want %v", name, got, want)
+		}
+	}
+}

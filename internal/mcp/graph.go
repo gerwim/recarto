@@ -20,6 +20,26 @@ func leafName(sym string) string {
 	return sym
 }
 
+// canonicalIdentifier removes the redundant short name from a list result. Across
+// every indexed language (go, csharp, typescript, tsx, javascript) a symbol's name
+// is exactly the trailing segment of its qualified_name — verified over 124k nodes,
+// 100% — so emitting both duplicates the leaf on every row. qualified_name is the
+// precise, overload-safe form that get_code_snippet/trace_call_path/find_* already
+// accept, so we keep it and drop name whenever name is its leaf (leafName splits on
+// '.', the sole qualifier separator those languages use). When qualified_name is
+// empty (or, defensively, name is not its leaf) name is kept, so no row ever loses
+// its only identifier. This makes the JSON output match the CLI, which already shows
+// only the qualified name.
+func canonicalIdentifier(name, qualified string) (outName, outQualified string) {
+	// Drop name when it is fully derivable from qualified_name: either an exact copy
+	// (top-level funcs, and namespace nodes whose multi-segment name equals the
+	// qualified_name) or its trailing identifier segment.
+	if qualified != "" && (qualified == name || leafName(qualified) == name) {
+		return "", qualified
+	}
+	return name, qualified
+}
+
 // ensureFresh lazily reconciles the worktree's graph so query results reflect the
 // current checkout (spec §11 query-time freshness). Best-effort: a reconcile
 // failure must not fail the query — stale results beat no results.
@@ -37,7 +57,7 @@ type SearchGraphInput struct {
 	Limit            int      `json:"limit,omitempty" jsonschema:"max results"`
 }
 type GraphSymbol struct {
-	Name          string  `json:"name"`
+	Name          string  `json:"name,omitempty"`
 	QualifiedName string  `json:"qualified_name"`
 	Kind          string  `json:"kind"`
 	Path          string  `json:"path"`
@@ -69,8 +89,9 @@ func searchGraph(ctx context.Context, a *app.App, in SearchGraphInput) (SearchGr
 	}
 	out := SearchGraphOutput{Count: len(res), Results: make([]GraphSymbol, 0, len(res))}
 	for _, r := range res {
+		name, qual := canonicalIdentifier(r.Name, r.QualifiedName)
 		out.Results = append(out.Results, GraphSymbol{
-			Name: r.Name, QualifiedName: r.QualifiedName, Kind: r.Kind,
+			Name: name, QualifiedName: qual, Kind: r.Kind,
 			Path: r.Path, Signature: r.Signature, Line: r.Line, Score: roundScore(r.Score),
 		})
 	}
@@ -264,8 +285,9 @@ func queryGraph(ctx context.Context, a *app.App, in QueryGraphInput) (QueryGraph
 	}
 	out := QueryGraphOutput{Count: len(nodes), Nodes: make([]GraphSymbol, 0, len(nodes))}
 	for _, n := range nodes {
+		name, qual := canonicalIdentifier(n.Name, n.QualifiedName)
 		out.Nodes = append(out.Nodes, GraphSymbol{
-			Name: n.Name, QualifiedName: n.QualifiedName, Kind: n.Kind, Path: n.Path, Signature: n.Signature, Line: n.Line,
+			Name: name, QualifiedName: qual, Kind: n.Kind, Path: n.Path, Signature: n.Signature, Line: n.Line,
 		})
 	}
 	return out, nil
@@ -379,7 +401,7 @@ type GetFileOutlineInput struct {
 	File string `json:"file" jsonschema:"repo-relative file path to outline"`
 }
 type OutlineSym struct {
-	Name          string `json:"name"`
+	Name          string `json:"name,omitempty"`
 	QualifiedName string `json:"qualified_name,omitempty"`
 	Kind          string `json:"kind"`
 	Parent        string `json:"parent,omitempty"`    // enclosing symbol's name, when nested
@@ -406,8 +428,9 @@ func getFileOutline(ctx context.Context, a *app.App, in GetFileOutlineInput) (Ge
 	}
 	out := GetFileOutlineOutput{Count: len(syms), Symbols: make([]OutlineSym, 0, len(syms))}
 	for _, s := range syms {
+		name, qual := canonicalIdentifier(s.Name, s.QualifiedName)
 		out.Symbols = append(out.Symbols, OutlineSym{
-			Name: s.Name, QualifiedName: s.QualifiedName, Kind: s.Kind,
+			Name: name, QualifiedName: qual, Kind: s.Kind,
 			Parent: s.ParentName, Signature: s.Signature,
 			StartLine: s.StartLine, EndLine: s.EndLine,
 		})
@@ -426,7 +449,7 @@ type FindImplementationsInput struct {
 	Limit     int    `json:"limit,omitempty" jsonschema:"max results (default 50)"`
 }
 type ImplSymbol struct {
-	Name          string `json:"name"`
+	Name          string `json:"name,omitempty"`
 	QualifiedName string `json:"qualified_name,omitempty"`
 	Kind          string `json:"kind,omitempty"`
 	Path          string `json:"path,omitempty"`
@@ -450,8 +473,9 @@ func findImplementations(ctx context.Context, a *app.App, in FindImplementations
 	}
 	out := FindImplementationsOutput{Count: len(rels), Results: make([]ImplSymbol, 0, len(rels))}
 	for _, r := range rels {
+		name, qual := canonicalIdentifier(r.Name, r.QualifiedName)
 		out.Results = append(out.Results, ImplSymbol{
-			Name: r.Name, QualifiedName: r.QualifiedName, Kind: r.Kind,
+			Name: name, QualifiedName: qual, Kind: r.Kind,
 			Path: r.Path, Line: r.Line, Relation: r.Relation,
 		})
 	}
@@ -465,7 +489,7 @@ type FindAnnotatedInput struct {
 	Limit     int    `json:"limit,omitempty" jsonschema:"max results (default 50)"`
 }
 type AnnotatedSym struct {
-	Name          string `json:"name"`
+	Name          string `json:"name,omitempty"`
 	QualifiedName string `json:"qualified_name,omitempty"`
 	Kind          string `json:"kind,omitempty"`
 	Path          string `json:"path,omitempty"`
@@ -485,8 +509,9 @@ func findAnnotated(ctx context.Context, a *app.App, in FindAnnotatedInput) (Find
 	}
 	out := FindAnnotatedOutput{Count: len(rels), Results: make([]AnnotatedSym, 0, len(rels))}
 	for _, r := range rels {
+		name, qual := canonicalIdentifier(r.Name, r.QualifiedName)
 		out.Results = append(out.Results, AnnotatedSym{
-			Name: r.Name, QualifiedName: r.QualifiedName, Kind: r.Kind,
+			Name: name, QualifiedName: qual, Kind: r.Kind,
 			Path: r.Path, Line: r.Line, Attribute: r.Attribute,
 		})
 	}

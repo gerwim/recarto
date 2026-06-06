@@ -23,7 +23,8 @@ func TestSearchGraphHandler(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if out.Count != 1 || out.Results[0].Name != "Authenticate" {
+	// name is dropped as the redundant leaf; the canonical identifier is qualified_name.
+	if out.Count != 1 || out.Results[0].QualifiedName != "Authenticate" {
 		t.Fatalf("searchGraph = %+v, want 1 result Authenticate", out)
 	}
 }
@@ -43,7 +44,7 @@ func TestSearchGraphReturnsSignature(t *testing.T) {
 	}
 	found := false
 	for _, r := range out.Results {
-		if r.Name == "Greet" && strings.Contains(r.Signature, "func Greet(") {
+		if r.QualifiedName == "Greet" && strings.Contains(r.Signature, "func Greet(") {
 			found = true
 		}
 	}
@@ -96,7 +97,7 @@ func TestGetFileOutlineHandler(t *testing.T) {
 	}
 	var names []string
 	for _, s := range out.Symbols {
-		names = append(names, s.Name)
+		names = append(names, s.QualifiedName)
 	}
 	if !contains(names, "First") || !contains(names, "Second") {
 		t.Fatalf("outline names = %v, want First and Second", names)
@@ -280,7 +281,7 @@ func TestGraphHandlersMapping(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if q.Count != 1 || q.Nodes[0].Name != "T" {
+	if q.Count != 1 || q.Nodes[0].QualifiedName != "T" {
 		t.Errorf("queryGraph kind=type = %+v, want [T]", q)
 	}
 
@@ -360,7 +361,7 @@ func TestSearchGraphCandidateSymbolsAndHint(t *testing.T) {
 	}
 	var found bool
 	for _, r := range out.Results {
-		if r.Name == "PdokAddressLookupService" {
+		if r.QualifiedName == "App.PdokAddressLookupService" {
 			found = true
 		}
 	}
@@ -459,6 +460,70 @@ func TestGetArchitectureReportsTotals(t *testing.T) {
 	}
 	if out.Truncated {
 		t.Errorf("tiny repo should not be truncated")
+	}
+}
+
+// TestCanonicalIdentifier covers the pure projection helper that removes the
+// redundant short name from list results: name is always the trailing segment of a
+// present qualified_name (verified across go/csharp/ts/tsx/js), so emitting both
+// duplicates the leaf on every row. The helper drops name only when it is derivable
+// from a non-empty qualified_name, and never leaves a row without any identifier.
+func TestCanonicalIdentifier(t *testing.T) {
+	cases := []struct {
+		name, qualified    string
+		wantName, wantQual string
+	}{
+		// Dotted qualified name: short name is the leaf → dropped.
+		{"ExecuteAsync", "HotChocolate.Execution.DefaultRequestExecutor.ExecuteAsync", "", "HotChocolate.Execution.DefaultRequestExecutor.ExecuteAsync"},
+		// name == qualified_name (top-level Go func): still redundant → name dropped, qualified kept.
+		{"Authenticate", "Authenticate", "", "Authenticate"},
+		// name == qualified_name but multi-segment (C# namespace node): exact-equal is still
+		// redundant even though the dotted leaf ("Execution") differs from the name.
+		{"HotChocolate.Execution", "HotChocolate.Execution", "", "HotChocolate.Execution"},
+		// Empty qualified_name: name is the only identifier → kept.
+		{"Loner", "", "Loner", ""},
+		// name is not the leaf of qualified_name: keep both (defensive; never observed).
+		{"Foo", "Bar.Baz", "Foo", "Bar.Baz"},
+	}
+	for _, c := range cases {
+		gotName, gotQual := canonicalIdentifier(c.name, c.qualified)
+		if gotName != c.wantName || gotQual != c.wantQual {
+			t.Errorf("canonicalIdentifier(%q,%q) = (%q,%q), want (%q,%q)",
+				c.name, c.qualified, gotName, gotQual, c.wantName, c.wantQual)
+		}
+	}
+}
+
+// TestSearchGraphOmitsRedundantName proves the handler drops the short name when it
+// is the leaf of the qualified_name, keeping the precise (overload-safe) qualified
+// identifier the consuming tools accept — so every result row carries one identifier,
+// not two copies of the same leaf.
+func TestSearchGraphOmitsRedundantName(t *testing.T) {
+	a := newTestApp(t, "main")
+	wt := t.TempDir()
+	a.Git.Worktree = wt
+	if err := os.WriteFile(filepath.Join(wt, "a.cs"),
+		[]byte("namespace App;\nclass PdokAddressLookupService {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Graph.Reconcile(context.Background(), wt, graph.FSSource{Root: wt}); err != nil {
+		t.Fatal(err)
+	}
+	out, err := searchGraph(context.Background(), a, SearchGraphInput{Query: "PdokAddressLookupService"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, r := range out.Results {
+		if r.QualifiedName == "App.PdokAddressLookupService" {
+			found = true
+			if r.Name != "" {
+				t.Errorf("redundant name should be omitted, got Name=%q", r.Name)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("missing App.PdokAddressLookupService in results: %+v", out.Results)
 	}
 }
 

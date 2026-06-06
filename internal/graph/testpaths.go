@@ -38,6 +38,23 @@ func isTestPath(p string) bool {
 	})
 }
 
+// isTestModuleName reports whether a module name denotes test code. Module names
+// are project basenames or paths (e.g. "ApolloFederation.Tests" or
+// "src/HotChocolate/Core/test/Types.Tests"), so unlike isTestPath it splits on
+// both '/' and '.' and matches a whole "test"/"tests" segment. It is conservative
+// for the same reason ("testing", "contest", "CostAnalysis" do not match): wrongly
+// demoting a product module out of a tight orientation map is the worse error.
+func isTestModuleName(name string) bool {
+	for _, seg := range strings.FieldsFunc(strings.ToLower(name), func(r rune) bool {
+		return r == '/' || r == '.'
+	}) {
+		if seg == "test" || seg == "tests" {
+			return true
+		}
+	}
+	return false
+}
+
 // demoteTests stably partitions results so test symbols sink below product code,
 // each group keeping its incoming (fused) order. Like demoteGenerated it drops
 // nothing — tests stay findable, just lower — so a concept query surfaces the

@@ -19,6 +19,38 @@ func TestInstructionsMentionTodo(t *testing.T) {
 	}
 }
 
+func TestInstructionsExplainJustInTimeAnchoring(t *testing.T) {
+	// Agents must learn that anchoring a memory to files/symbols (via record_memory
+	// refs) is what makes bugs, do-not-repeats and decisions resurface the moment
+	// that code is touched — otherwise they record guidance with no refs and it
+	// never fires just-in-time.
+	for _, want := range []string{"anchor", "do-not-repeat", "decision"} {
+		if !strings.Contains(strings.ToLower(Instructions), want) {
+			t.Errorf("Instructions should explain just-in-time anchoring; missing %q", want)
+		}
+	}
+}
+
+func TestInstructionsWarnAboutLargeWholeFileReads(t *testing.T) {
+	// Agents should know Recarto nudges them toward the graph when they read a large
+	// indexed file whole, so the nudge reads as a known guardrail rather than noise.
+	lower := strings.ToLower(Instructions)
+	if !strings.Contains(lower, "whole-file") || !strings.Contains(lower, "nudge") {
+		t.Error("Instructions should warn that a large whole-file read is wasteful and Recarto will nudge toward the graph")
+	}
+}
+
+func TestInstructionsExplainQualifiedNameCanonical(t *testing.T) {
+	// List results omit the redundant short `name` and carry `qualified_name` as the
+	// canonical identifier (its last segment is the short name). Agents must know to
+	// read qualified_name and feed it back to the symbol-taking tools, rather than
+	// expecting a separate `name` field on every row.
+	lower := strings.ToLower(Instructions)
+	if !strings.Contains(lower, "last segment") || !strings.Contains(lower, "qualified_name") {
+		t.Error("Instructions should explain results carry qualified_name as the canonical identifier whose last segment is the short name")
+	}
+}
+
 func TestInstructionsAdvertiseFullToolset(t *testing.T) {
 	for _, want := range []string{
 		"get_architecture", "query_graph", "list_memory", "get_memory",
