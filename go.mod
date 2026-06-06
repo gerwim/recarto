@@ -3,6 +3,7 @@ module git.gerwim.nl/gerwim/recarto
 go 1.26.4
 
 require (
+	github.com/google/jsonschema-go v0.4.3
 	github.com/google/uuid v1.6.0
 	github.com/knights-analytics/hugot v0.7.4
 	github.com/mattn/go-isatty v0.0.20
@@ -27,7 +28,6 @@ require (
 	github.com/gomlx/go-xla v0.2.2 // indirect
 	github.com/gomlx/gomlx v0.27.3 // indirect
 	github.com/gomlx/onnx-gomlx v0.4.2 // indirect
-	github.com/google/jsonschema-go v0.4.3 // indirect
 	github.com/knights-analytics/ortgenai v0.3.1 // indirect
 	github.com/mattn/go-pointer v0.0.1 // indirect
 	github.com/mitchellh/colorstring v0.0.0-20190213212951-d06e56a500db // indirect

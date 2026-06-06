@@ -30,7 +30,7 @@ type MemoryView struct {
 // RecordMemoryInput are the arguments to the record_memory tool. Fields without
 // `omitempty` (kind, body) are required in the generated JSON schema.
 type RecordMemoryInput struct {
-	Kind         string   `json:"kind" jsonschema:"memory kind: preference, learning, decision, do_not_repeat, bug, or action"`
+	Kind         string   `json:"kind" jsonschema:"memory kind: preference, learning, decision, do_not_repeat, bug, action, or todo"`
 	Title        string   `json:"title,omitempty" jsonschema:"short one-line summary"`
 	Body         string   `json:"body" jsonschema:"full memory content"`
 	Files        []string `json:"files,omitempty" jsonschema:"related file paths"`
