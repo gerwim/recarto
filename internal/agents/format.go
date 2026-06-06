@@ -37,9 +37,22 @@ func sessionBudget() int {
 // (always, full body), cerebrum memories (title + trimmed body, degrading to
 // titles-only then dropping under budget pressure), a bounded module map, and a
 // titles-only recent-bugs tier — followed by the record nudge.
-func formatSessionContext(results []memory.RecallResult, arch graph.Architecture, bugs []*memory.Record, budget int) string {
+//
+// It also returns the IDs of the memories it actually rendered (full or title-only,
+// excluding any dropped under budget pressure). The caller marks those as surfaced
+// so the just-in-time read/edit hooks do not re-inject a guardrail/bug/todo already
+// sitting in this block — duplicate context is pure token waste. A memory dropped
+// here is deliberately left unmarked so it can still surface when its code is touched.
+func formatSessionContext(results []memory.RecallResult, arch graph.Architecture, bugs []*memory.Record, budget int) (string, []string) {
 	var b strings.Builder
 	b.WriteString("Recarto memory for this repo/branch:\n")
+
+	var emitted []string
+	markEmitted := func(r memory.RecallResult) {
+		if r.Record != nil && r.Record.ID != "" {
+			emitted = append(emitted, r.Record.ID)
+		}
+	}
 
 	budgetCap := budget - cerebrumReserve
 	if budgetCap < 0 {
@@ -59,6 +72,7 @@ func formatSessionContext(results []memory.RecallResult, arch graph.Architecture
 				fmt.Fprintf(&b, "  %s\n", c)
 				used += ledger.EstimateTokens(c)
 			}
+			markEmitted(r)
 			continue
 		}
 		// Gate on the RAW body cost so a large-bodied memory degrades to title-only,
@@ -74,6 +88,7 @@ func formatSessionContext(results []memory.RecallResult, arch graph.Architecture
 				fmt.Fprintf(&b, "  %s\n", c)
 				used += ledger.EstimateTokens(c)
 			}
+			markEmitted(r)
 		case used+ledger.EstimateTokens(titleOnly) <= budgetCap:
 			b.WriteString(titleOnly)
 			used += ledger.EstimateTokens(titleOnly)
@@ -81,6 +96,7 @@ func formatSessionContext(results []memory.RecallResult, arch graph.Architecture
 				fmt.Fprintf(&b, "  %s\n", c)
 				used += ledger.EstimateTokens(c)
 			}
+			markEmitted(r)
 		}
 	}
 	if len(results) == 0 {
@@ -114,7 +130,7 @@ func formatSessionContext(results []memory.RecallResult, arch graph.Architecture
 	}
 
 	b.WriteString("\nRecord new learnings with the record_memory tool and bug fixes with record_bug.")
-	return b.String()
+	return b.String(), emitted
 }
 
 // formatBugWarnings renders prior bugs tied to a code location as advisory lines.

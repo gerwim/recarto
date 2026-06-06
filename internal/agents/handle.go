@@ -87,7 +87,26 @@ func handleSessionStart(ctx context.Context, a *app.App, ev Event) (Result, erro
 	// Orientation map + recent bugs are best-effort tiers; failure omits the tier.
 	arch, _ := a.Graph.Architecture(ctx, a.Git.Worktree, "")
 	bugs, _ := a.Engine.RecentBugs(ctx, a.Git.Branch, recentBugLimit)
-	return Result{Context: formatSessionContext(results, arch, bugs, budget)}, nil
+	out, emitted := formatSessionContext(results, arch, bugs, budget)
+	// Mark every memory rendered into this block as surfaced for the session, so the
+	// just-in-time read/edit hooks won't re-inject a guardrail/bug/todo the agent can
+	// already see here. Memories dropped under budget stay unmarked and still surface
+	// when their code is touched.
+	markSurfaced(ctx, a, ev.SessionID, emitted)
+	return Result{Context: out}, nil
+}
+
+// markSurfaced records each memory id as surfaced for the session, mirroring the
+// per-id key dedupSurfaced consults so a later just-in-time hook treats them as
+// already shown. A no-op without a session (matching dedupSurfaced's passthrough).
+func markSurfaced(ctx context.Context, a *app.App, sessionID string, ids []string) {
+	if sessionID == "" {
+		return
+	}
+	scope := "session:" + sessionID
+	for _, id := range ids {
+		_ = a.Ledger.Incr(ctx, scope, "surfaced:"+id, 1)
+	}
 }
 
 // dedupSurfaced filters recs to those not yet surfaced in this session, marking the

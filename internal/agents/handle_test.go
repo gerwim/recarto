@@ -139,7 +139,7 @@ func TestFormatSessionContextDegradesToTitles(t *testing.T) {
 		{Record: &memory.Record{Kind: memory.KindLearning, Title: "AAA", Body: "short body"}},
 		{Record: &memory.Record{Kind: memory.KindLearning, Title: "BBB", Body: strings.Repeat("x", 2000)}},
 	}
-	s := formatSessionContext(results, graph.Architecture{}, nil, 60)
+	s, _ := formatSessionContext(results, graph.Architecture{}, nil, 60)
 	if !strings.Contains(s, "AAA") || !strings.Contains(s, "short body") {
 		t.Errorf("first entry should render with its body:\n%s", s)
 	}
@@ -219,11 +219,73 @@ func TestJustInTimeSurfacingDedupsPerSession(t *testing.T) {
 	}
 }
 
+func TestSessionStartSuppressesLaterJustInTimeReinjection(t *testing.T) {
+	a := newTestApp(t, "main")
+	ctx := context.Background()
+	rel := "internal/agents/handle.go"
+	// A pinned do_not_repeat is always emitted in the session-start block.
+	if _, _, err := a.Engine.Record(ctx, memory.NewMemory{
+		Kind: memory.KindDoNotRepeat, Title: "do not hand-roll the lexer", Body: "use tree-sitter",
+		Refs: []memory.Ref{{Type: memory.RefFile, Value: rel}}, Branch: a.Git.Branch, Source: "cli", Pinned: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	start, err := Handle(ctx, a, Event{Kind: KindSessionStart, SessionID: "s1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(start.Context, "do not hand-roll the lexer") {
+		t.Fatalf("session-start should inject the pinned guardrail:\n%s", start.Context)
+	}
+
+	// Touching the anchored file must NOT re-inject a guardrail already sitting in
+	// the session-start block — that is duplicate context, pure token waste.
+	read, err := handlePostRead(ctx, a, Event{Kind: KindPostRead, SessionID: "s1", FilePath: rel, ToolResult: "package agents"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(read.Context, "do not hand-roll the lexer") {
+		t.Fatalf("guardrail already shown at session-start must not re-inject on read; got %q", read.Context)
+	}
+}
+
+func TestSessionStartDoesNotSuppressDroppedGuidance(t *testing.T) {
+	t.Setenv("RECARTO_SESSION_BUDGET", "2") // too small to render any cerebrum entry
+	a := newTestApp(t, "main")
+	ctx := context.Background()
+	rel := "internal/agents/handle.go"
+	// Non-pinned guidance: under the tiny budget the session-start block drops it,
+	// so it must NOT be marked surfaced and must still appear when the file is read.
+	if _, _, err := a.Engine.Record(ctx, memory.NewMemory{
+		Kind: memory.KindDecision, Title: "settled: cache lives outside the worktree", Body: "rationale",
+		Refs: []memory.Ref{{Type: memory.RefFile, Value: rel}}, Branch: a.Git.Branch, Source: "cli",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	start, err := Handle(ctx, a, Event{Kind: KindSessionStart, SessionID: "s1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(start.Context, "cache lives outside the worktree") {
+		t.Fatalf("budget too small; guidance should have been dropped from the block:\n%s", start.Context)
+	}
+
+	read, err := handlePostRead(ctx, a, Event{Kind: KindPostRead, SessionID: "s1", FilePath: rel, ToolResult: "package agents"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(read.Context, "cache lives outside the worktree") {
+		t.Fatalf("guidance dropped from session-start must still surface just-in-time; got %q", read.Context)
+	}
+}
+
 func TestFormatSessionContextDropsEntryUnderTinyBudget(t *testing.T) {
 	results := []memory.RecallResult{
 		{Record: &memory.Record{Kind: memory.KindLearning, Title: "WontFitAtAll", Body: "body"}},
 	}
-	s := formatSessionContext(results, graph.Architecture{}, nil, 2)
+	s, _ := formatSessionContext(results, graph.Architecture{}, nil, 2)
 	if strings.Contains(s, "WontFitAtAll") {
 		t.Errorf("entry should be dropped entirely when even its title exceeds the budget:\n%s", s)
 	}
