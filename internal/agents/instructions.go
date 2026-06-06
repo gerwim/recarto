@@ -38,6 +38,10 @@ per-repo SQLite cache outside the working tree.
 - **Trace** with ` + "`trace_call_path`" + `: each hop is annotated with a confidence —
   trust high/typed/self hops; treat low/name hops as candidates to verify with
   ` + "`get_code_snippet`" + `.
+- **Find implementations** of an interface or base type with ` + "`find_implementations`" + `
+  (direction ` + "`down`" + ` for subtypes/implementers, ` + "`up`" + ` for supertypes) instead of
+  grepping for ` + "`: TypeName`" + ` — implementers don't share the interface's name, so
+  ` + "`search_graph`" + ` can't surface them.
 - **Inspect & curate** memories with ` + "`list_memory` / `get_memory`" + `; delete one
   recorded in error with ` + "`forget_memory`" + ` (or supersede it via ` + "`supersedes_id`" + `).
 

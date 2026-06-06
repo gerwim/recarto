@@ -22,7 +22,7 @@ func TestInstructionsMentionTodo(t *testing.T) {
 func TestInstructionsAdvertiseFullToolset(t *testing.T) {
 	for _, want := range []string{
 		"get_architecture", "query_graph", "list_memory", "get_memory",
-		"forget_memory", "confidence",
+		"forget_memory", "confidence", "find_implementations",
 	} {
 		if !strings.Contains(Instructions, want) {
 			t.Errorf("Instructions block missing %q", want)

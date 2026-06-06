@@ -68,7 +68,7 @@ func TestMergeHybridBackfillsWhenVectorShort(t *testing.T) {
 func TestMergeHybridNoVectorIsPlainLexical(t *testing.T) {
 	lex := []SearchResult{{Name: "a"}, {Name: "a"}, {Name: "b"}, {Name: "c"}}
 	got := mergeHybrid(lex, nil, 10)
-	want := dedupByName(lex, 10)
+	want := dedupBySymbol(lex, 10)
 	if len(got) != len(want) {
 		t.Fatalf("no-vector merge must equal lexical dedup: got %v want %v", resultNames(got), resultNames(want))
 	}

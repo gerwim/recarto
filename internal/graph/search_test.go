@@ -110,6 +110,61 @@ func TestSearchTrigramSubstring(t *testing.T) {
 	}
 }
 
+func TestSearchReturnsDistinctSameNameDefinitions(t *testing.T) {
+	e := newTestEngine(t)
+	ctx := context.Background()
+	// A method name shared across distinct types (interface impls / per-class
+	// handlers) is the single most common "find all definitions of X" lookup. Each
+	// is a genuinely different symbol (distinct qualified name), so collapsing them
+	// to one bare-name entry hides the answer and forces a grep fallback. Only true
+	// duplicates — the SAME symbol, or overloads within one type — should collapse.
+	src := []byte("namespace App;\n" +
+		"class Alpha { public void Process() {} }\n" +
+		"class Beta { public void Process() {} }\n" +
+		"class Gamma { public void Process() {} }\n")
+	if err := e.IndexFile(ctx, "/wt", "App.cs", src, 1, int64(len(src))); err != nil {
+		t.Fatal(err)
+	}
+
+	// Plain search for the exact method name must surface all three distinct
+	// definitions, not just one.
+	got, err := e.Search(ctx, "/wt", "Process", "", "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	qn := map[string]bool{}
+	for _, r := range got {
+		qn[r.QualifiedName] = true
+	}
+	for _, want := range []string{"App.Alpha.Process", "App.Beta.Process", "App.Gamma.Process"} {
+		if !qn[want] {
+			t.Errorf("Search(%q) missed distinct definition %q; got %v", "Process", want, qualNames(got))
+		}
+	}
+
+	// The candidate-symbol path (agent says "I expect a symbol named Process")
+	// must likewise return every distinct definition.
+	guided, err := e.SearchGuided(ctx, "/wt", "process records", []string{"Process"}, "", "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gqn := map[string]bool{}
+	for _, r := range guided {
+		gqn[r.QualifiedName] = true
+	}
+	if len(gqn) < 3 {
+		t.Errorf("SearchGuided candidate path collapsed distinct definitions: got %v", qualNames(guided))
+	}
+}
+
+func qualNames(rs []SearchResult) []string {
+	out := make([]string, len(rs))
+	for i, r := range rs {
+		out[i] = r.QualifiedName
+	}
+	return out
+}
+
 func resultNames(rs []SearchResult) []string {
 	out := make([]string, len(rs))
 	for i, r := range rs {

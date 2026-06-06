@@ -47,6 +47,27 @@ func TestGraphCalleesAnnotated(t *testing.T) {
 	}
 }
 
+func TestGraphImplementations(t *testing.T) {
+	a := newTestApp(t, "main")
+	wt := t.TempDir()
+	a.Git.Worktree = wt
+	os.WriteFile(filepath.Join(wt, "Greet.cs"),
+		[]byte("namespace N;\ninterface IGreeter { string Greet(); }\n"+
+			"class EnglishGreeter : IGreeter { public string Greet() => \"hi\"; }\n"+
+			"class FrenchGreeter : IGreeter { public string Greet() => \"salut\"; }\n"), 0o644)
+	if err := Index(context.Background(), a, &bytes.Buffer{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := Graph(context.Background(), a, &out, []string{"impls", "IGreeter"}); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(out.Bytes(), []byte("EnglishGreeter")) ||
+		!bytes.Contains(out.Bytes(), []byte("FrenchGreeter")) {
+		t.Errorf("graph impls output = %q, want both implementers", out.String())
+	}
+}
+
 func TestGraphRequiresSubcommand(t *testing.T) {
 	a := newTestApp(t, "main")
 	if err := Graph(context.Background(), a, &bytes.Buffer{}, nil); err == nil {

@@ -25,8 +25,9 @@ feature parity across all three.
 - **Bugs** — `record_bug` / `search_bugs`: searchable bug history (error, root cause,
   fix), surfaced just-in-time when you read or edit the related file.
 - **Code graph** — `search_graph` / `get_code_snippet` / `trace_call_path` /
-  `get_architecture` / `query_graph`: query symbols, call paths and module structure
-  instead of reading whole files. Re-indexed incrementally as the agent edits.
+  `find_implementations` / `get_architecture` / `query_graph`: query symbols, call
+  paths, interface implementations and module structure instead of reading whole
+  files. Re-indexed incrementally as the agent edits.
   Searching by concept? Pass `search_graph` the identifier names you expect via
   `candidate_symbols` — the agent supplies the semantic signal, the dependency-free
   lexical engine does the lookup (no embedding model required). See
@@ -143,15 +144,16 @@ recarto recall [hint]     ranked, budgeted recall (--files --symbols --kind --li
 recarto bug add|search    record or search bug memories
 recarto memory show       render all active memory as markdown (--branch)
 recarto index             build/refresh the code graph for this worktree
-recarto graph <sub>       query the code graph (search|callers|callees|arch|query|snippet)
+recarto graph <sub>       query the code graph (search|grep|callers|callees|impls|arch|query|snippet)
                           graph search [--symbol=Name ...] <concept words>  (candidate-guided)
+                          graph impls <Type> [--super]  (implementations/subtypes; --super for supertypes)
 recarto compact           prune/decay memory (--force --dry-run --budget-tokens)
 recarto serve             run the MCP server over stdio (used by the agents)
 ```
 
 MCP tools exposed by `recarto serve`: `record_memory`, `recall_memory`, `get_memory`,
 `list_memory`, `record_bug`, `search_bugs`, `search_graph`, `get_code_snippet`,
-`trace_call_path`, `get_architecture`, `query_graph`.
+`trace_call_path`, `find_implementations`, `get_architecture`, `query_graph`.
 
 ## Verify it's working
 

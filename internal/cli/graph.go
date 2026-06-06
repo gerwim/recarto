@@ -13,7 +13,7 @@ import (
 // Graph dispatches `graph <sub>`: search | callers | callees | arch | query | snippet.
 func Graph(ctx context.Context, a *app.App, w io.Writer, args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("graph: subcommand required (search|grep|callers|callees|arch|query|snippet)")
+		return fmt.Errorf("graph: subcommand required (search|grep|callers|callees|impls|arch|query|snippet)")
 	}
 	wt := a.Git.Worktree
 	// Lazy reconcile so query results reflect the current checkout (spec §11).
@@ -81,6 +81,40 @@ func Graph(ctx context.Context, a *app.App, w io.Writer, args []string) error {
 		}
 		for _, d := range arch.Deps {
 			fmt.Fprintf(w, "  %s → %s  (%d)\n", d.From, d.To, d.Count)
+		}
+		return nil
+	case "impls", "implementations":
+		if len(rest) == 0 {
+			return fmt.Errorf("graph %s: symbol required", sub)
+		}
+		dir := "down"
+		var sym []string
+		for _, tok := range rest {
+			switch tok {
+			case "--super", "--up":
+				dir = "up"
+			default:
+				sym = append(sym, tok)
+			}
+		}
+		rels, err := a.Graph.Implementations(ctx, wt, strings.Join(sym, " "), dir, 50)
+		if err != nil {
+			return err
+		}
+		if len(rels) == 0 {
+			fmt.Fprintln(w, "(no matches)")
+			return nil
+		}
+		for _, r := range rels {
+			loc := r.Path
+			if r.Line > 0 {
+				loc = fmt.Sprintf("%s:%d", r.Path, r.Line)
+			}
+			name := r.QualifiedName
+			if name == "" {
+				name = r.Name
+			}
+			fmt.Fprintf(w, "• [%s] %s  %s\n", r.Kind, name, loc)
 		}
 		return nil
 	case "query":

@@ -36,6 +36,29 @@ func TestBugAddThenSearch(t *testing.T) {
 	}
 }
 
+// The MCP record_bug tool names the field root_cause; the CLI should accept
+// --root-cause as well as the shorter --cause so the two surfaces don't diverge.
+func TestBugAddRootCauseAlias(t *testing.T) {
+	a := newTestApp(t, "main")
+	ctx := context.Background()
+	var buf bytes.Buffer
+	if err := Bug(ctx, a, &buf, []string{"add",
+		"--error", "deadlock on shutdown",
+		"--root-cause", "lock acquired in reverse order"}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(buf.String(), "recorded bug ") {
+		t.Fatalf("unexpected add output: %q", buf.String())
+	}
+	buf.Reset()
+	if err := Bug(ctx, a, &buf, []string{"search", "deadlock"}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), "deadlock on shutdown") {
+		t.Errorf("--root-cause alias did not record the bug:\n%s", buf.String())
+	}
+}
+
 func TestBugRequiresSubcommand(t *testing.T) {
 	a := newTestApp(t, "main")
 	if err := Bug(context.Background(), a, &bytes.Buffer{}, nil); err == nil {

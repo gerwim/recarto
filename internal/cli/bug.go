@@ -31,7 +31,12 @@ func bugAdd(ctx context.Context, a *app.App, w io.Writer, args []string) error {
 	fs := flag.NewFlagSet("bug add", flag.ContinueOnError)
 	fs.SetOutput(w)
 	msg := fs.String("error", "", "error message or user complaint (required)")
-	cause := fs.String("cause", "", "root cause")
+	var causeVal string
+	// --cause is the short form; --root-cause mirrors the record_bug MCP tool's
+	// field name so the two surfaces stay in sync. Both write the same value.
+	fs.StringVar(&causeVal, "cause", "", "root cause")
+	fs.StringVar(&causeVal, "root-cause", "", "root cause (alias of --cause)")
+	cause := &causeVal
 	fix := fs.String("fix", "", "what fixed it")
 	file := fs.String("file", "", "file that was fixed")
 	symbols := fs.String("symbols", "", "comma-separated related symbol names")

@@ -307,3 +307,43 @@ func getCodeSnippet(ctx context.Context, a *app.App, in GetCodeSnippetInput) (Ge
 		QualifiedName: r.QualifiedName, Snippet: r.Snippet,
 	}, nil
 }
+
+// --- find_implementations ---
+
+type FindImplementationsInput struct {
+	Symbol    string `json:"symbol" jsonschema:"the interface/base type's bare or qualified name"`
+	Direction string `json:"direction,omitempty" jsonschema:"down (default) = implementers/subtypes of the type; up = the supertypes the type extends"`
+	Limit     int    `json:"limit,omitempty" jsonschema:"max results (default 50)"`
+}
+type ImplSymbol struct {
+	Name          string `json:"name"`
+	QualifiedName string `json:"qualified_name,omitempty"`
+	Kind          string `json:"kind,omitempty"`
+	Path          string `json:"path,omitempty"`
+	Line          int    `json:"line,omitempty"`
+	Relation      string `json:"relation"` // implements | extends
+}
+type FindImplementationsOutput struct {
+	Count   int          `json:"count"`
+	Results []ImplSymbol `json:"results"`
+}
+
+func findImplementations(ctx context.Context, a *app.App, in FindImplementationsInput) (FindImplementationsOutput, error) {
+	ensureFresh(ctx, a)
+	dir := in.Direction
+	if dir == "" {
+		dir = "down"
+	}
+	rels, err := a.Graph.Implementations(ctx, a.Git.Worktree, in.Symbol, dir, in.Limit)
+	if err != nil {
+		return FindImplementationsOutput{}, err
+	}
+	out := FindImplementationsOutput{Count: len(rels), Results: make([]ImplSymbol, 0, len(rels))}
+	for _, r := range rels {
+		out.Results = append(out.Results, ImplSymbol{
+			Name: r.Name, QualifiedName: r.QualifiedName, Kind: r.Kind,
+			Path: r.Path, Line: r.Line, Relation: r.Relation,
+		})
+	}
+	return out, nil
+}

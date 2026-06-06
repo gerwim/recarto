@@ -87,7 +87,7 @@ func (e *Engine) SearchGuided(ctx context.Context, worktree, query string, candi
 	}
 
 	if e.emb == nil {
-		return dedupByName(demoteGenerated(lex, nil), limit), nil
+		return dedupBySymbol(demoteGenerated(lex, nil), limit), nil
 	}
 	// Dormant semantic tier (set only under -tags ORT). Best-effort.
 	vec, verr := e.vectorPass(ctx, worktree, query, kind, lang, limit*3)
@@ -126,7 +126,7 @@ func (e *Engine) mergeCandidates(ctx context.Context, worktree string, candidate
 	for _, c := range candidates {
 		protect[strings.ToLower(strings.TrimSpace(c))] = true
 	}
-	return dedupByName(demoteGenerated(fused, protect), limit), nil
+	return dedupBySymbol(demoteGenerated(fused, protect), limit), nil
 }
 
 // candidateExactPass returns symbols whose name OR qualified_name equals one of
@@ -204,13 +204,14 @@ SELECT n.id, n.name, n.qualified_name, n.kind, f.language, f.path, n.start_line,
 // positions (hybrid never regresses a keyword query); the vector tier then fills
 // the reserved tail with concept matches the lexical pass missed; finally any
 // reserve the vector tier left unused is backfilled with more lexical. Dedup is by
-// name throughout so a same-name overload cluster cannot crowd the page. With no
-// vector candidates this degrades to a plain lexical dedup.
+// symbol identity throughout (see symbolKey) so the same node reappearing across
+// tiers folds while distinct same-named symbols survive. With no vector candidates
+// this degrades to a plain lexical dedup.
 func mergeHybrid(lex, vec []SearchResult, limit int) []SearchResult {
 	lex = demoteGenerated(lex, nil)
 	vec = demoteGenerated(vec, nil)
 	if len(vec) == 0 {
-		return dedupByName(lex, limit)
+		return dedupBySymbol(lex, limit)
 	}
 	lexCap := limit - limit*vecReserveNum/vecReserveDen
 	seen := make(map[string]bool, limit)
@@ -220,10 +221,11 @@ func mergeHybrid(lex, vec []SearchResult, limit int) []SearchResult {
 			if len(out) >= cap {
 				return
 			}
-			if seen[r.Name] {
+			k := symbolKey(r)
+			if seen[k] {
 				continue
 			}
-			seen[r.Name] = true
+			seen[k] = true
 			out = append(out, r)
 		}
 	}
@@ -233,21 +235,38 @@ func mergeHybrid(lex, vec []SearchResult, limit int) []SearchResult {
 	return out
 }
 
-// dedupByName collapses results with the same symbol name, keeping the first
-// (best-ranked) occurrence, and truncates to limit. Name-dedup is what lets the
-// distinct intended targets fit on the page instead of a single name's overload
-// cluster filling it.
-func dedupByName(in []SearchResult, limit int) []SearchResult {
+// symbolKey identifies a result by the symbol it points at, not by its bare name.
+// The qualified name (Namespace.Type.Method) distinguishes the genuinely different
+// symbols that share a short name — App.Alpha.Process vs App.Beta.Process, or the
+// 298 distinct ExecuteAsync methods across a large codebase — so a "find all
+// definitions of X" lookup surfaces every one instead of collapsing to a single
+// entry. The path component keeps distinct top-level symbols apart when the
+// language gives no qualifier (qualified name == bare name); overloads within one
+// type (same qualified name, same file) still fold to one navigable target.
+func symbolKey(r SearchResult) string {
+	if r.QualifiedName != "" && r.QualifiedName != r.Name {
+		return "q\x00" + strings.ToLower(r.QualifiedName)
+	}
+	return "n\x00" + strings.ToLower(r.Name) + "\x00" + r.Path
+}
+
+// dedupBySymbol collapses results that point at the same symbol (see symbolKey),
+// keeping the first (best-ranked) occurrence, and truncates to limit. This folds
+// the same node reappearing across FTS passes and true overloads within a type,
+// while preserving the distinct same-named symbols that a bare-name dedup would
+// have hidden.
+func dedupBySymbol(in []SearchResult, limit int) []SearchResult {
 	seen := make(map[string]bool, limit)
 	out := make([]SearchResult, 0, limit)
 	for _, r := range in {
 		if len(out) >= limit {
 			break
 		}
-		if seen[r.Name] {
+		k := symbolKey(r)
+		if seen[k] {
 			continue
 		}
-		seen[r.Name] = true
+		seen[k] = true
 		out = append(out, r)
 	}
 	return out

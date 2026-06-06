@@ -58,6 +58,9 @@ func NewServer(a *app.App) *sdk.Server {
 	addTool(s, a, "get_code_snippet",
 		"Return the exact source of a symbol by file + name, instead of reading the whole file. Returns found=false (not an error) when the symbol is unknown, plus its line range.",
 		getCodeSnippet)
+	addTool(s, a, "find_implementations",
+		"Find the types that implement or subclass a given interface/base type (direction=down, default), or the supertypes a type extends (direction=up), from the graph's inheritance edges. This is the structural answer to the classic interface grep — \"what implements IRequestExecutor\" — that search_graph cannot give, because implementers don't share the interface's name. Pass `symbol` as the type's bare or qualified name. Prefer this over grepping for `: TypeName` so codebase navigation stays in recarto.",
+		findImplementations)
 	return s
 }
 
