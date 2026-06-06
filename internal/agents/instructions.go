@@ -31,6 +31,15 @@ per-repo SQLite cache outside the working tree.
   instead of reading whole files. When searching ` + "`search_graph`" + ` by concept, also
   pass ` + "`candidate_symbols`" + ` — the identifier names you expect (e.g. ` + "`AddressLookup`, `Geocode`" + `);
   the names you supply are what make concept search land.
+- **Orient first** in unfamiliar code with ` + "`get_architecture`" + ` (module/file/symbol
+  map), then ` + "`search_graph` / `query_graph`" + ` to locate symbols and
+  ` + "`get_code_snippet`" + ` to read one instead of a whole file. A lookup miss is an
+  empty result, not an error.
+- **Trace** with ` + "`trace_call_path`" + `: each hop is annotated with a confidence —
+  trust high/typed/self hops; treat low/name hops as candidates to verify with
+  ` + "`get_code_snippet`" + `.
+- **Inspect & curate** memories with ` + "`list_memory` / `get_memory`" + `; delete one
+  recorded in error with ` + "`forget_memory`" + ` (or supersede it via ` + "`supersedes_id`" + `).
 
 Recarto reinforces near-duplicate memories instead of duplicating them, so record
 freely — repeated learnings converge to one entry.`
