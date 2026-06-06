@@ -16,13 +16,13 @@ import (
 
 // MemoryView is the wire shape for a memory returned by recall/list/get/search.
 type MemoryView struct {
-	ID                 string  `json:"id"`
-	Kind               string  `json:"kind"`
-	Title              string  `json:"title"`
-	Body               string  `json:"body"`
-	Branch             string  `json:"branch,omitempty"`
-	Pinned             bool    `json:"pinned,omitempty"`
-	ReinforcementCount int     `json:"reinforcement_count,omitempty"`
+	ID                 string   `json:"id"`
+	Kind               string   `json:"kind"`
+	Title              string   `json:"title"`
+	Body               string   `json:"body"`
+	Branch             string   `json:"branch,omitempty"`
+	Pinned             bool     `json:"pinned,omitempty"`
+	ReinforcementCount int      `json:"reinforcement_count,omitempty"`
 	Score              float64  `json:"score,omitempty"`
 	Caveat             string   `json:"caveat,omitempty"`
 	MatchedOn          []string `json:"matched_on,omitempty"`

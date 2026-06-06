@@ -33,9 +33,9 @@ type RecallQuery struct {
 	TaskHint    string
 	Files       []string
 	Symbols     []string
-	Kind        Kind   // "" → any kind
-	Branch      string // current branch, for branch-affinity boost
-	Baseline    bool   // session-start: also seed candidates with recent cerebrum memories (no query needed)
+	Kind        Kind    // "" → any kind
+	Branch      string  // current branch, for branch-affinity boost
+	Baseline    bool    // session-start: also seed candidates with recent cerebrum memories (no query needed)
 	Limit       int     // max lexical candidates (0 → default)
 	TokenBudget int     // 0 → default
 	Worktree    string  // current worktree absolute path, for ref-resolvability
