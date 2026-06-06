@@ -144,6 +144,28 @@ func formatTodoReminders(loc string, todos []*memory.Record) string {
 	return strings.Join(lines, "\n")
 }
 
+// formatGuidance renders file/symbol-anchored guardrail memories as advisory lines
+// the moment that code is touched: do_not_repeat as a hard "don't" (🚫) and
+// decision as a settled rationale (📌). It is the just-in-time counterpart to
+// formatBugWarnings for the high-signal kinds recall would otherwise only surface,
+// budget permitting, at session start.
+func formatGuidance(loc string, recs []*memory.Record) string {
+	lines := make([]string, 0, len(recs))
+	for _, r := range recs {
+		title := r.Title
+		if title == "" {
+			title = "(untitled)"
+		}
+		switch r.Kind {
+		case memory.KindDoNotRepeat:
+			lines = append(lines, fmt.Sprintf("🚫 do-not-repeat for %s: %s", loc, title))
+		default: // decision
+			lines = append(lines, fmt.Sprintf("📌 prior decision for %s: %s", loc, title))
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
 // trimOneLine collapses a memory body to its first line, capped at cerebrumBodyMax
 // runes, for the budget-conscious cerebrum tier.
 func trimOneLine(s string) string {

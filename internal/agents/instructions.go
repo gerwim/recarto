@@ -23,6 +23,11 @@ per-repo SQLite cache outside the working tree.
 
 - At session start Recarto injects the most relevant memories for this branch.
 - **Record** knowledge with ` + "`record_memory`" + ` and bug fixes with ` + "`record_bug`" + `.
+- **Anchor** each memory to the files/symbols it concerns (the ` + "`record_memory`" + ` refs):
+  an anchored bug, do-not-repeat or decision resurfaces automatically the moment you
+  read or edit that code — just-in-time, costing no tokens until it is relevant, and
+  shown only once per session. Guidance with no refs only appears in the budgeted
+  session-start tier, so anchor anything you want to fire at the point of change.
 - **Recall** with ` + "`recall_memory`" + ` and ` + "`search_bugs`" + ` before changing code.
 - **Track open work** as a ` + "`todo`" + ` memory (` + "`record_memory`" + ` with kind ` + "`todo`" + `): it
   resurfaces at session start and when you touch its referenced files. Close it with

@@ -90,6 +90,30 @@ func handleSessionStart(ctx context.Context, a *app.App, ev Event) (Result, erro
 	return Result{Context: formatSessionContext(results, arch, bugs, budget)}, nil
 }
 
+// dedupSurfaced filters recs to those not yet surfaced in this session, marking the
+// returned ones as surfaced. A file/symbol-anchored memory re-found on every read or
+// edit of the same code would otherwise re-inject a block already sitting in the
+// transcript — pure token waste; this keeps each memory's just-in-time surfacing to
+// once per session. It is keyed by memory id, so a memory anchored to several files
+// surfaces at most once regardless of which file triggers it. With no session to
+// scope to it is a passthrough (mirrors the augment dedup).
+func dedupSurfaced(ctx context.Context, a *app.App, sessionID string, recs []*memory.Record) []*memory.Record {
+	if sessionID == "" || len(recs) == 0 {
+		return recs
+	}
+	scope := "session:" + sessionID
+	out := make([]*memory.Record, 0, len(recs))
+	for _, r := range recs {
+		metric := "surfaced:" + r.ID
+		if n, err := a.Ledger.Get(ctx, scope, metric); err == nil && n > 0 {
+			continue
+		}
+		_ = a.Ledger.Incr(ctx, scope, metric, 1)
+		out = append(out, r)
+	}
+	return out
+}
+
 // handlePostRead logs the read to the ledger and warns (non-blocking) when the same
 // file has already been read this session, plus surfaces any prior bug tied to it.
 func handlePostRead(ctx context.Context, a *app.App, ev Event) (Result, error) {
@@ -116,11 +140,20 @@ func handlePostRead(ctx context.Context, a *app.App, ev Event) (Result, error) {
 			"Rely on the earlier read instead of reading it again.", file, n, tokens))
 	}
 	rel := memory.RelFileRef(a.Git.Worktree, file)
-	if found, err := a.Engine.BugsForCode(ctx, a.Git.Branch, []string{rel}, nil); err == nil && len(found) > 0 {
-		msgs = append(msgs, formatBugWarnings(rel, found))
+	if found, err := a.Engine.BugsForCode(ctx, a.Git.Branch, []string{rel}, nil); err == nil {
+		if found = dedupSurfaced(ctx, a, ev.SessionID, found); len(found) > 0 {
+			msgs = append(msgs, formatBugWarnings(rel, found))
+		}
 	}
-	if found, err := a.Engine.TodosForCode(ctx, a.Git.Branch, []string{rel}, nil); err == nil && len(found) > 0 {
-		msgs = append(msgs, formatTodoReminders(rel, found))
+	if found, err := a.Engine.GuidanceForCode(ctx, a.Git.Branch, []string{rel}, nil); err == nil {
+		if found = dedupSurfaced(ctx, a, ev.SessionID, found); len(found) > 0 {
+			msgs = append(msgs, formatGuidance(rel, found))
+		}
+	}
+	if found, err := a.Engine.TodosForCode(ctx, a.Git.Branch, []string{rel}, nil); err == nil {
+		if found = dedupSurfaced(ctx, a, ev.SessionID, found); len(found) > 0 {
+			msgs = append(msgs, formatTodoReminders(rel, found))
+		}
 	}
 	if len(msgs) == 0 {
 		return Result{}, nil
@@ -144,17 +177,26 @@ func handlePostEdit(ctx context.Context, a *app.App, ev Event) (Result, error) {
 	rel = filepath.ToSlash(rel)
 
 	var res Result
-	// Surface any prior bug tied to this file before re-indexing (best-effort).
-	// This matches stored refs by path and does not require the file on disk.
-	if found, berr := a.Engine.BugsForCode(ctx, a.Git.Branch, []string{rel}, nil); berr == nil && len(found) > 0 {
-		res.Context = formatBugWarnings(rel, found)
-	}
-	if found, berr := a.Engine.TodosForCode(ctx, a.Git.Branch, []string{rel}, nil); berr == nil && len(found) > 0 {
-		if res.Context != "" {
-			res.Context += "\n"
+	// Surface any prior bug/guidance/todo tied to this file before re-indexing
+	// (best-effort). This matches stored refs by path and does not require the file
+	// on disk. Each is deduped per session so repeated edits don't re-inject.
+	var msgs []string
+	if found, berr := a.Engine.BugsForCode(ctx, a.Git.Branch, []string{rel}, nil); berr == nil {
+		if found = dedupSurfaced(ctx, a, ev.SessionID, found); len(found) > 0 {
+			msgs = append(msgs, formatBugWarnings(rel, found))
 		}
-		res.Context += formatTodoReminders(rel, found)
 	}
+	if found, berr := a.Engine.GuidanceForCode(ctx, a.Git.Branch, []string{rel}, nil); berr == nil {
+		if found = dedupSurfaced(ctx, a, ev.SessionID, found); len(found) > 0 {
+			msgs = append(msgs, formatGuidance(rel, found))
+		}
+	}
+	if found, berr := a.Engine.TodosForCode(ctx, a.Git.Branch, []string{rel}, nil); berr == nil {
+		if found = dedupSurfaced(ctx, a, ev.SessionID, found); len(found) > 0 {
+			msgs = append(msgs, formatTodoReminders(rel, found))
+		}
+	}
+	res.Context = strings.Join(msgs, "\n")
 	content, err := os.ReadFile(abs)
 	if err != nil {
 		return res, nil // file vanished between edit and hook; ignore

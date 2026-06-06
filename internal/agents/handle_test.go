@@ -172,6 +172,53 @@ func TestPostReadSurfacesTodo(t *testing.T) {
 	}
 }
 
+func TestPostEditSurfacesGuidance(t *testing.T) {
+	a := newTestApp(t, "main")
+	ctx := context.Background()
+	rel := "internal/agents/handle.go"
+	if _, _, err := a.Engine.Record(ctx, memory.NewMemory{
+		Kind: memory.KindDoNotRepeat, Title: "do not hand-roll the lexer", Body: "use tree-sitter",
+		Refs: []memory.Ref{{Type: memory.RefFile, Value: rel}}, Branch: a.Git.Branch, Source: "cli",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	res, err := handlePostEdit(ctx, a, Event{Kind: KindPostEdit, SessionID: "s1", FilePath: a.Git.Worktree + "/" + rel})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(res.Context, "do not hand-roll the lexer") {
+		t.Fatalf("do_not_repeat guidance not surfaced on edit; got: %q", res.Context)
+	}
+}
+
+func TestJustInTimeSurfacingDedupsPerSession(t *testing.T) {
+	a := newTestApp(t, "main")
+	ctx := context.Background()
+	rel := "internal/agents/handle.go"
+	if _, _, err := a.Engine.Record(ctx, memory.NewMemory{
+		Kind: memory.KindDoNotRepeat, Title: "do not hand-roll the lexer", Body: "use tree-sitter",
+		Refs: []memory.Ref{{Type: memory.RefFile, Value: rel}}, Branch: a.Git.Branch, Source: "cli",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ev := Event{Kind: KindPostRead, SessionID: "s1", FilePath: rel, ToolResult: "package agents"}
+
+	first, err := handlePostRead(ctx, a, ev)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(first.Context, "do not hand-roll the lexer") {
+		t.Fatalf("first touch should surface guidance; got %q", first.Context)
+	}
+	second, err := handlePostRead(ctx, a, ev)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(second.Context, "do not hand-roll the lexer") {
+		t.Fatalf("repeated touch must not re-inject the same guidance (token waste); got %q", second.Context)
+	}
+}
+
 func TestFormatSessionContextDropsEntryUnderTinyBudget(t *testing.T) {
 	results := []memory.RecallResult{
 		{Record: &memory.Record{Kind: memory.KindLearning, Title: "WontFitAtAll", Body: "body"}},

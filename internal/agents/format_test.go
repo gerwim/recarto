@@ -29,6 +29,46 @@ func TestFormatTodoReminders(t *testing.T) {
 	}
 }
 
+func TestFormatGuidanceMarksKindsDistinctly(t *testing.T) {
+	loc := "internal/agents/handle.go"
+	out := formatGuidance(loc, []*memory.Record{
+		{Kind: memory.KindDoNotRepeat, Title: "do not hand-roll the lexer"},
+		{Kind: memory.KindDecision, Title: "we chose modernc sqlite"},
+	})
+	if !strings.Contains(out, loc) {
+		t.Fatalf("guidance must name the location: %q", out)
+	}
+	if !strings.Contains(out, "do not hand-roll the lexer") || !strings.Contains(out, "we chose modernc sqlite") {
+		t.Fatalf("guidance must include both titles: %q", out)
+	}
+	// The do_not_repeat (guardrail) and decision (rationale) lines must read
+	// differently so the agent can tell a hard "don't" from a softer rationale.
+	dnrLine, decLine := "", ""
+	for l := range strings.SplitSeq(out, "\n") {
+		if strings.Contains(l, "hand-roll") {
+			dnrLine = l
+		}
+		if strings.Contains(l, "modernc") {
+			decLine = l
+		}
+	}
+	if dnrLine == "" || decLine == "" {
+		t.Fatalf("both guidance lines must render: %q", out)
+	}
+	if firstMarker(dnrLine) == firstMarker(decLine) {
+		t.Fatalf("do_not_repeat and decision must use distinct markers:\n%s", out)
+	}
+}
+
+// firstMarker returns the leading non-space rune of a line, the visual marker.
+func firstMarker(line string) string {
+	line = strings.TrimSpace(line)
+	for _, r := range line {
+		return string(r)
+	}
+	return ""
+}
+
 func TestFormatSessionContextMapSelectsProductOverTestModules(t *testing.T) {
 	var mods []graph.Module
 	// Eight alphabetically-first test modules, each large by file count — exactly
