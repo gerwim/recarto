@@ -459,6 +459,29 @@ func migrateOnce(ctx context.Context, db *sql.DB) error {
 	}
 	defer conn.Close()
 
+	// Fast path: a lock-free read of the schema version. Migrate runs on every
+	// Open — every CLI query, every hook, every MCP startup — but a migration is
+	// actually pending only just after a version bump. WAL lets this read proceed
+	// even while another connection holds the write lock, so when the schema is
+	// already current we return without ever taking the IMMEDIATE lock. That stops
+	// a read-only open (e.g. `graph search` fired while a reconcile/index — or a
+	// second recarto process — is writing) from contending for the writer and
+	// hard-failing with "database is locked". Previously every Open did an
+	// unconditional BEGIN IMMEDIATE, so a steady read workload competed with any
+	// in-flight writer and intermittently SQLITE_BUSY-failed under load.
+	var current int
+	if err := conn.QueryRowContext(ctx, "PRAGMA user_version").Scan(&current); err != nil {
+		return err
+	}
+	if current >= len(migrations) {
+		return nil
+	}
+
+	// Slow path: a migration is pending. Take the IMMEDIATE write lock and
+	// re-read user_version under it — another process may have applied the
+	// migrations between our lock-free read and acquiring the lock, so the apply
+	// loop starts from the version observed inside the transaction, not the
+	// fast-path read.
 	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
 		return err
 	}
@@ -467,7 +490,6 @@ func migrateOnce(ctx context.Context, db *sql.DB) error {
 		return e
 	}
 
-	var current int
 	if err := conn.QueryRowContext(ctx, "PRAGMA user_version").Scan(&current); err != nil {
 		return rollback(err)
 	}
