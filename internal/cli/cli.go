@@ -12,7 +12,7 @@ import (
 // known reports whether cmd is a CLI command that needs an open App.
 func known(cmd string) bool {
 	switch cmd {
-	case "status", "doctor", "remember", "recall", "bug", "memory", "serve", "hook", "index", "graph", "compact", "snapshot", "todo":
+	case "status", "doctor", "remember", "forget", "recall", "bug", "memory", "serve", "hook", "index", "graph", "compact", "snapshot", "todo":
 		return true
 	}
 	return false
@@ -42,7 +42,7 @@ func Run(args []string, out io.Writer) error {
 	}
 
 	if !known(cmd) {
-		return fmt.Errorf("unknown command %q (try: init serve hook status doctor remember recall bug memory index graph compact snapshot todo)", cmd)
+		return fmt.Errorf("unknown command %q (try: init serve hook status doctor remember forget recall bug memory index graph compact snapshot todo)", cmd)
 	}
 
 	a, err := app.Open(app.Config{})
@@ -64,6 +64,8 @@ func Run(args []string, out io.Writer) error {
 		return Doctor(ctx, a, out)
 	case "remember":
 		return Remember(ctx, a, out, rest)
+	case "forget":
+		return Forget(ctx, a, out, rest)
 	case "recall":
 		return Recall(ctx, a, out, rest)
 	case "bug":
@@ -108,6 +110,7 @@ func usage(w io.Writer) error {
 	fmt.Fprintln(w, "  status            repo id, branch, memory counts, ledger")
 	fmt.Fprintln(w, "  doctor            health checks (db, WAL, integrity, git)")
 	fmt.Fprintln(w, "  remember <kind>   record a memory (--title --body --files --symbols --tags --pin --global)")
+	fmt.Fprintln(w, "  forget <id>       hard-delete a memory by id")
 	fmt.Fprintln(w, "  recall [hint]     ranked, budgeted recall (--files --symbols --kind --limit --budget)")
 	fmt.Fprintln(w, "  bug add|search    record or search bug memories")
 	fmt.Fprintln(w, "  memory show       render all active memory as markdown (--branch)")

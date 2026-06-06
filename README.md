@@ -138,6 +138,7 @@ hooks fire automatically. The CLI is available for inspection and scripting:
 recarto status            repo id, branch, memory counts, ledger
 recarto doctor            health checks (db, WAL, integrity, git)
 recarto remember <kind>   record a memory (--title --body --files --symbols --tags --pin --global)
+recarto forget <id>       hard-delete a memory by id
 recarto recall [hint]     ranked, budgeted recall (--files --symbols --kind --limit --budget)
 recarto bug add|search    record or search bug memories
 recarto memory show       render all active memory as markdown (--branch)
