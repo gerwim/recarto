@@ -124,6 +124,71 @@ func TestSearchContentFilters(t *testing.T) {
 	}
 }
 
+// TestSearchContentSearchesUnindexedTextFiles proves grep reaches files the code
+// graph never parsed — config, build, docs, data (.csproj, .json, .md, .yaml).
+// Without this, an agent grepping a dependency name in a .csproj gets a false
+// "(no matches)" and falls back to shell grep, defeating the point of recarto.
+func TestSearchContentSearchesUnindexedTextFiles(t *testing.T) {
+	e := newTestEngine(t)
+	ctx := context.Background()
+	wt := t.TempDir()
+	// One indexed code file and several text files the indexer skips.
+	indexInto(t, e, wt, "code.go", "package p\nfunc Use() { _ = \"DependencyMarker\" }\n")
+	writeFile(t, wt, "proj.csproj", "<Project>\n  <PackageReference Include=\"DependencyMarker\" />\n</Project>\n")
+	writeFile(t, wt, "appsettings.json", "{\n  \"key\": \"DependencyMarker\"\n}\n")
+	writeFile(t, wt, "README.md", "# Title\nUses DependencyMarker for things.\n")
+
+	res, err := e.SearchContent(ctx, wt, "DependencyMarker", ContentSearchOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	for _, m := range res {
+		got[m.Path] = true
+	}
+	for _, want := range []string{"code.go", "proj.csproj", "appsettings.json", "README.md"} {
+		if !got[want] {
+			t.Errorf("missing match in %s; got paths %v", want, got)
+		}
+	}
+	// The indexed file still carries its enclosing symbol; an unindexed file has none.
+	for _, m := range res {
+		if m.Path == "code.go" && !strings.Contains(m.Symbol, "Use") {
+			t.Errorf("indexed file lost its enclosing symbol: %+v", m)
+		}
+		if m.Path == "proj.csproj" && m.Symbol != "" {
+			t.Errorf("unindexed file should have empty symbol, got %q", m.Symbol)
+		}
+	}
+}
+
+// TestSearchContentSkipsBinaryFiles proves grep does not emit lines from binary
+// blobs (images, compiled output): they would be garbage tokens, and ripgrep
+// skips them too. Detection is by NUL byte and by known-binary extension.
+func TestSearchContentSkipsBinaryFiles(t *testing.T) {
+	e := newTestEngine(t)
+	ctx := context.Background()
+	wt := t.TempDir()
+	indexInto(t, e, wt, "code.go", "package p\nvar marker = \"BinNeedle\"\n")
+	// A binary blob whose bytes happen to contain the search text around a NUL.
+	writeFile(t, wt, "blob.dat", "prefix\x00BinNeedle\x00suffix")
+	// A PNG by extension (skipped before read).
+	writeFile(t, wt, "img.png", "BinNeedle not really a png")
+
+	res, err := e.SearchContent(ctx, wt, "BinNeedle", ContentSearchOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range res {
+		if m.Path == "blob.dat" || m.Path == "img.png" {
+			t.Errorf("binary file %s should be skipped, got match: %+v", m.Path, m)
+		}
+	}
+	if len(res) != 1 || res[0].Path != "code.go" {
+		t.Fatalf("want only the text match in code.go, got %+v", res)
+	}
+}
+
 // TestSearchContentMetaReportsTruncation proves the meta channel reports the true
 // total match count and that both the global limit and the per-file cap are
 // surfaced — so an LLM treating grep as exhaustive learns the page is partial

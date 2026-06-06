@@ -278,7 +278,7 @@ type SearchContentInput struct {
 	Regex      bool   `json:"regex,omitempty" jsonschema:"treat pattern as a regular expression instead of a literal substring"`
 	IgnoreCase bool   `json:"ignore_case,omitempty" jsonschema:"case-insensitive match"`
 	PathGlob   string `json:"path_glob,omitempty" jsonschema:"restrict to files whose path matches this glob (e.g. *.cs, src/**). A glob without a slash matches the filename."`
-	Language   string `json:"language,omitempty" jsonschema:"restrict to a language (go, csharp, typescript, tsx, javascript)"`
+	Language   string `json:"language,omitempty" jsonschema:"restrict to a language (go, csharp, typescript, tsx, javascript). NOTE: this scopes the search to indexed code of that language; omit it to also search config/docs/data files (.csproj, .json, .yaml, .md, …)."`
 	Limit      int    `json:"limit,omitempty" jsonschema:"max matches (default 50)"`
 	MaxPerFile int    `json:"max_per_file,omitempty" jsonschema:"max matches per file (default 5) so one file cannot dominate the page"`
 }

@@ -54,9 +54,14 @@ per-repo SQLite cache outside the working tree.
   ` + "`get_code_snippet`" + ` the one you need. Prefer this over opening a large file to
   find your way around it.
 - **Grep without leaving the graph** with ` + "`search_content`" + ` for arbitrary text
-  (string literals, error messages, config keys, TODOs) — every hit comes back with
-  its enclosing symbol, and the result reports ` + "`total`/`truncated`" + ` so you know
-  whether the page is complete. Prefer it over a shell ` + "`grep`" + `; raise ` + "`limit`" + ` /
+  (string literals, error messages, config keys, TODOs). It searches the *whole*
+  worktree honoring ` + "`.gitignore`" + ` — not just parsed code but config, build, docs
+  and data files the graph never indexes (` + "`.csproj`, `.json`, `.yaml`, `.md`" + `, …) —
+  so it is a complete shell-` + "`grep`" + ` replacement; you never have to shell out for a
+  file kind the graph happens not to cover. Hits in indexed code carry their
+  enclosing symbol; hits elsewhere read as file scope. The result reports
+  ` + "`total`/`truncated`" + ` so you know whether the page is complete. Prefer it over a
+  shell ` + "`grep`" + `; raise ` + "`limit`" + ` /
   ` + "`max_per_file`" + ` (or narrow with ` + "`path_glob`/`language`" + `) when it says it truncated.
   It does full regex too: set ` + "`regex=true`" + ` (` + "`ignore_case`" + ` for case-folding). For
   precise *references* to a type/symbol, prefer a word-boundary regex (` + "`\\bName\\b`" + `)

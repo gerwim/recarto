@@ -1,11 +1,15 @@
 package graph
 
 import (
+	"bytes"
 	"context"
+	"io/fs"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 )
 
@@ -74,39 +78,59 @@ func (e *Engine) SearchContentWithMeta(ctx context.Context, worktree, pattern st
 		return nil, meta, err
 	}
 
-	q := `SELECT path FROM files WHERE worktree = ?`
-	args := []any{worktree}
-	if opts.Language != "" {
-		q += ` AND language = ?`
-		args = append(args, opts.Language)
-	}
-	q += ` ORDER BY path`
-	rows, err := e.st.DB.QueryContext(ctx, q, args...)
-	if err != nil {
-		return nil, meta, err
-	}
+	// File set. A language filter only makes sense for parsed code, so it stays
+	// scoped to the index (files table). Without one, grep scans the whole
+	// worktree — including config/build/docs/data files the indexer never parsed
+	// (.csproj, .json, .md, .yaml) — so it is a true ripgrep replacement and an
+	// agent never has to shell out for a file the graph happens not to cover.
 	var paths []string
-	for rows.Next() {
-		var p string
-		if err := rows.Scan(&p); err != nil {
-			rows.Close()
+	if opts.Language != "" {
+		rows, err := e.st.DB.QueryContext(ctx,
+			`SELECT path FROM files WHERE worktree = ? AND language = ? ORDER BY path`,
+			worktree, opts.Language)
+		if err != nil {
 			return nil, meta, err
 		}
-		if opts.PathGlob != "" && !globMatch(opts.PathGlob, p) {
-			continue
+		for rows.Next() {
+			var p string
+			if err := rows.Scan(&p); err != nil {
+				rows.Close()
+				return nil, meta, err
+			}
+			paths = append(paths, p)
 		}
-		paths = append(paths, p)
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return nil, meta, err
+		}
+	} else {
+		all, lerr := listSearchableFiles(worktree)
+		if lerr != nil {
+			return nil, meta, lerr
+		}
+		paths = all
 	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return nil, meta, err
+	if opts.PathGlob != "" {
+		kept := paths[:0]
+		for _, p := range paths {
+			if globMatch(opts.PathGlob, p) {
+				kept = append(kept, p)
+			}
+		}
+		paths = kept
 	}
 
 	var hand, gen []ContentMatch
 	for _, p := range paths {
+		if hasBinaryExt(p) {
+			continue // image/archive/compiled blob: never grep-able text
+		}
 		content, rerr := os.ReadFile(filepath.Join(worktree, filepath.FromSlash(p)))
 		if rerr != nil {
 			continue // file vanished since index; skip
+		}
+		if looksBinary(content) {
+			continue // NUL byte in the head ⇒ binary; lines would be garbage tokens
 		}
 		// Whole-file pre-filter: the large majority of files contain no match, so
 		// one scan here avoids splitting them into lines and the per-line regex.
@@ -181,6 +205,77 @@ func compilePattern(pattern string, asRegex, ignoreCase bool) (*regexp.Regexp, e
 		expr = "(?i)" + expr
 	}
 	return regexp.Compile(expr)
+}
+
+// listSearchableFiles enumerates every file grep should scan in worktree. When
+// worktree is a git repo it uses `git ls-files` (tracked + untracked-but-not-
+// ignored), so .gitignore is honored exactly like ripgrep; otherwise it walks the
+// filesystem under the directory denylist. Unlike the indexer's Source.List it
+// does NOT filter by code-language extension — grep must reach config, build,
+// docs, and data files the graph never parses.
+func listSearchableFiles(worktree string) ([]string, error) {
+	out, err := exec.Command("git", "-C", worktree,
+		"ls-files", "--cached", "--others", "--exclude-standard", "-z").Output()
+	if err == nil {
+		seen := make(map[string]bool)
+		var paths []string
+		for _, rel := range strings.Split(string(out), "\x00") {
+			if rel == "" || seen[rel] {
+				continue
+			}
+			seen[rel] = true
+			paths = append(paths, rel)
+		}
+		sort.Strings(paths)
+		return paths, nil
+	}
+	// Not a git repo (or git missing): walk the filesystem, skipping the denylist.
+	var paths []string
+	werr := filepath.WalkDir(worktree, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if skipDir[d.Name()] {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		rel, rerr := filepath.Rel(worktree, p)
+		if rerr != nil {
+			return rerr
+		}
+		paths = append(paths, filepath.ToSlash(rel))
+		return nil
+	})
+	if werr != nil {
+		return nil, werr
+	}
+	sort.Strings(paths)
+	return paths, nil
+}
+
+// binaryExt lists extensions whose contents are never grep-able text, so the file
+// is skipped before it is even read. (SVG is XML and deliberately absent.)
+var binaryExt = map[string]bool{
+	".png": true, ".jpg": true, ".jpeg": true, ".gif": true, ".webp": true,
+	".ico": true, ".bmp": true, ".tiff": true, ".pdf": true, ".zip": true,
+	".gz": true, ".tar": true, ".tgz": true, ".7z": true, ".rar": true,
+	".dll": true, ".exe": true, ".so": true, ".dylib": true, ".bin": true,
+	".class": true, ".o": true, ".a": true, ".lib": true, ".pdb": true,
+	".woff": true, ".woff2": true, ".ttf": true, ".eot": true, ".otf": true,
+	".mp4": true, ".mov": true, ".mp3": true, ".wav": true, ".avi": true,
+	".snk": true, ".pfx": true, ".nupkg": true, ".wasm": true,
+}
+
+func hasBinaryExt(p string) bool {
+	return binaryExt[strings.ToLower(filepath.Ext(p))]
+}
+
+// looksBinary reports whether content is binary, detected by a NUL byte in the
+// head — the same heuristic grep and ripgrep use to skip non-text files.
+func looksBinary(content []byte) bool {
+	return bytes.IndexByte(content[:min(len(content), 8000)], 0) >= 0
 }
 
 // globMatch reports whether a repo-relative path matches glob. A glob with no

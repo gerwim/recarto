@@ -353,11 +353,7 @@ func Graph(ctx context.Context, a *app.App, w io.Writer, args []string) error {
 			return nil
 		}
 		for _, m := range matches {
-			sym := m.Symbol
-			if sym == "" {
-				sym = "(file scope)"
-			}
-			fmt.Fprintf(w, "%s:%d  [%s %s]  %s\n", m.Path, m.Line, m.Kind, sym, m.Text)
+			fmt.Fprintf(w, "%s:%d  [%s]  %s\n", m.Path, m.Line, grepAnnot(m.Kind, m.Symbol), m.Text)
 		}
 		// A grep replacement must never present a capped page as the whole answer.
 		// Report the true total and how to widen so the agent can trust completeness.
@@ -487,6 +483,16 @@ func leafName(sym string) string {
 	return sym
 }
 
+// grepAnnot renders a content match's enclosing-symbol tag. Indexed code lines
+// carry "kind qualified.name"; lines in files the graph never parsed (config,
+// docs, data) have neither, so they read as "file scope" without a stray space.
+func grepAnnot(kind, symbol string) string {
+	if symbol == "" {
+		return "file scope"
+	}
+	return kind + " " + symbol
+}
+
 // isHelpToken reports whether a token requests usage.
 func isHelpToken(tok string) bool {
 	return tok == "help" || tok == "-h" || tok == "--help"
@@ -512,7 +518,9 @@ const graphUsage = `recarto graph <sub> — query the code graph
       --symbol=<Name>               candidate identifier you expect (repeatable; sharpens ranking)
       --kind=<k> --lang=<l>         filter by node kind / language
       --limit=<n>                   max results (default 20)
-  grep <pattern> [flags]            full-text search, each hit with its enclosing symbol
+  grep <pattern> [flags]            full-text search over the whole worktree (code +
+                                    config/docs/data, honoring .gitignore); each hit
+                                    in indexed code shows its enclosing symbol
       -r, --regex                   treat pattern as a regular expression (RE2)
       -i, --ignore-case             case-insensitive match
       --glob=<glob>                 restrict to paths matching glob (e.g. *.cs, src/**)

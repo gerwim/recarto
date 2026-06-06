@@ -129,6 +129,35 @@ func TestGraphSearchEmptyErrors(t *testing.T) {
 	}
 }
 
+// TestGraphGrepCoversUnindexedFiles proves `graph grep` searches files the code
+// graph never parses (config/build/docs/data), so an agent grepping a dependency
+// in a .csproj or a key in a .json stays in recarto instead of shelling out. The
+// unindexed hit reads as "[file scope]"; the indexed one keeps its symbol tag.
+func TestGraphGrepCoversUnindexedFiles(t *testing.T) {
+	a := newTestApp(t, "main")
+	wt := t.TempDir()
+	a.Git.Worktree = wt
+	os.WriteFile(filepath.Join(wt, "a.go"), []byte("package p\nfunc Use(){ _ = \"DepMarker\" }\n"), 0o644)
+	os.WriteFile(filepath.Join(wt, "proj.csproj"), []byte("<Project>\n  <PackageReference Include=\"DepMarker\"/>\n</Project>\n"), 0o644)
+	if err := Index(context.Background(), a, &bytes.Buffer{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := Graph(context.Background(), a, &out, []string{"grep", "DepMarker"}); err != nil {
+		t.Fatal(err)
+	}
+	s := out.String()
+	if !bytes.Contains(out.Bytes(), []byte("proj.csproj")) {
+		t.Errorf("grep should find the unindexed .csproj match, got %q", s)
+	}
+	if !bytes.Contains(out.Bytes(), []byte("[file scope]")) {
+		t.Errorf("unindexed match should render as [file scope], got %q", s)
+	}
+	if !bytes.Contains(out.Bytes(), []byte("a.go")) {
+		t.Errorf("grep should still find the indexed match, got %q", s)
+	}
+}
+
 func TestGraphCalleesAnnotated(t *testing.T) {
 	a := newTestApp(t, "main")
 	wt := t.TempDir()
