@@ -23,11 +23,12 @@ const indexBatchSize = 128
 const checkpointEvery = 2000
 
 // parsedFile is a file whose graph has been extracted and is awaiting its batched
-// write. Content is intentionally not retained — only the extracted result and
-// the metadata the files row needs.
+// write. Content is retained (src) so the node-signature column can be populated
+// at write time, alongside the extracted result and the files-row metadata.
 type parsedFile struct {
 	path        string
 	lang        string
+	src         []byte
 	res         parse.Result
 	hash        string
 	mtime, size int64
@@ -169,7 +170,7 @@ func (e *Engine) indexWorklist(ctx context.Context, worktree string, src Source,
 			return outcome{err: err}
 		}
 		return outcome{pf: parsedFile{
-			path: fe.Path, lang: lang, res: res, hash: hash, mtime: fe.Mtime, size: fe.Size,
+			path: fe.Path, lang: lang, src: content, res: res, hash: hash, mtime: fe.Mtime, size: fe.Size,
 		}}
 	}
 
@@ -228,7 +229,7 @@ func (e *Engine) indexWorklist(ctx context.Context, worktree string, src Source,
 			defer st.Close()
 			for _, pf := range batch {
 				if err := e.writeFileGraph(ctx, c, st, worktree, pf.path, pf.lang,
-					pf.res, pf.hash, pf.mtime, pf.size, now); err != nil {
+					pf.src, pf.res, pf.hash, pf.mtime, pf.size, now); err != nil {
 					return err
 				}
 			}

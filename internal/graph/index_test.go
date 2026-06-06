@@ -2,8 +2,31 @@ package graph
 
 import (
 	"context"
+	"strings"
 	"testing"
 )
+
+func TestSignaturePopulatedOnIndex(t *testing.T) {
+	e := newTestEngine(t)
+	ctx := context.Background()
+	src := []byte("package p\nfunc Greet(name string) string { return name }")
+	if err := e.IndexFile(ctx, "/wt", "sample.go", src, 1, int64(len(src))); err != nil {
+		t.Fatal(err)
+	}
+	res, err := e.Search(ctx, "/wt", "Greet", "", "", 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sig string
+	for _, r := range res {
+		if r.Name == "Greet" {
+			sig = r.Signature
+		}
+	}
+	if !strings.Contains(sig, "func Greet(") {
+		t.Fatalf("signature = %q, want it to contain the declaration line", sig)
+	}
+}
 
 func countRows(t *testing.T, e *Engine, table, worktree string) int {
 	t.Helper()

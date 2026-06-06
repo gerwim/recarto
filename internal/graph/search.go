@@ -49,6 +49,7 @@ type SearchResult struct {
 	Kind          string
 	Language      string
 	Path          string
+	Signature     string
 	Line          int
 	Score         float64 // higher = more relevant
 }
@@ -151,7 +152,7 @@ func (e *Engine) candidateExactPass(ctx context.Context, worktree string, candid
 	args = append(args, lowered...) // lower(n.name) IN (...)
 	args = append(args, lowered...) // lower(n.qualified_name) IN (...)
 	sql := `
-SELECT n.id, n.name, n.qualified_name, n.kind, f.language, f.path, n.start_line
+SELECT n.id, n.name, n.qualified_name, n.kind, f.language, f.path, n.start_line, n.signature
   FROM nodes n
   JOIN files f ON f.id = n.file_id
  WHERE f.worktree = ?
@@ -180,7 +181,7 @@ SELECT n.id, n.name, n.qualified_name, n.kind, f.language, f.path, n.start_line
 	for rows.Next() {
 		var r SearchResult
 		if err := rows.Scan(&r.NodeID, &r.Name, &r.QualifiedName, &r.Kind,
-			&r.Language, &r.Path, &r.Line); err != nil {
+			&r.Language, &r.Path, &r.Line, &r.Signature); err != nil {
 			return nil, err
 		}
 		out = append(out, r)
@@ -297,6 +298,7 @@ func (e *Engine) ftsPass(ctx context.Context, table, match, worktree, kind, lang
 	args := []any{match, worktree}
 	sql := fmt.Sprintf(`
 SELECT n.id, n.name, n.qualified_name, n.kind, f.language, f.path, n.start_line,
+       n.signature,
        bm25(%[1]s) AS score
   FROM %[1]s
   JOIN nodes n ON n.id = %[1]s.node_id
@@ -323,7 +325,7 @@ SELECT n.id, n.name, n.qualified_name, n.kind, f.language, f.path, n.start_line,
 		var r SearchResult
 		var bm float64
 		if err := rows.Scan(&r.NodeID, &r.Name, &r.QualifiedName, &r.Kind,
-			&r.Language, &r.Path, &r.Line, &bm); err != nil {
+			&r.Language, &r.Path, &r.Line, &r.Signature, &bm); err != nil {
 			return nil, err
 		}
 		r.Score = -bm // flip sign so higher = better

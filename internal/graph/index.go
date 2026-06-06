@@ -1,6 +1,7 @@
 package graph
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
@@ -32,7 +33,7 @@ func (e *Engine) IndexFile(ctx context.Context, worktree, path string, src []byt
 			return err
 		}
 		defer st.Close()
-		return e.writeFileGraph(ctx, c, st, worktree, path, lang, res, hash, mtime, size, now)
+		return e.writeFileGraph(ctx, c, st, worktree, path, lang, src, res, hash, mtime, size, now)
 	})
 }
 
@@ -91,8 +92,25 @@ func (s *writeStmts) Close() {
 	}
 }
 
+// signatureOf returns the symbol's first source line (trimmed, capped), used as a
+// cheap one-line signature surfaced in search results.
+func signatureOf(src []byte, start uint, max int) string {
+	if int(start) >= len(src) {
+		return ""
+	}
+	line := src[start:]
+	if i := bytes.IndexByte(line, '\n'); i >= 0 {
+		line = line[:i]
+	}
+	s := strings.TrimSpace(string(line))
+	if len(s) > max {
+		s = s[:max]
+	}
+	return s
+}
+
 func (e *Engine) writeFileGraph(ctx context.Context, c store.Conn, st *writeStmts, worktree, path, lang string,
-	res parse.Result, hash string, mtime, size, now int64) error {
+	src []byte, res parse.Result, hash string, mtime, size, now int64) error {
 	// Upsert the files row and obtain its id.
 	var fileID string
 	err := c.QueryRowContext(ctx,
@@ -154,7 +172,8 @@ func (e *Engine) writeFileGraph(ctx context.Context, c store.Conn, st *writeStmt
 			qn = s.RecvType + "." + s.Name
 		}
 		if _, err := st.node.ExecContext(ctx,
-			spans[i].id, fileID, s.Kind, s.Name, qn, parentSegment(qn), "", // signature: reserved for a future version
+			spans[i].id, fileID, s.Kind, s.Name, qn, parentSegment(qn),
+			signatureOf(src, s.StartByte, 200),
 			int64(s.StartByte), int64(s.EndByte), int64(s.StartLine), int64(s.EndLine)); err != nil {
 			return err
 		}
