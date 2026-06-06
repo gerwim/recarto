@@ -48,6 +48,44 @@ func TestGraphCalleesAnnotated(t *testing.T) {
 	}
 }
 
+// TestGraphCalleesDedupsIdenticalChains proves that when one ambiguous call site
+// resolves to several indistinguishable low-confidence name candidates (here two
+// `Foo` definitions reached via the same unknown receiver), the CLI collapses the
+// identical rendered chains into a single line with a (×N) count instead of
+// emitting N byte-identical lines an LLM must pay tokens to read.
+func TestGraphCalleesDedupsIdenticalChains(t *testing.T) {
+	a := newTestApp(t, "main")
+	wt := t.TempDir()
+	a.Git.Worktree = wt
+	os.WriteFile(filepath.Join(wt, "x.cs"),
+		[]byte("namespace N;\n"+
+			"class A { public void Foo() {} }\n"+
+			"class B { public void Foo() {} }\n"+
+			"class Svc { void M(object x) { ((dynamic)x).Foo(); } }\n"), 0o644)
+	if err := Index(context.Background(), a, &bytes.Buffer{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := Graph(context.Background(), a, &out, []string{"callees", "N.Svc.M"}); err != nil {
+		t.Fatal(err)
+	}
+	// No two emitted lines may be byte-identical: that is pure duplication.
+	seen := map[string]bool{}
+	for _, ln := range bytes.Split(bytes.TrimRight(out.Bytes(), "\n"), []byte("\n")) {
+		if len(ln) == 0 {
+			continue
+		}
+		if seen[string(ln)] {
+			t.Errorf("duplicate trace line emitted: %q\nfull output:\n%s", ln, out.String())
+		}
+		seen[string(ln)] = true
+	}
+	// The two collapsed Foo candidates must surface as a count, not be silently dropped.
+	if !bytes.Contains(out.Bytes(), []byte("×2")) {
+		t.Errorf("expected a (×2) candidate count; output = %q", out.String())
+	}
+}
+
 func TestGraphImplementations(t *testing.T) {
 	a := newTestApp(t, "main")
 	wt := t.TempDir()

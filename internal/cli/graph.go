@@ -56,6 +56,13 @@ func Graph(ctx context.Context, a *app.App, w io.Writer, args []string) error {
 		if err != nil {
 			return err
 		}
+		// Collapse byte-identical rendered chains. One ambiguous call site can yield
+		// several low-confidence name candidates that differ only by their (unshown)
+		// definition node — they render identically, so N copies cost N× the tokens
+		// for zero added signal. We keep first-seen order and annotate the collapsed
+		// count with (×N) so the ambiguity is reported, not silently dropped.
+		lines := make([]string, 0, len(chains))
+		counts := map[string]int{}
 		for _, ch := range chains {
 			parts := make([]string, len(ch))
 			for i, n := range ch {
@@ -68,7 +75,17 @@ func Graph(ctx context.Context, a *app.App, w io.Writer, args []string) error {
 				}
 				parts[i] = label
 			}
-			fmt.Fprintln(w, strings.Join(parts, " → "))
+			line := strings.Join(parts, " → ")
+			if counts[line] == 0 {
+				lines = append(lines, line)
+			}
+			counts[line]++
+		}
+		for _, line := range lines {
+			if n := counts[line]; n > 1 {
+				line += fmt.Sprintf("  (×%d)", n)
+			}
+			fmt.Fprintln(w, line)
 		}
 		return nil
 	case "arch":
