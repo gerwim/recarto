@@ -13,7 +13,7 @@ import (
 // Graph dispatches `graph <sub>`: search | callers | callees | arch | query | snippet.
 func Graph(ctx context.Context, a *app.App, w io.Writer, args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("graph: subcommand required (search|callers|callees|arch|query|snippet)")
+		return fmt.Errorf("graph: subcommand required (search|grep|callers|callees|arch|query|snippet)")
 	}
 	wt := a.Git.Worktree
 	// Lazy reconcile so query results reflect the current checkout (spec §11).
@@ -97,6 +97,42 @@ func Graph(ctx context.Context, a *app.App, w io.Writer, args []string) error {
 		}
 		for _, n := range nodes {
 			fmt.Fprintf(w, "• [%s] %s  %s:%d\n", n.Kind, n.QualifiedName, n.Path, n.Line)
+		}
+		return nil
+	case "grep", "content":
+		var opts graph.ContentSearchOpts
+		var pat []string
+		for _, tok := range rest {
+			switch {
+			case tok == "-r" || tok == "--regex":
+				opts.Regex = true
+			case tok == "-i" || tok == "--ignore-case":
+				opts.IgnoreCase = true
+			case strings.HasPrefix(tok, "--glob="):
+				opts.PathGlob = strings.TrimPrefix(tok, "--glob=")
+			case strings.HasPrefix(tok, "--lang="):
+				opts.Language = strings.TrimPrefix(tok, "--lang=")
+			default:
+				pat = append(pat, tok)
+			}
+		}
+		if len(pat) == 0 {
+			return fmt.Errorf("graph %s: pattern required", sub)
+		}
+		matches, err := a.Graph.SearchContent(ctx, wt, strings.Join(pat, " "), opts)
+		if err != nil {
+			return err
+		}
+		if len(matches) == 0 {
+			fmt.Fprintln(w, "(no matches)")
+			return nil
+		}
+		for _, m := range matches {
+			sym := m.Symbol
+			if sym == "" {
+				sym = "(file scope)"
+			}
+			fmt.Fprintf(w, "%s:%d  [%s %s]  %s\n", m.Path, m.Line, m.Kind, sym, m.Text)
 		}
 		return nil
 	case "snippet":

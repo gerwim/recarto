@@ -52,6 +52,9 @@ func NewServer(a *app.App) *sdk.Server {
 	addToolSchema(s, a, "query_graph",
 		"Run a structured query over the code graph (node filters + optional edge traversal).",
 		queryGraphSchema(), queryGraph)
+	addTool(s, a, "search_content",
+		"Full-text search across source files — the structural counterpart to grep. Finds arbitrary text that search_graph cannot: string/error-message literals, config keys, magic constants, attribute/annotation usages, comments, and call sites inside method bodies. Each match returns its file, line, the matching line text, and the enclosing symbol (kind + qualified_name) from the code graph, so you get grep-style recall with structural context. Literal substring by default; set regex=true for RE2 regex. Filter with path_glob/language; generated-file matches are demoted. Prefer this over the external grep/search tool so codebase search stays in one place.",
+		searchContent)
 	addTool(s, a, "get_code_snippet",
 		"Return the exact source of a symbol by file + name, instead of reading the whole file. Returns found=false (not an error) when the symbol is unknown, plus its line range.",
 		getCodeSnippet)

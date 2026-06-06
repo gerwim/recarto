@@ -241,6 +241,47 @@ func queryGraph(ctx context.Context, a *app.App, in QueryGraphInput) (QueryGraph
 	return out, nil
 }
 
+// --- search_content ---
+
+type SearchContentInput struct {
+	Pattern    string `json:"pattern" jsonschema:"the text to find. Literal substring by default; set regex=true to treat it as a regular expression (RE2 syntax)."`
+	Regex      bool   `json:"regex,omitempty" jsonschema:"treat pattern as a regular expression instead of a literal substring"`
+	IgnoreCase bool   `json:"ignore_case,omitempty" jsonschema:"case-insensitive match"`
+	PathGlob   string `json:"path_glob,omitempty" jsonschema:"restrict to files whose path matches this glob (e.g. *.cs, src/**). A glob without a slash matches the filename."`
+	Language   string `json:"language,omitempty" jsonschema:"restrict to a language (go, csharp, typescript, tsx, javascript)"`
+	Limit      int    `json:"limit,omitempty" jsonschema:"max matches (default 50)"`
+	MaxPerFile int    `json:"max_per_file,omitempty" jsonschema:"max matches per file (default 5) so one file cannot dominate the page"`
+}
+type ContentMatch struct {
+	Path   string `json:"path"`
+	Line   int    `json:"line"`
+	Text   string `json:"text"`
+	Symbol string `json:"symbol,omitempty"` // enclosing definition's qualified name
+	Kind   string `json:"kind,omitempty"`   // enclosing definition's kind
+}
+type SearchContentOutput struct {
+	Count   int            `json:"count"`
+	Matches []ContentMatch `json:"matches"`
+}
+
+func searchContent(ctx context.Context, a *app.App, in SearchContentInput) (SearchContentOutput, error) {
+	ensureFresh(ctx, a)
+	res, err := a.Graph.SearchContent(ctx, a.Git.Worktree, in.Pattern, graph.ContentSearchOpts{
+		Regex: in.Regex, IgnoreCase: in.IgnoreCase, PathGlob: in.PathGlob,
+		Language: in.Language, Limit: in.Limit, MaxPerFile: in.MaxPerFile,
+	})
+	if err != nil {
+		return SearchContentOutput{}, err
+	}
+	out := SearchContentOutput{Count: len(res), Matches: make([]ContentMatch, 0, len(res))}
+	for _, m := range res {
+		out.Matches = append(out.Matches, ContentMatch{
+			Path: m.Path, Line: m.Line, Text: m.Text, Symbol: m.Symbol, Kind: m.Kind,
+		})
+	}
+	return out, nil
+}
+
 // --- get_code_snippet ---
 
 type GetCodeSnippetInput struct {

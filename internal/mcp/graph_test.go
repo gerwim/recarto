@@ -52,6 +52,30 @@ func TestSearchGraphReturnsSignature(t *testing.T) {
 	}
 }
 
+func TestSearchContentHandler(t *testing.T) {
+	a := newTestApp(t, "main")
+	wt := t.TempDir()
+	a.Git.Worktree = wt
+	if err := os.WriteFile(filepath.Join(wt, "a.go"),
+		[]byte("package p\nfunc Boom(){\n\tpanic(\"unrecoverable failure\")\n}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Graph.Reconcile(context.Background(), wt, graph.FSSource{Root: wt}); err != nil {
+		t.Fatal(err)
+	}
+	out, err := searchContent(context.Background(), a, SearchContentInput{Pattern: "unrecoverable failure"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Count != 1 {
+		t.Fatalf("searchContent count = %d, want 1: %+v", out.Count, out.Matches)
+	}
+	m := out.Matches[0]
+	if m.Path != "a.go" || m.Line != 3 || !strings.Contains(m.Symbol, "Boom") {
+		t.Fatalf("match = %+v, want a.go:3 inside Boom", m)
+	}
+}
+
 // TestGraphHandlersMapping covers the projection/mapping logic of the other four
 // graph tools (trace/architecture/query/snippet), which the engine tests don't.
 func TestGraphHandlersMapping(t *testing.T) {
