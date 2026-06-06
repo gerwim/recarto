@@ -8,7 +8,7 @@ import (
 )
 
 // schemaVersion is the number of applied migrations.
-const schemaVersion = 14
+const schemaVersion = 15
 
 // migrations are applied in order; index+1 becomes user_version.
 var migrations = []string{
@@ -401,6 +401,20 @@ CREATE INDEX idx_nodes_name_parent ON nodes(name, parent_name);
 -- name was a residual scan, and at large scale the planner abandoned the good plan
 -- and built a transient index instead (S2 spiked from ~2s to >3min on HotChocolate).
 CREATE INDEX IF NOT EXISTS idx_type_bindings_file_name ON type_bindings(file_id, name);
+`,
+	// v15: graph cache reset so the now-populated node `signature` column
+	// backfills on the next reconcile. Clears all graph-derived rows + freshness
+	// tokens; memories are untouched. ReconcileIfStale re-indexes every file.
+	`
+DELETE FROM nodes_fts;
+DELETE FROM nodes_fts_stem;
+DELETE FROM nodes_fts_tri;
+DELETE FROM edge_candidates;
+DELETE FROM type_bindings;
+DELETE FROM edges;
+DELETE FROM nodes;
+DELETE FROM files;
+DELETE FROM meta WHERE key LIKE 'graph_token:%';
 `,
 }
 

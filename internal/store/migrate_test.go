@@ -326,3 +326,24 @@ func TestV12MigrationPreservesMemoriesAndColumns(t *testing.T) {
 	mustExec(t, st2, `INSERT INTO memories(id,kind,status,created_at,updated_at)
 		VALUES('t2','todo','done',1,1)`)
 }
+
+func TestSchemaVersionIs15(t *testing.T) {
+	if schemaVersion != 15 {
+		t.Fatalf("schemaVersion = %d, want 15", schemaVersion)
+	}
+	if len(migrations) != 15 {
+		t.Fatalf("len(migrations) = %d, want 15", len(migrations))
+	}
+	st, err := Open(filepath.Join(t.TempDir(), "store.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	var v int
+	if err := st.DB.QueryRow("PRAGMA user_version").Scan(&v); err != nil {
+		t.Fatal(err)
+	}
+	if v != 15 {
+		t.Fatalf("user_version = %d, want 15", v)
+	}
+}
