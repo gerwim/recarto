@@ -61,7 +61,11 @@ UPDATE edges SET dst_node_id = (
      CASE WHEN mf.id = edges.file_id THEN 0 ELSE 1 END,
      CASE WHEN substr(mf.path,1,instr(mf.path,'/')) = substr(ef.path,1,instr(ef.path,'/'))
           THEN 0 ELSE 1 END,
-     ec.dst_node_id
+     -- Stable tiebreak (path, then position) so the winner among equal-confidence,
+     -- equal-locality candidates is reproducible across indexes rather than decided
+     -- by a random node id — which made two indexes of the same code disagree and
+     -- defeated incremental-resolve equivalence. The id stays last for a total order.
+     mf.path, n.start_byte, ec.dst_node_id
    LIMIT 1)
  WHERE kind = 'calls' AND file_id IN (SELECT id FROM files WHERE worktree = ?)`, worktree)
 		return err
@@ -90,7 +94,8 @@ UPDATE edges SET dst_node_id = (
      -- correct "same directory" semantics.
      CASE WHEN substr(f.path,1,instr(f.path,'/')) = substr(ef.path,1,instr(ef.path,'/'))
           THEN 0 ELSE 1 END,
-     n.id
+     -- Stable tiebreak (see the call-edge denormalize): reproducible across indexes.
+     f.path, n.start_byte, n.id
    LIMIT 1)
 WHERE dst_node_id IS NULL
   AND dst_name <> ''
@@ -229,7 +234,9 @@ SELECT edge_id, dst_node_id, CASE WHEN cnt = 1 THEN 0.45 ELSE 0.2 END, 'name' FR
       CASE WHEN mf.id = ed.file_id THEN 0 ELSE 1 END,
       CASE WHEN substr(mf.path,1,instr(mf.path,'/')) = substr(ef.path,1,instr(ef.path,'/'))
            THEN 0 ELSE 1 END,
-      m.id) AS rn
+      -- Stable tiebreak so the capped 10 ambiguous matches are a reproducible set
+      -- (random m.id otherwise picked a different 10 each index).
+      mf.path, m.start_byte, m.id) AS rn
   FROM files ef
   CROSS JOIN edges ed ON ed.file_id = ef.id
                 AND ed.kind = 'calls' AND ed.dst_name <> ''

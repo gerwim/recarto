@@ -86,6 +86,37 @@ func (e *Engine) Reconcile(ctx context.Context, worktree string, src Source, opt
 		worklist = append(worklist, fe)
 	}
 
+	// The dirty set drives incremental resolve: the paths this reconcile rewrites
+	// (worklist) plus the paths it deletes. A reconcile over an already-indexed
+	// worktree (have non-empty) that touches only a bounded number of files can
+	// re-resolve just the affected edges instead of the whole worktree (see
+	// ResolveIncremental); a first index, or a sweeping change, takes the full path.
+	dirtyPaths := make([]string, 0, len(worklist))
+	for _, fe := range worklist {
+		dirtyPaths = append(dirtyPaths, fe.Path)
+	}
+	for p := range have {
+		if !seen[p] {
+			dirtyPaths = append(dirtyPaths, p)
+		}
+	}
+	incremental := len(have) > 0 && len(dirtyPaths) > 0 && len(dirtyPaths) <= maxIncrementalDirty
+	// Pre-edit signals, captured BEFORE the rewrite deletes the old rows: the names
+	// a dirty file held (so a removed/renamed symbol still re-resolves the edges
+	// that pointed at it) and its `extends` edges (so a structural change falls back
+	// to a full resolve — see ResolveIncremental).
+	var oldNames []string
+	var oldExtends map[string]struct{}
+	if incremental {
+		var err error
+		if oldNames, err = e.namesForPaths(ctx, worktree, dirtyPaths); err != nil {
+			return err
+		}
+		if oldExtends, err = e.extendsSigForPaths(ctx, worktree, dirtyPaths); err != nil {
+			return err
+		}
+	}
+
 	// Pass 2: read + parse worklist files concurrently (tree-sitter parsing is
 	// CPU-bound and embarrassingly parallel), then write the extracted graph in
 	// serialized batches. A worker pool feeds a single writer, since SQLite has one
@@ -122,7 +153,23 @@ func (e *Engine) Reconcile(ctx context.Context, worktree string, src Source, opt
 	// resolution is still correct — skip the full-worktree re-resolve.
 	if mutated {
 		o.progress.Phase("resolving references")
-		if err := e.Resolve(ctx, worktree); err != nil {
+		// Incremental resolve is exact only while the worktree's interface/base
+		// structure is unchanged (ResolveIncremental); a dirty file that gained or
+		// lost an `extends` edge can redirect interface dispatch in OTHER files,
+		// which the name-scoped affected set cannot see — so re-resolve fully then.
+		useIncremental := incremental
+		if useIncremental {
+			newExtends, err := e.extendsSigForPaths(ctx, worktree, dirtyPaths)
+			if err != nil {
+				return err
+			}
+			useIncremental = sameStringSet(oldExtends, newExtends)
+		}
+		if useIncremental {
+			if err := e.ResolveIncremental(ctx, worktree, dirtyPaths, oldNames); err != nil {
+				return err
+			}
+		} else if err := e.Resolve(ctx, worktree); err != nil {
 			return err
 		}
 	}
