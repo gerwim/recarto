@@ -85,6 +85,50 @@ func TestGraphQuerySpaceFormFlags(t *testing.T) {
 	}
 }
 
+// TestGraphQueryEmptyErrors proves `graph query` with no name and no filter is
+// rejected with an error instead of dumping a capped page of the whole graph
+// (on a real repo: vendored/generated symbols that sort first). The dump cost
+// ~50 lines of noise returned as a success — exactly the kind of misleading,
+// token-wasting output that pushes an agent back to shell grep.
+func TestGraphQueryEmptyErrors(t *testing.T) {
+	a := newTestApp(t, "main")
+	wt := t.TempDir()
+	a.Git.Worktree = wt
+	os.WriteFile(filepath.Join(wt, "a.go"), []byte("package p\nfunc Authenticate(){}"), 0o644)
+	if err := Index(context.Background(), a, &bytes.Buffer{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	err := Graph(context.Background(), a, &out, []string{"query"})
+	if err == nil {
+		t.Fatalf("graph query with no filter should error, got output %q", out.String())
+	}
+	if out.Len() != 0 {
+		t.Errorf("graph query with no filter should print nothing, got %q", out.String())
+	}
+}
+
+// TestGraphSearchEmptyErrors proves `graph search` with no terms and no --symbol
+// is rejected with a usage error rather than the misleading "(no matches)",
+// which implied the repository contained nothing for the (absent) query.
+func TestGraphSearchEmptyErrors(t *testing.T) {
+	a := newTestApp(t, "main")
+	wt := t.TempDir()
+	a.Git.Worktree = wt
+	os.WriteFile(filepath.Join(wt, "a.go"), []byte("package p\nfunc Authenticate(){}"), 0o644)
+	if err := Index(context.Background(), a, &bytes.Buffer{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	err := Graph(context.Background(), a, &out, []string{"search"})
+	if err == nil {
+		t.Fatalf("graph search with no terms should error, got output %q", out.String())
+	}
+	if bytes.Contains(out.Bytes(), []byte("no matches")) {
+		t.Errorf("graph search with no terms should not print '(no matches)', got %q", out.String())
+	}
+}
+
 func TestGraphCalleesAnnotated(t *testing.T) {
 	a := newTestApp(t, "main")
 	wt := t.TempDir()

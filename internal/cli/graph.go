@@ -56,6 +56,13 @@ func Graph(ctx context.Context, a *app.App, w io.Writer, args []string) error {
 				qwords = append(qwords, tok)
 			}
 		}
+		// A search with neither query terms nor a candidate --symbol has nothing to
+		// rank, so it returned a bare "(no matches)" — which reads as "the repo has
+		// nothing", eroding trust, rather than "you gave me no query". Fail with a
+		// usage error and point at `query` for filter-only (kind/lang) lookups.
+		if len(qwords) == 0 && len(syms) == 0 {
+			return fmt.Errorf("graph search: query terms or --symbol required (for a filter-only lookup use `graph query --kind=/--lang=`)")
+		}
 		res, err := a.Graph.SearchGuided(ctx, wt, strings.Join(qwords, " "), syms, searchKind, searchLang, searchLimit)
 		if err != nil {
 			return err
@@ -519,6 +526,7 @@ const graphUsage = `recarto graph <sub> — query the code graph
   outline <file>                    a file's symbols (kind, signature, line) in order
   arch [scope]                      module/dependency map
   query [name] [flags]              structured lookup; bare name = substring on name/qualified-name
+                                    needs ≥1 of name/--kind/--lang/--path/--edge (no filter = error, not a dump)
       --kind=<k> --lang=<l>         filter by node kind / language
       --path=<p> --limit=<n>        filter by exact file path / cap results
       --edge=<kind> --edge-dir=in|out  keep only nodes with such an edge (calls, imports, …)

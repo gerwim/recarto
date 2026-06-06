@@ -2,6 +2,7 @@ package graph
 
 import (
 	"context"
+	"fmt"
 	"strings"
 )
 
@@ -22,6 +23,17 @@ type QuerySpec struct {
 	Limit    int
 }
 
+// IsEmpty reports whether the spec carries no selective constraint — no name,
+// kind, path, language, or edge filter (a bare Limit does not count, since it
+// still selects the whole graph). Such a query returns the first page of every
+// node ordered by qualified name, which on a real repo is whatever sorts first —
+// typically vendored/generated symbols (e.g. yarn .cjs `$` functions) — never an
+// answer to a question. Both query surfaces reject it rather than burn tokens.
+func (s QuerySpec) IsEmpty() bool {
+	return s.Kind == "" && s.NameLike == "" && s.Path == "" &&
+		s.Language == "" && (s.Edge == nil || s.Edge.Kind == "")
+}
+
 // QueryNode is one node in a query_graph result.
 type QueryNode struct {
 	NodeID        string
@@ -35,6 +47,9 @@ type QueryNode struct {
 
 // Query runs a constrained structured query over the worktree's graph.
 func (e *Engine) Query(ctx context.Context, worktree string, spec QuerySpec) ([]QueryNode, error) {
+	if spec.IsEmpty() {
+		return nil, fmt.Errorf("query needs at least one filter (name, kind, language, path, or edge); listing the whole graph is never the answer — use search for concepts, or query with a filter")
+	}
 	limit := spec.Limit
 	if limit <= 0 {
 		limit = 50
