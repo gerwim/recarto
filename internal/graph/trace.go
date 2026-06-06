@@ -154,12 +154,20 @@ func (e *Engine) TraceCallPathFiltered(ctx context.Context, worktree, symbol, di
 // the caller can aggregate. Exact-qualified matches are preferred and returned
 // alone, so a precise query never gets diluted by unrelated same-named nodes.
 func (e *Engine) nodesByName(ctx context.Context, worktree, name string) ([]CallNode, error) {
+	// A dotted input like "Svc.M" (Type.Method without the namespace) is matched
+	// as a suffix of the fully qualified name — but only when it contains a dot,
+	// so a bare name never triggers a broad LIKE. An exact qualified_name match is
+	// still flagged and preferred over any looser hit.
+	suffix := "\x00" // sentinel: never matches when input has no dot
+	if strings.Contains(name, ".") {
+		suffix = "%." + name
+	}
 	rows, err := e.st.DB.QueryContext(ctx, `
 SELECT n.id, n.name, f.path, n.start_line, (n.qualified_name = ?) AS exact
   FROM nodes n JOIN files f ON f.id = n.file_id
- WHERE f.worktree = ? AND (n.name = ? OR n.qualified_name = ?)
+ WHERE f.worktree = ? AND (n.name = ? OR n.qualified_name = ? OR n.qualified_name LIKE ?)
  ORDER BY exact DESC, n.id
- LIMIT ?`, name, worktree, name, name, maxAmbiguousStarts)
+ LIMIT ?`, name, worktree, name, name, suffix, maxAmbiguousStarts)
 	if err != nil {
 		return nil, err
 	}

@@ -30,6 +30,37 @@ func TestCompactReceiver(t *testing.T) {
 	}
 }
 
+func TestTracePartialQualifiedName(t *testing.T) {
+	e := newTestEngine(t)
+	ctx := context.Background()
+	// LLMs commonly type Type.Method without the namespace. The full qualified
+	// name is N.Svc.M; "Svc.M" must still resolve via a dotted-suffix match
+	// instead of silently returning nothing.
+	src := []byte("namespace N;\nclass Dep { public void Run() {} }\n" +
+		"class Svc { private readonly Dep _dep; void M() { _dep.Run(); } }")
+	if err := e.IndexFile(ctx, "/wt", "Svc.cs", src, 1, int64(len(src))); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.Resolve(ctx, "/wt"); err != nil {
+		t.Fatal(err)
+	}
+	chains, suggestions, err := e.TraceCallPathFiltered(ctx, "/wt", "Svc.M", "callees", 2, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sawRun := false
+	for _, ch := range chains {
+		for _, n := range ch {
+			if n.Name == "Run" {
+				sawRun = true
+			}
+		}
+	}
+	if !sawRun {
+		t.Errorf("partial-qualified 'Svc.M' callees should find Run; chains=%v suggestions=%v", chains, suggestions)
+	}
+}
+
 func TestTraceCallersAggregatesAmbiguousBareName(t *testing.T) {
 	e := newTestEngine(t)
 	ctx := context.Background()
