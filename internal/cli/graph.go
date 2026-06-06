@@ -117,6 +117,17 @@ func Graph(ctx context.Context, a *app.App, w io.Writer, args []string) error {
 			}
 			return nil
 		}
+		// Legend: the engine emits chains rooted at the queried symbol, so for callers
+		// the raw order is target→caller, which renders with the same `→` glyph as
+		// callees (target→callee) but the opposite meaning. An LLM then reads the call
+		// direction backwards — worse than grep. We make the arrow ALWAYS mean "calls"
+		// (left calls right) by reversing callers chains below, and state it here so a
+		// line quoted out of context is still unambiguous.
+		if dir == "callers" {
+			fmt.Fprintf(w, "callers of %s — each line reads outer caller → … → %s (left calls right):\n", sym, leafName(sym))
+		} else {
+			fmt.Fprintf(w, "callees of %s — each line reads %s → callee → … (left calls right):\n", sym, leafName(sym))
+		}
 		// Collapse byte-identical rendered chains. One ambiguous call site can yield
 		// several low-confidence name candidates that differ only by their (unshown)
 		// definition node — they render identically, so N copies cost N× the tokens
@@ -135,6 +146,13 @@ func Graph(ctx context.Context, a *app.App, w io.Writer, args []string) error {
 					label += " recv:" + n.Receiver
 				}
 				parts[i] = label
+			}
+			// Reverse callers so the arrow uniformly means "calls": outer caller first,
+			// queried symbol last. Callees already reads queried→callee, so leave it.
+			if dir == "callers" {
+				for l, r := 0, len(parts)-1; l < r; l, r = l+1, r-1 {
+					parts[l], parts[r] = parts[r], parts[l]
+				}
 			}
 			line := strings.Join(parts, " → ")
 			if counts[line] == 0 {
@@ -494,8 +512,8 @@ const graphUsage = `recarto graph <sub> — query the code graph
       --lang=<lang>                 restrict to a language (go, csharp, typescript, …)
       --limit=<n>                   max matches (default 50)
       --max-per-file=<n>            max matches per file (default 5)
-  callers <symbol>                  who calls a function/method
-  callees <symbol>                  what a function/method calls
+  callers <symbol>                  who calls a function/method (reads outer caller → … → symbol)
+  callees <symbol>                  what a function/method calls (reads symbol → callee → …)
   impls <type> [--super|--up] [--limit=<n>]  implementers (or supertypes) of an interface/base
   annotated <attr> [--limit=<n>]    symbols carrying an attribute/decorator
   outline <file>                    a file's symbols (kind, signature, line) in order
@@ -505,6 +523,7 @@ const graphUsage = `recarto graph <sub> — query the code graph
       --path=<p> --limit=<n>        filter by exact file path / cap results
       --edge=<kind> --edge-dir=in|out  keep only nodes with such an edge (calls, imports, …)
   snippet <symbol> | <file> <symbol>  exact source for a symbol (file optional)
+                                    symbol = bare name, qualified name, or Type.Method suffix
                                     overloads (one name, one file) print together
 
 Flags accept either form: --kind=class or --kind class.

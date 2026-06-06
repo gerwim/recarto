@@ -189,6 +189,43 @@ func TestTraceCallPathMethodCallersDeadEnd(t *testing.T) {
 	}
 }
 
+// TestTraceCallPathCallersReadInCallsDirection proves the callers chain is
+// returned so it reads in the "calls" direction (outer caller first, queried
+// symbol last) and carries a legend, so an LLM consuming the structured chains
+// does not invert the call direction the way the raw target-first order invites.
+func TestTraceCallPathCallersReadInCallsDirection(t *testing.T) {
+	a := newTestApp(t, "main")
+	wt := t.TempDir()
+	a.Git.Worktree = wt
+	if err := os.WriteFile(filepath.Join(wt, "App.cs"),
+		[]byte("namespace N;\nclass App {\n  void Outer() { Middle(); }\n  void Middle() { Target(); }\n  void Target() {}\n}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Graph.Reconcile(context.Background(), wt, graph.FSSource{Root: wt}); err != nil {
+		t.Fatal(err)
+	}
+	out, err := traceCallPath(context.Background(), a, TraceCallPathInput{Symbol: "N.App.Target", Direction: "callers"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Legend == "" || !strings.Contains(out.Legend, "calls") {
+		t.Errorf("callers output needs a legend describing the calls direction, got %q", out.Legend)
+	}
+	// Find the multi-hop chain and assert the queried symbol is the LAST hop.
+	var multi []TraceHop
+	for _, ch := range out.Chains {
+		if len(ch) > len(multi) {
+			multi = ch
+		}
+	}
+	if len(multi) < 2 {
+		t.Fatalf("expected a multi-hop callers chain, got %+v", out.Chains)
+	}
+	if multi[len(multi)-1].Symbol != "Target" {
+		t.Errorf("queried symbol must be the last hop (calls direction); chain = %+v", multi)
+	}
+}
+
 func contains(ss []string, want string) bool {
 	for _, s := range ss {
 		if s == want {

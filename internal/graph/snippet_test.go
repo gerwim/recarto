@@ -118,6 +118,41 @@ func TestSnippetByNameOverloadsReturnAllBodies(t *testing.T) {
 	}
 }
 
+// TestSnippetByNameDottedSuffixResolves proves snippet accepts a Type.Method
+// suffix (e.g. "A.Run") the same way trace_call_path's nodesByName does. An LLM
+// that found "DefaultRequestExecutor.EnrichContext" via `graph callees` and pastes
+// that exact string into `graph snippet` must NOT get a false miss that forces a
+// whole-file Read — the two commands must resolve the same identifier form.
+func TestSnippetByNameDottedSuffixResolves(t *testing.T) {
+	e := newTestEngine(t)
+	ctx := context.Background()
+	wt := t.TempDir()
+	// Two classes share the bare name Run; only the Type.Method suffix disambiguates.
+	writeFile(t, wt, "svc.cs",
+		"namespace N;\n"+
+			"public class A { public int Run() { return 1; } }\n"+
+			"public class B { public int Run() { return 2; } }\n")
+	src, _ := FSSource{Root: wt}.Read("svc.cs")
+	if err := e.IndexFile(ctx, wt, "svc.cs", src, 1, int64(len(src))); err != nil {
+		t.Fatal(err)
+	}
+	// Bare name is ambiguous (two candidates) — unchanged behaviour.
+	if _, cands, err := e.SnippetByName(ctx, wt, "Run"); err != nil || len(cands) < 2 {
+		t.Fatalf("bare Run should stay ambiguous, got cands=%d err=%v", len(cands), err)
+	}
+	// "A.Run" — a Type.Method suffix of N.A.Run — must resolve to exactly one body.
+	res, cands, err := e.SnippetByName(ctx, wt, "A.Run")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Found || len(cands) != 0 {
+		t.Fatalf("A.Run (Type.Method suffix) should resolve uniquely, got res.Found=%v cands=%v", res.Found, cands)
+	}
+	if !strings.Contains(res.Snippet, "return 1") {
+		t.Errorf("A.Run resolved to the wrong body: %q", res.Snippet)
+	}
+}
+
 func TestSnippetByNameQualifiedDisambiguates(t *testing.T) {
 	e := newTestEngine(t)
 	ctx := context.Background()

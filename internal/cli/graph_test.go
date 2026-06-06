@@ -145,6 +145,74 @@ func TestGraphCalleesDedupsIdenticalChains(t *testing.T) {
 	}
 }
 
+// TestGraphCallersReadInCallsDirection proves `graph callers` renders each chain
+// so the arrow uniformly means "calls" (left calls right): the queried symbol is
+// the RIGHTMOST node and its outer callers are to the left. Without this, callers
+// and callees emit the same `A → B` glyph with opposite meaning, and an LLM reads
+// the call direction exactly backwards — worse than grep, which is unambiguous.
+func TestGraphCallersReadInCallsDirection(t *testing.T) {
+	a := newTestApp(t, "main")
+	wt := t.TempDir()
+	a.Git.Worktree = wt
+	os.WriteFile(filepath.Join(wt, "App.cs"),
+		[]byte("namespace N;\n"+
+			"class App {\n"+
+			"  void Outer() { Middle(); }\n"+
+			"  void Middle() { Target(); }\n"+
+			"  void Target() {}\n"+
+			"}\n"), 0o644)
+	if err := Index(context.Background(), a, &bytes.Buffer{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := Graph(context.Background(), a, &out, []string{"callers", "N.App.Target"}); err != nil {
+		t.Fatal(err)
+	}
+	s := out.String()
+	// A legend must state the reading direction so a quoted line is never ambiguous.
+	if !bytes.Contains(out.Bytes(), []byte("calls")) {
+		t.Errorf("callers output lacks a direction legend mentioning 'calls'; got:\n%s", s)
+	}
+	// The queried symbol Target must appear to the RIGHT of its caller Middle, which
+	// is to the right of the outer caller Outer: Outer → Middle → Target.
+	iOuter := bytes.Index(out.Bytes(), []byte("Outer"))
+	iMiddle := bytes.Index(out.Bytes(), []byte("Middle"))
+	iTarget := bytes.LastIndex(out.Bytes(), []byte("Target"))
+	if iOuter < 0 || iMiddle < 0 || iTarget < 0 {
+		t.Fatalf("expected Outer→Middle→Target chain, got:\n%s", s)
+	}
+	if !(iOuter < iMiddle && iMiddle < iTarget) {
+		t.Errorf("callers chain must read outer→inner→target (calls direction); got order Outer@%d Middle@%d Target@%d:\n%s", iOuter, iMiddle, iTarget, s)
+	}
+}
+
+// TestGraphCalleesReadInCallsDirection is the dual: callees already reads in the
+// "calls" direction (queried symbol leftmost), and must stay that way.
+func TestGraphCalleesReadInCallsDirection(t *testing.T) {
+	a := newTestApp(t, "main")
+	wt := t.TempDir()
+	a.Git.Worktree = wt
+	os.WriteFile(filepath.Join(wt, "App.cs"),
+		[]byte("namespace N;\n"+
+			"class App {\n"+
+			"  void Outer() { Middle(); }\n"+
+			"  void Middle() { Target(); }\n"+
+			"  void Target() {}\n"+
+			"}\n"), 0o644)
+	if err := Index(context.Background(), a, &bytes.Buffer{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := Graph(context.Background(), a, &out, []string{"callees", "N.App.Outer"}); err != nil {
+		t.Fatal(err)
+	}
+	iOuter := bytes.Index(out.Bytes(), []byte("Outer"))
+	iMiddle := bytes.Index(out.Bytes(), []byte("Middle"))
+	if iOuter < 0 || iMiddle < 0 || !(iOuter < iMiddle) {
+		t.Errorf("callees must read queried→callee (Outer before Middle); got:\n%s", out.String())
+	}
+}
+
 func TestGraphImplementations(t *testing.T) {
 	a := newTestApp(t, "main")
 	wt := t.TempDir()

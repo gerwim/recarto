@@ -112,6 +112,12 @@ type TraceHop struct {
 type TraceCallPathOutput struct {
 	Chains      [][]TraceHop `json:"chains"`
 	Suggestions []string     `json:"suggestions,omitempty"`
+	// Legend states how to read a chain. The engine roots every chain at the queried
+	// symbol, so callers chains are target→caller order — the same shape as callees
+	// (target→callee) but the opposite call direction. Without a legend an LLM reads
+	// callers backwards. We reverse callers chains so every chain reads in the
+	// "calls" direction (entry n calls entry n+1) and describe that here.
+	Legend string `json:"legend,omitempty"`
 	// Hint steers the agent when a trace dead-ends on a type: call edges target a
 	// type's methods, not its declaration, so "who uses this type" is answered by
 	// find_implementations / search_content, not trace_call_path.
@@ -129,12 +135,29 @@ func traceCallPath(ctx context.Context, a *app.App, in TraceCallPathInput) (Trac
 		return TraceCallPathOutput{}, err
 	}
 	out := TraceCallPathOutput{Chains: make([][]TraceHop, 0, len(chains)), Suggestions: suggestions}
+	// A legend only helps when there are chains to read; an unknown-symbol miss
+	// returns empty chains + suggestions, where a legend is just noise.
+	if len(chains) > 0 {
+		if dir == "callers" {
+			out.Legend = "each chain reads in the calls direction: entry n calls entry n+1, so the outer caller is first and " + leafName(in.Symbol) + " is last."
+		} else {
+			out.Legend = "each chain reads in the calls direction: entry n calls entry n+1, so " + leafName(in.Symbol) + " is first and the deepest callee is last."
+		}
+	}
 	for _, ch := range chains {
 		hops := make([]TraceHop, len(ch))
 		for i, n := range ch {
 			hops[i] = TraceHop{
 				Symbol: n.Name, Path: n.Path, Line: n.Line,
 				Resolution: n.Resolution, Confidence: n.Confidence, Receiver: n.Receiver,
+			}
+		}
+		// Reverse callers chains so the structured order matches the legend's "calls"
+		// direction (outer caller → … → queried symbol). The engine roots chains at
+		// the queried symbol; callees already reads queried→callee, so leave it.
+		if dir == "callers" {
+			for l, r := 0, len(hops)-1; l < r; l, r = l+1, r-1 {
+				hops[l], hops[r] = hops[r], hops[l]
 			}
 		}
 		out.Chains = append(out.Chains, hops)

@@ -44,21 +44,42 @@ const maxSnippetCandidates = 25
 // return Found=false with no candidates. This removes the search→snippet
 // round-trip and the wrong-path errors of having to know the file first.
 func (e *Engine) SnippetByName(ctx context.Context, worktree, symbol string) (SnippetResult, []SnippetCandidate, error) {
+	// A dotted input like "A.Run" (Type.Method without the namespace) is matched as
+	// a suffix of the fully qualified name — mirroring trace's nodesByName — so an
+	// identifier an LLM copied out of `graph callees`/`callers` resolves here too
+	// instead of falsely missing and forcing a whole-file read. The suffix is only
+	// armed when the input contains a dot, so a bare name never triggers a broad
+	// LIKE; an exact qualified_name match is flagged and preferred over loose hits.
+	suffix := "\x00" // sentinel: never matches when input has no dot
+	if strings.Contains(symbol, ".") {
+		suffix = "%." + symbol
+	}
 	rows, err := e.st.DB.QueryContext(ctx, `
-SELECT f.path, n.start_line, n.kind, n.qualified_name
+SELECT f.path, n.start_line, n.kind, n.qualified_name, (n.qualified_name = ?) AS exact
   FROM nodes n JOIN files f ON f.id = n.file_id
- WHERE f.worktree = ? AND (n.name = ? OR n.qualified_name = ?)
- ORDER BY f.path, n.start_line
- LIMIT ?`, worktree, symbol, symbol, maxSnippetCandidates+1)
+ WHERE f.worktree = ? AND (n.name = ? OR n.qualified_name = ? OR n.qualified_name LIKE ?)
+ ORDER BY exact DESC, f.path, n.start_line
+ LIMIT ?`, symbol, worktree, symbol, symbol, suffix, maxSnippetCandidates+1)
 	if err != nil {
 		return SnippetResult{}, nil, err
 	}
 	var cands []SnippetCandidate
+	var qualified bool
 	for rows.Next() {
 		var c SnippetCandidate
-		if err := rows.Scan(&c.Path, &c.StartLine, &c.Kind, &c.QualifiedName); err != nil {
+		var exact bool
+		if err := rows.Scan(&c.Path, &c.StartLine, &c.Kind, &c.QualifiedName, &exact); err != nil {
 			rows.Close()
 			return SnippetResult{}, nil, err
+		}
+		if exact && !qualified {
+			// First exact qualified-name hit: a precise query. Discard looser
+			// same-bare-name / suffix matches and keep only the exact one(s).
+			qualified = true
+			cands = cands[:0]
+		}
+		if qualified && !exact {
+			continue
 		}
 		cands = append(cands, c)
 	}
@@ -233,11 +254,20 @@ func (e *Engine) Snippet(ctx context.Context, worktree, path, symbol string) (Sn
 	var sb, eb int64
 	var sl, el int
 	var qn string
+	// Accept a dotted Type.Method suffix as well as the bare name / full qualified
+	// name, so the form resolved by SnippetByName (and by trace) resolves here too.
+	// Exact qualified_name is ordered first so a precise input never loses to a
+	// looser suffix collision within the same file.
+	suffix := "\x00"
+	if strings.Contains(symbol, ".") {
+		suffix = "%." + symbol
+	}
 	err := e.st.DB.QueryRowContext(ctx, `
 SELECT n.start_byte, n.end_byte, n.start_line, n.end_line, n.qualified_name
   FROM nodes n JOIN files f ON f.id = n.file_id
- WHERE f.worktree = ? AND f.path = ? AND (n.name = ? OR n.qualified_name = ?)
- LIMIT 1`, worktree, path, symbol, symbol).Scan(&sb, &eb, &sl, &el, &qn)
+ WHERE f.worktree = ? AND f.path = ? AND (n.name = ? OR n.qualified_name = ? OR n.qualified_name LIKE ?)
+ ORDER BY (n.qualified_name = ?) DESC
+ LIMIT 1`, worktree, path, symbol, symbol, suffix, symbol).Scan(&sb, &eb, &sl, &el, &qn)
 	if errors.Is(err, sql.ErrNoRows) {
 		return SnippetResult{Found: false}, nil
 	}
