@@ -3,26 +3,36 @@ package opencode
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 
 	"git.gerwim.nl/gerwim/recarto/internal/agents"
 )
 
-// ensureMCPServer adds the recarto entry to an opencode.json "mcp" doc if absent.
-// OpenCode local servers use type:"local" with command as a string array.
+// ensureMCPServer keeps the recarto entry in an opencode.json "mcp" doc current.
+// OpenCode local servers use type:"local" with command as a string array. It
+// creates the entry when absent and refreshes the command in place when a shipped
+// update drifts the binary, preserving any unrelated keys the user added (e.g.
+// enabled). It reports whether it changed doc.
 func ensureMCPServer(doc map[string]any, binary string) bool {
 	mcp, ok := doc["mcp"].(map[string]any)
 	if !ok {
 		mcp = map[string]any{}
 		doc["mcp"] = mcp
 	}
-	if _, exists := mcp["recarto"]; exists {
+	existing, ok := mcp["recarto"].(map[string]any)
+	if !ok {
+		mcp["recarto"] = map[string]any{
+			"type":    "local",
+			"command": []any{binary, "serve"},
+			"enabled": true,
+		}
+		return true
+	}
+	want := []any{binary, "serve"}
+	if reflect.DeepEqual(existing["command"], want) {
 		return false
 	}
-	mcp["recarto"] = map[string]any{
-		"type":    "local",
-		"command": []any{binary, "serve"},
-		"enabled": true,
-	}
+	existing["command"] = want
 	return true
 }
 

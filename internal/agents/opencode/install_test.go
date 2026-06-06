@@ -40,6 +40,37 @@ func TestInstallRepoScope(t *testing.T) {
 	}
 }
 
+func TestEnsureMCPServerRefreshesOnBinaryDrift(t *testing.T) {
+	doc := map[string]any{}
+	ensureMCPServer(doc, "/old/recarto")
+	if !ensureMCPServer(doc, "/new/recarto") {
+		t.Fatal("ensureMCPServer should report a change when the binary path drifts")
+	}
+	rc := doc["mcp"].(map[string]any)["recarto"].(map[string]any)
+	cmd := rc["command"].([]any)
+	if cmd[0] != "/new/recarto" {
+		t.Errorf("command[0] = %v, want /new/recarto", cmd[0])
+	}
+	if ensureMCPServer(doc, "/new/recarto") {
+		t.Error("ensureMCPServer should be a no-op when nothing drifts")
+	}
+}
+
+func TestEnsureMCPServerPreservesEnabledFlag(t *testing.T) {
+	doc := map[string]any{"mcp": map[string]any{"recarto": map[string]any{
+		"type":    "local",
+		"command": []any{"/old/recarto", "serve"},
+		"enabled": false,
+	}}}
+	if !ensureMCPServer(doc, "/new/recarto") {
+		t.Fatal("expected a change for drifted command")
+	}
+	rc := doc["mcp"].(map[string]any)["recarto"].(map[string]any)
+	if rc["enabled"] != false {
+		t.Errorf("user-set enabled flag was clobbered: %#v", rc)
+	}
+}
+
 func TestInstallUserScopeTargets(t *testing.T) {
 	dir := t.TempDir()
 	home := t.TempDir()

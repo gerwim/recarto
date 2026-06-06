@@ -68,6 +68,49 @@ func TestInstallRepoScopeWritesConfigAndIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestInstallReplacesStaleHooks(t *testing.T) {
+	dir := t.TempDir()
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".claude"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Pre-existing settings: a foreign hook to preserve, plus a STALE recarto hook
+	// shipped by an older version (old binary path + renamed event).
+	pre := `{"hooks":{` +
+		`"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"keep-me"}]}],` +
+		`"PostToolUse":[{"matcher":"Read","hooks":[{"type":"command","command":"/old/recarto hook post-read-LEGACY --agent claude"}]}]` +
+		`}}`
+	if err := os.WriteFile(filepath.Join(dir, ".claude", "settings.json"), []byte(pre), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	p := agents.Paths{Scope: agents.ScopeRepo, Dir: dir, Home: home}
+	if _, err := Install(p, "recarto"); err != nil {
+		t.Fatal(err)
+	}
+
+	b, _ := os.ReadFile(filepath.Join(dir, ".claude", "settings.json"))
+	s := string(b)
+	if strings.Contains(s, "post-read-LEGACY") {
+		t.Errorf("stale recarto hook not pruned:\n%s", s)
+	}
+	if strings.Contains(s, "/old/recarto") {
+		t.Errorf("stale recarto binary path not pruned:\n%s", s)
+	}
+	if !strings.Contains(s, "keep-me") {
+		t.Errorf("foreign hook not preserved:\n%s", s)
+	}
+	for _, want := range []string{
+		"recarto hook session-start --agent claude",
+		"recarto hook post-read --agent claude",
+		"recarto hook stop --agent claude",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("current hook %q missing:\n%s", want, s)
+		}
+	}
+}
+
 func TestInstallUserScopeTargets(t *testing.T) {
 	dir := t.TempDir()
 	home := t.TempDir()

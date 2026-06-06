@@ -1,8 +1,6 @@
 package claudecode
 
 import (
-	"fmt"
-
 	"git.gerwim.nl/gerwim/recarto/internal/agents"
 )
 
@@ -62,18 +60,7 @@ func Install(p agents.Paths, binary string) (agents.InstallResult, error) {
 	if err != nil {
 		return res, err
 	}
-	added := 0
-	for _, hs := range hookSpecs(binary) {
-		if !hasCommand(settings, hs.event, hs.command) {
-			appendHook(settings, hs.event, hs.matcher, hs.command)
-			added++
-		}
-	}
-	if added > 0 {
-		res.Hooks = fmt.Sprintf("installed %d", added)
-	} else {
-		res.Hooks = "already present"
-	}
+	res.Hooks = syncHooks(settings, binary)
 	if err := agents.WriteJSONObject(settingsPath, settings); err != nil {
 		return res, err
 	}

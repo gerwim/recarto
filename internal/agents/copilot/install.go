@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 
 	"git.gerwim.nl/gerwim/recarto/internal/agents"
 )
@@ -29,23 +30,36 @@ func hookFile(binary string) []byte {
 	return append(b, '\n')
 }
 
-// ensureMCPServer adds the recarto entry to a Copilot mcpServers doc if absent.
+// ensureMCPServer keeps the recarto entry in a Copilot mcpServers doc current:
+// it creates the entry when absent and refreshes the command/args in place when
+// a shipped update drifts them, preserving any unrelated keys the user added. It
+// reports whether it changed doc.
 func ensureMCPServer(doc map[string]any, binary string) bool {
 	servers, ok := doc["mcpServers"].(map[string]any)
 	if !ok {
 		servers = map[string]any{}
 		doc["mcpServers"] = servers
 	}
-	if _, exists := servers["recarto"]; exists {
-		return false
+	existing, ok := servers["recarto"].(map[string]any)
+	if !ok {
+		servers["recarto"] = map[string]any{
+			"type":    "local",
+			"command": binary,
+			"args":    []any{"serve"},
+			"tools":   []any{"*"},
+		}
+		return true
 	}
-	servers["recarto"] = map[string]any{
-		"type":    "local",
-		"command": binary,
-		"args":    []any{"serve"},
-		"tools":   []any{"*"},
+	changed := false
+	if existing["command"] != binary {
+		existing["command"] = binary
+		changed = true
 	}
-	return true
+	if !reflect.DeepEqual(existing["args"], []any{"serve"}) {
+		existing["args"] = []any{"serve"}
+		changed = true
+	}
+	return changed
 }
 
 // Install configures Recarto for GitHub Copilot CLI at the given scope. It is
