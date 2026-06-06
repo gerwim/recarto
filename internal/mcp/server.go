@@ -61,6 +61,9 @@ func NewServer(a *app.App) *sdk.Server {
 	addTool(s, a, "find_implementations",
 		"Find the types that implement or subclass a given interface/base type (direction=down, default), or the supertypes a type extends (direction=up), from the graph's inheritance edges. This is the structural answer to the classic interface grep — \"what implements IRequestExecutor\" — that search_graph cannot give, because implementers don't share the interface's name. Pass `symbol` as the type's bare or qualified name. Prefer this over grepping for `: TypeName` so codebase navigation stays in recarto.",
 		findImplementations)
+	addTool(s, a, "find_annotated",
+		"Find every symbol decorated with a given attribute/annotation/decorator — e.g. all `[ExtendObjectType]` classes in C#, every `@Component` in TS. This is the structural answer to the attribute grep that search_graph cannot give (the decorated class shares no name with the attribute) and that plain text grep pollutes (it also matches the attribute's own definition, doc comments, and string literals). Each result is the decorated symbol itself (class/method/property) with its kind and location. Matching is C# `Attribute`-suffix tolerant. Pass `attribute` as the name written at the use site. Prefer this over grepping for `[Attr` so codebase navigation stays in recarto.",
+		findAnnotated)
 	return s
 }
 

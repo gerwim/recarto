@@ -15,6 +15,13 @@
 (base_list (identifier) @name) @reference.extends
 (base_list (generic_name (identifier) @name)) @reference.extends
 
+; attribute (decorator) usages: [ExtendObjectType], [GraphQLName("x")], [System.Obsolete],
+; [ExtendObjectType<T>]. The attribute_list nests inside the decorated declaration's
+; span, so anchoring the edge on the attribute node attributes it to that symbol.
+(attribute name: (identifier) @name) @reference.annotation
+(attribute name: (qualified_name name: (identifier) @name)) @reference.annotation
+(attribute name: (generic_name (identifier) @name)) @reference.annotation
+
 ; type bindings: field / property / parameter / typed-or-var local / new
 (field_declaration (variable_declaration type: (_) @bind.type (variable_declarator name: (identifier) @bind.name)))
 (property_declaration type: (_) @bind.type name: (identifier) @bind.name)

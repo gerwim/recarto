@@ -14,3 +14,9 @@
 (class_heritage (extends_clause value: (identifier) @name)) @reference.extends
 (class_heritage (extends_clause value: (member_expression property: (property_identifier) @name))) @reference.extends
 (class_heritage (implements_clause (type_identifier) @name)) @reference.implements
+
+; decorator usages: @Component({...}), @Input(), @core.Module(...), @Injectable
+(decorator (identifier) @name) @reference.annotation
+(decorator (call_expression function: (identifier) @name)) @reference.annotation
+(decorator (call_expression function: (member_expression property: (property_identifier) @name))) @reference.annotation
+(decorator (member_expression property: (property_identifier) @name)) @reference.annotation

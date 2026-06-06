@@ -8,7 +8,7 @@ import (
 )
 
 // schemaVersion is the number of applied migrations.
-const schemaVersion = 15
+const schemaVersion = 16
 
 // migrations are applied in order; index+1 becomes user_version.
 var migrations = []string{
@@ -405,6 +405,20 @@ CREATE INDEX IF NOT EXISTS idx_type_bindings_file_name ON type_bindings(file_id,
 	// v15: graph cache reset so the now-populated node `signature` column
 	// backfills on the next reconcile. Clears all graph-derived rows + freshness
 	// tokens; memories are untouched. ReconcileIfStale re-indexes every file.
+	`
+DELETE FROM nodes_fts;
+DELETE FROM nodes_fts_stem;
+DELETE FROM nodes_fts_tri;
+DELETE FROM edge_candidates;
+DELETE FROM type_bindings;
+DELETE FROM edges;
+DELETE FROM nodes;
+DELETE FROM files;
+DELETE FROM meta WHERE key LIKE 'graph_token:%';
+`,
+	// v16: graph cache reset so the new `annotates` edges (attribute/decorator
+	// usages) backfill on the next reconcile. Same scope as v15 — graph-derived
+	// rows + freshness tokens only; memories are untouched.
 	`
 DELETE FROM nodes_fts;
 DELETE FROM nodes_fts_stem;

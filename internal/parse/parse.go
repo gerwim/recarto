@@ -55,6 +55,8 @@ func edgeKind(suffix string) string {
 		return "extends"
 	case "implements":
 		return "implements"
+	case "annotation":
+		return "annotates"
 	default:
 		return "references"
 	}

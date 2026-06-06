@@ -311,3 +311,38 @@ func findImplementations(ctx context.Context, a *app.App, in FindImplementations
 	}
 	return out, nil
 }
+
+// --- find_annotated ---
+
+type FindAnnotatedInput struct {
+	Attribute string `json:"attribute" jsonschema:"the attribute/annotation/decorator name as written at the use site (e.g. ExtendObjectType, Component, Obsolete); the C# Attribute suffix is optional"`
+	Limit     int    `json:"limit,omitempty" jsonschema:"max results (default 50)"`
+}
+type AnnotatedSym struct {
+	Name          string `json:"name"`
+	QualifiedName string `json:"qualified_name,omitempty"`
+	Kind          string `json:"kind,omitempty"`
+	Path          string `json:"path,omitempty"`
+	Line          int    `json:"line,omitempty"`
+	Attribute     string `json:"attribute"` // the attribute name as written at this use site
+}
+type FindAnnotatedOutput struct {
+	Count   int            `json:"count"`
+	Results []AnnotatedSym `json:"results"`
+}
+
+func findAnnotated(ctx context.Context, a *app.App, in FindAnnotatedInput) (FindAnnotatedOutput, error) {
+	ensureFresh(ctx, a)
+	rels, err := a.Graph.Annotated(ctx, a.Git.Worktree, in.Attribute, in.Limit)
+	if err != nil {
+		return FindAnnotatedOutput{}, err
+	}
+	out := FindAnnotatedOutput{Count: len(rels), Results: make([]AnnotatedSym, 0, len(rels))}
+	for _, r := range rels {
+		out.Results = append(out.Results, AnnotatedSym{
+			Name: r.Name, QualifiedName: r.QualifiedName, Kind: r.Kind,
+			Path: r.Path, Line: r.Line, Attribute: r.Attribute,
+		})
+	}
+	return out, nil
+}

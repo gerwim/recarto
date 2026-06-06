@@ -107,6 +107,29 @@ func TestGraphImplementations(t *testing.T) {
 	}
 }
 
+func TestGraphAnnotated(t *testing.T) {
+	a := newTestApp(t, "main")
+	wt := t.TempDir()
+	a.Git.Worktree = wt
+	os.WriteFile(filepath.Join(wt, "Ext.cs"),
+		[]byte("namespace N;\n"+
+			"[ExtendObjectType(\"Query\")]\npublic class QueryExtensions { }\n"+
+			"public class Plain { }\n"), 0o644)
+	if err := Index(context.Background(), a, &bytes.Buffer{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := Graph(context.Background(), a, &out, []string{"annotated", "ExtendObjectType"}); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(out.Bytes(), []byte("QueryExtensions")) {
+		t.Errorf("graph annotated output = %q, want QueryExtensions", out.String())
+	}
+	if bytes.Contains(out.Bytes(), []byte("Plain")) {
+		t.Errorf("graph annotated leaked undecorated class Plain: %q", out.String())
+	}
+}
+
 // TestGraphArchBudgets proves `graph arch` caps its output on a large module set
 // (parity with the MCP get_architecture tool) instead of dumping every dep edge,
 // and reports the pre-cap totals so the map is still trustworthy.

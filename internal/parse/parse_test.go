@@ -71,6 +71,78 @@ func Run() {
 	}
 }
 
+func edgeDsts(edges []Edge, kind string) []string {
+	var out []string
+	for _, e := range edges {
+		if e.Kind == kind {
+			out = append(out, e.DstName)
+		}
+	}
+	return out
+}
+
+func TestParseCSharpAnnotations(t *testing.T) {
+	r, err := NewRegistry()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	// Attributes are the C# decorator mechanism. The grammar nests the
+	// attribute_list inside the decorated declaration's span, so each annotation
+	// edge must be anchored where the indexer attributes it to the decorated
+	// symbol. Covers: simple, argumented, member-access, and generic attributes.
+	src := []byte(`using HotChocolate.Types;
+
+namespace App;
+
+[ExtendObjectType("Query")]
+public class QueryExtensions
+{
+    [GraphQLName("foo")]
+    [System.Obsolete]
+    public string Foo() => "x";
+}
+
+[ExtendObjectType<Street>]
+public class StreetExtensions { }
+`)
+	res, err := r.ParseFile("csharp", "App/Q.cs", src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ann := edgeDsts(res.Edges, "annotates")
+	for _, want := range []string{"ExtendObjectType", "GraphQLName", "Obsolete"} {
+		if !slices.Contains(ann, want) {
+			t.Errorf("annotations = %v, want %q", ann, want)
+		}
+	}
+}
+
+func TestParseTypeScriptDecorators(t *testing.T) {
+	r, err := NewRegistry()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	src := []byte(`@Component({ selector: "app" })
+export class AppComponent {
+  @Input() name: string;
+}
+`)
+	for _, lang := range []string{"typescript", "tsx"} {
+		res, err := r.ParseFile(lang, "a."+lang, src)
+		if err != nil {
+			t.Fatalf("%s: %v", lang, err)
+		}
+		ann := edgeDsts(res.Edges, "annotates")
+		for _, want := range []string{"Component", "Input"} {
+			if !slices.Contains(ann, want) {
+				t.Errorf("%s: decorators = %v, want %q", lang, ann, want)
+			}
+		}
+	}
+}
+
 func TestParseCSharp(t *testing.T) {
 	r, err := NewRegistry()
 	if err != nil {

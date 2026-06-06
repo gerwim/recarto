@@ -13,7 +13,7 @@ import (
 // Graph dispatches `graph <sub>`: search | callers | callees | arch | query | snippet.
 func Graph(ctx context.Context, a *app.App, w io.Writer, args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("graph: subcommand required (search|grep|callers|callees|impls|arch|query|snippet)")
+		return fmt.Errorf("graph: subcommand required (search|grep|callers|callees|impls|annotated|arch|query|snippet)")
 	}
 	wt := a.Git.Worktree
 	// Lazy reconcile so query results reflect the current checkout (spec §11).
@@ -144,6 +144,26 @@ func Graph(ctx context.Context, a *app.App, w io.Writer, args []string) error {
 				name = r.Name
 			}
 			fmt.Fprintf(w, "• [%s] %s  %s\n", r.Kind, name, loc)
+		}
+		return nil
+	case "annotated", "annotations", "decorated":
+		if len(rest) == 0 {
+			return fmt.Errorf("graph %s: attribute name required", sub)
+		}
+		syms, err := a.Graph.Annotated(ctx, wt, strings.Join(rest, " "), 50)
+		if err != nil {
+			return err
+		}
+		if len(syms) == 0 {
+			fmt.Fprintln(w, "(no matches)")
+			return nil
+		}
+		for _, s := range syms {
+			name := s.QualifiedName
+			if name == "" {
+				name = s.Name
+			}
+			fmt.Fprintf(w, "• [%s] %s  [%s]  %s:%d\n", s.Kind, name, s.Attribute, s.Path, s.Line)
 		}
 		return nil
 	case "query":

@@ -42,6 +42,11 @@ per-repo SQLite cache outside the working tree.
   (direction ` + "`down`" + ` for subtypes/implementers, ` + "`up`" + ` for supertypes) instead of
   grepping for ` + "`: TypeName`" + ` — implementers don't share the interface's name, so
   ` + "`search_graph`" + ` can't surface them.
+- **Find annotated symbols** (classes/methods carrying an attribute or decorator)
+  with ` + "`find_annotated`" + ` — e.g. every ` + "`[ExtendObjectType]`" + ` class or ` + "`@Component`" + `.
+  Prefer it over grepping for ` + "`[Attr`" + `: the decorated symbol shares no name with
+  the attribute, and a text grep also matches the attribute's own definition,
+  doc comments, and string literals.
 - **Inspect & curate** memories with ` + "`list_memory` / `get_memory`" + `; delete one
   recorded in error with ` + "`forget_memory`" + ` (or supersede it via ` + "`supersedes_id`" + `).
 

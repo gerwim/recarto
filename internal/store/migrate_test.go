@@ -328,12 +328,12 @@ func TestV12MigrationPreservesMemoriesAndColumns(t *testing.T) {
 		VALUES('t2','todo','done',1,1)`)
 }
 
-func TestSchemaVersionIs15(t *testing.T) {
-	if schemaVersion != 15 {
-		t.Fatalf("schemaVersion = %d, want 15", schemaVersion)
+func TestSchemaVersionIs16(t *testing.T) {
+	if schemaVersion != 16 {
+		t.Fatalf("schemaVersion = %d, want 16", schemaVersion)
 	}
-	if len(migrations) != 15 {
-		t.Fatalf("len(migrations) = %d, want 15", len(migrations))
+	if len(migrations) != 16 {
+		t.Fatalf("len(migrations) = %d, want 16", len(migrations))
 	}
 	st, err := Open(filepath.Join(t.TempDir(), "store.db"))
 	if err != nil {
@@ -344,7 +344,7 @@ func TestSchemaVersionIs15(t *testing.T) {
 	if err := st.DB.QueryRow("PRAGMA user_version").Scan(&v); err != nil {
 		t.Fatal(err)
 	}
-	if v != 15 {
-		t.Fatalf("user_version = %d, want 15", v)
+	if v != 16 {
+		t.Fatalf("user_version = %d, want 16", v)
 	}
 }
