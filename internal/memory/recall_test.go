@@ -3,6 +3,7 @@ package memory
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"testing"
 	"time"
 
@@ -22,6 +23,44 @@ func TestMatchedOnDominantSignal(t *testing.T) {
 	none := RecallResult{Signals: map[string]float64{}}
 	if got := none.MatchedOn(); got != nil {
 		t.Fatalf("MatchedOn (no signals) = %v, want nil", got)
+	}
+}
+
+func TestRecallReportsTruncation(t *testing.T) {
+	e := newTestEngine(t, clock.NewFake(time.UnixMilli(10_000_000)))
+	ctx := context.Background()
+	// Distinct bodies (each leads with a unique nonsense token) so MinHash dedup
+	// keeps them separate; all share the "shared keyword payload" phrase so they
+	// are all lexical candidates for the query.
+	uniques := []string{
+		"alphaxq concurrency wal busy timeout immediate writer pool serialized mutex per connection",
+		"bravoxq migration guarded user_version pragma idempotent first run lock serializes processes",
+		"charliexq recall structural lexical recency reinforcement branch budget greedy selection order",
+		"deltaxq synonym expansion identifier split camel snake kebab dotted token search text build",
+		"echoxq minhash lsh band signature jaccard shingle near duplicate reinforce threshold confirm",
+	}
+	for i := 0; i < 5; i++ {
+		_, _, _ = e.Record(ctx, NewMemory{Kind: KindLearning, Body: "shared keyword payload number " + strconv.Itoa(i) + " " + uniques[i]})
+	}
+	set, err := e.Recall(ctx, RecallQuery{TaskHint: "shared keyword payload", TokenBudget: 60})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !set.Truncated {
+		t.Error("expected Truncated=true under a tiny budget")
+	}
+	if set.TokensUsed <= 0 {
+		t.Error("expected positive TokensUsed")
+	}
+}
+
+func TestRecallMinScoreFilters(t *testing.T) {
+	e := newTestEngine(t, clock.NewFake(time.UnixMilli(10_000_000)))
+	ctx := context.Background()
+	_, _, _ = e.Record(ctx, NewMemory{Kind: KindLearning, Body: "exact relevant text"})
+	set, _ := e.Recall(ctx, RecallQuery{TaskHint: "exact relevant text", MinScore: 0.999})
+	if len(set.Results) != 0 {
+		t.Errorf("MinScore=0.999 should exclude all, got %d", len(set.Results))
 	}
 }
 
@@ -55,7 +94,7 @@ func TestRecallStructuralBeatsLexical(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	res, err := e.Recall(ctx, RecallQuery{
+	set, err := e.Recall(ctx, RecallQuery{
 		TaskHint:    "auth session refresh",              // favors B lexically
 		Files:       []string{"internal/store/store.go"}, // favors A structurally
 		Branch:      "main",
@@ -64,6 +103,7 @@ func TestRecallStructuralBeatsLexical(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	res := set.Results
 	if len(res) < 2 {
 		t.Fatalf("expected both records, got %d", len(res))
 	}
@@ -86,11 +126,12 @@ func TestRecallDropsSuperseded(t *testing.T) {
 		SupersedesID: oldID}); err != nil {
 		t.Fatal(err)
 	}
-	res, err := e.Recall(ctx, RecallQuery{
+	set, err := e.Recall(ctx, RecallQuery{
 		Files: []string{"internal/export/render.go"}, TokenBudget: 100000})
 	if err != nil {
 		t.Fatal(err)
 	}
+	res := set.Results
 	for _, r := range res {
 		if r.Record.ID == oldID {
 			t.Error("superseded record should not be recalled")
@@ -124,11 +165,12 @@ func TestRecallBudgetCapsAndPinsFirst(t *testing.T) {
 		}
 	}
 
-	res, err := e.Recall(ctx, RecallQuery{
+	set, err := e.Recall(ctx, RecallQuery{
 		Files: []string{"go.mod"}, TokenBudget: 80})
 	if err != nil {
 		t.Fatal(err)
 	}
+	res := set.Results
 
 	// Pin present despite the tiny budget; total recalled < 6 (some excluded).
 	var sawPin bool
@@ -155,10 +197,11 @@ func TestRecallMissIncrementsCounter(t *testing.T) {
 	e := newTestEngine(t, clock.NewFake(time.UnixMilli(21_000_000)))
 	ctx := context.Background()
 	// Empty store + a query that matches nothing.
-	res, err := e.Recall(ctx, RecallQuery{TaskHint: "nonexistent zzz", Branch: "main"})
+	set, err := e.Recall(ctx, RecallQuery{TaskHint: "nonexistent zzz", Branch: "main"})
 	if err != nil {
 		t.Fatal(err)
 	}
+	res := set.Results
 	if len(res) != 0 {
 		t.Fatalf("expected no results, got %d", len(res))
 	}
@@ -186,13 +229,14 @@ func TestRecallPinnedSurvivesKindFilter(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	res, err := e.Recall(ctx, RecallQuery{
+	set, err := e.Recall(ctx, RecallQuery{
 		Kind:  KindBug, // restrict to bugs ...
 		Files: []string{"internal/memory/recall.go"},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
+	res := set.Results
 	var sawPin bool
 	for _, r := range res {
 		if r.Record.ID == pinID { // ... the pin must still appear
@@ -217,13 +261,14 @@ func TestRecallMissWhenBudgetExcludesAll(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	res, err := e.Recall(ctx, RecallQuery{
+	set, err := e.Recall(ctx, RecallQuery{
 		Files:       []string{"internal/memory/recall.go"},
 		TokenBudget: 1, // far below the candidate's token cost
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
+	res := set.Results
 	if len(res) != 0 {
 		t.Fatalf("expected empty result under budget=1, got %d", len(res))
 	}
@@ -245,10 +290,11 @@ func TestRecallSynonymBridging(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	res, err := e.Recall(ctx, RecallQuery{TaskHint: "db"})
+	set, err := e.Recall(ctx, RecallQuery{TaskHint: "db"})
 	if err != nil {
 		t.Fatal(err)
 	}
+	res := set.Results
 	var found bool
 	for _, r := range res {
 		if r.Record.ID == id {
@@ -274,10 +320,11 @@ func TestBaselineRecallSurfacesCerebrumKinds(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	res, err := e.Recall(ctx, RecallQuery{Branch: "main", Baseline: true, TokenBudget: 100000})
+	set, err := e.Recall(ctx, RecallQuery{Branch: "main", Baseline: true, TokenBudget: 100000})
 	if err != nil {
 		t.Fatal(err)
 	}
+	res := set.Results
 	got := map[Kind]bool{}
 	for _, r := range res {
 		got[r.Record.Kind] = true
@@ -302,10 +349,11 @@ func TestBaselineRecallExcludesBug(t *testing.T) {
 	if _, _, err := e.Record(ctx, NewMemory{Kind: KindBug, Title: "boom", Body: "npe in the request handler", Branch: "main", Source: "cli"}); err != nil {
 		t.Fatal(err)
 	}
-	res, err := e.Recall(ctx, RecallQuery{Branch: "main", Baseline: true, TokenBudget: 100000})
+	set, err := e.Recall(ctx, RecallQuery{Branch: "main", Baseline: true, TokenBudget: 100000})
 	if err != nil {
 		t.Fatal(err)
 	}
+	res := set.Results
 	for _, r := range res {
 		if r.Record.Kind == KindBug {
 			t.Errorf("baseline recall must exclude bug, got %q", r.Record.Title)
@@ -326,10 +374,11 @@ func TestBaselineRecallBranchVisible(t *testing.T) {
 	if _, _, err := e.Record(ctx, NewMemory{Kind: KindLearning, Title: "otherbranch", Body: "gamma unique main three", Branch: "main", Source: "cli"}); err != nil {
 		t.Fatal(err)
 	}
-	res, err := e.Recall(ctx, RecallQuery{Branch: "feature", Baseline: true, TokenBudget: 100000})
+	set, err := e.Recall(ctx, RecallQuery{Branch: "feature", Baseline: true, TokenBudget: 100000})
 	if err != nil {
 		t.Fatal(err)
 	}
+	res := set.Results
 	titles := map[string]bool{}
 	for _, r := range res {
 		titles[r.Record.Title] = true
@@ -356,10 +405,11 @@ func TestBaselineRecallRespectsBudgetAndPinsFirst(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	res, err := e.Recall(ctx, RecallQuery{Branch: "main", Baseline: true, TokenBudget: 20})
+	set, err := e.Recall(ctx, RecallQuery{Branch: "main", Baseline: true, TokenBudget: 20})
 	if err != nil {
 		t.Fatal(err)
 	}
+	res := set.Results
 	hasPin := false
 	for _, r := range res {
 		if r.Record.ID == pinID {
@@ -392,10 +442,11 @@ func TestBaselineRecallIncludesOpenTodo(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	results, err := e.Recall(ctx, RecallQuery{Branch: "main", Baseline: true, TokenBudget: 10000})
+	set, err := e.Recall(ctx, RecallQuery{Branch: "main", Baseline: true, TokenBudget: 10000})
 	if err != nil {
 		t.Fatal(err)
 	}
+	results := set.Results
 	var sawOpen, sawDone bool
 	for _, r := range results {
 		switch r.Record.ID {
@@ -435,11 +486,12 @@ func TestRecallStampsLastUsedEpoch(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	res, err := e.Recall(ctx, RecallQuery{
+	set, err := e.Recall(ctx, RecallQuery{
 		Files:       []string{"internal/store/store.go"},
 		Branch:      "main",
 		TokenBudget: 100000,
 	})
+	res := set.Results
 	if err != nil || len(res) == 0 {
 		t.Fatalf("recall returned %d results, err=%v", len(res), err)
 	}

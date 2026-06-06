@@ -97,7 +97,7 @@ func bugSearch(ctx context.Context, a *app.App, w io.Writer, args []string) erro
 	if helped, err := parseFlags(fs, args); err != nil || helped {
 		return err
 	}
-	results, err := a.Engine.Recall(ctx, memory.RecallQuery{
+	set, err := a.Engine.Recall(ctx, memory.RecallQuery{
 		TaskHint: strings.Join(fs.Args(), " "),
 		Kind:     memory.KindBug,
 		Branch:   a.Git.Branch,
@@ -105,6 +105,7 @@ func bugSearch(ctx context.Context, a *app.App, w io.Writer, args []string) erro
 	if err != nil {
 		return err
 	}
+	results := set.Results
 	if len(results) == 0 {
 		fmt.Fprintln(w, "(no matching bugs)")
 		return nil

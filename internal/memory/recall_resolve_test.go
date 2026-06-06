@@ -23,12 +23,13 @@ func TestRecallDemotesAllDanglingNonPinned(t *testing.T) {
 	recordWithRef(t, e, KindLearning, "learn-absent", Ref{RefFile, "absent.go"}, false)
 	e.SetRefResolver(fakeResolver{dangling: map[string]bool{"absent.go": true}})
 
-	res, err := e.Recall(context.Background(), RecallQuery{
+	set, err := e.Recall(context.Background(), RecallQuery{
 		TaskHint: "body about", Worktree: "/wt", TokenBudget: 100000,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
+	res := set.Results
 	var present, absent RecallResult
 	for _, r := range res {
 		switch r.Record.Title {
@@ -58,12 +59,13 @@ func TestRecallCaveatsButDoesNotDemotePinnedOrBug(t *testing.T) {
 	recordWithRef(t, e, KindBug, "bug-absent", Ref{RefFile, "absent.go"}, false)
 	e.SetRefResolver(fakeResolver{dangling: map[string]bool{"absent.go": true}})
 
-	res, err := e.Recall(context.Background(), RecallQuery{
+	set, err := e.Recall(context.Background(), RecallQuery{
 		TaskHint: "body about absent", Worktree: "/wt", TokenBudget: 100000,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
+	res := set.Results
 	seen := map[string]RecallResult{}
 	for _, r := range res {
 		seen[r.Record.Title] = r
@@ -86,12 +88,13 @@ func TestRecallPrivilegedNotNumericallyDemoted(t *testing.T) {
 	recordWithRef(t, e, KindBug, "privileged", Ref{RefFile, "absent.go"}, false)
 	e.SetRefResolver(fakeResolver{dangling: map[string]bool{"absent.go": true}})
 
-	res, err := e.Recall(context.Background(), RecallQuery{
+	set, err := e.Recall(context.Background(), RecallQuery{
 		TaskHint: "body about absent", Worktree: "/wt", TokenBudget: 100000,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
+	res := set.Results
 	var plain, privileged RecallResult
 	for _, r := range res {
 		switch r.Record.Title {
@@ -128,12 +131,13 @@ func TestRecallPartialDanglingNotDemoted(t *testing.T) {
 	mk("full", Ref{RefFile, "absent.go"}, Ref{RefFile, "gone.go"})
 	e.SetRefResolver(fakeResolver{dangling: map[string]bool{"absent.go": true, "gone.go": true}})
 
-	res, err := e.Recall(context.Background(), RecallQuery{
+	set, err := e.Recall(context.Background(), RecallQuery{
 		TaskHint: "body about partial", Worktree: "/wt", TokenBudget: 100000,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
+	res := set.Results
 	var partial, full RecallResult
 	for _, r := range res {
 		switch r.Record.Title {
@@ -161,12 +165,13 @@ func TestRecallPartialDanglingNotDemoted(t *testing.T) {
 func TestRecallNoResolverIsInert(t *testing.T) {
 	e := newTestEngine(t, clock.Real{})
 	recordWithRef(t, e, KindLearning, "learn-absent", Ref{RefFile, "absent.go"}, false)
-	res, err := e.Recall(context.Background(), RecallQuery{
+	set, err := e.Recall(context.Background(), RecallQuery{
 		TaskHint: "body about absent", Worktree: "/wt", TokenBudget: 100000,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
+	res := set.Results
 	for _, r := range res {
 		if len(r.DanglingRefs) != 0 {
 			t.Fatalf("no resolver → no dangling refs, got %v", r.DanglingRefs)

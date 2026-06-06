@@ -29,6 +29,12 @@ func TestForgetRemovesMemory(t *testing.T) {
 			t.Error("forgotten memory still listed")
 		}
 	}
+	set, _ := e.Recall(ctx, RecallQuery{TaskHint: "forget me please"})
+	for _, r := range set.Results {
+		if r.Record.ID == id {
+			t.Error("forgotten memory still a recall candidate")
+		}
+	}
 }
 
 func TestForgetUnknownIDIsNoOp(t *testing.T) {

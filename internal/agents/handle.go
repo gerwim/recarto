@@ -74,7 +74,7 @@ func handleSessionStart(ctx context.Context, a *app.App, ev Event) (Result, erro
 	_, _ = a.Engine.Compact(ctx, memory.CompactOptions{})
 
 	budget := sessionBudget()
-	results, err := a.Engine.Recall(ctx, memory.RecallQuery{
+	set, err := a.Engine.Recall(ctx, memory.RecallQuery{
 		Branch:      a.Git.Branch,
 		Worktree:    a.Git.Worktree,
 		Baseline:    true,
@@ -83,6 +83,7 @@ func handleSessionStart(ctx context.Context, a *app.App, ev Event) (Result, erro
 	if err != nil {
 		return Result{}, err
 	}
+	results := set.Results
 	// Orientation map + recent bugs are best-effort tiers; failure omits the tier.
 	arch, _ := a.Graph.Architecture(ctx, a.Git.Worktree, "")
 	bugs, _ := a.Engine.RecentBugs(ctx, a.Git.Branch, recentBugLimit)
@@ -185,11 +186,11 @@ func handleAugment(ctx context.Context, a *app.App, ev Event) (Result, error) {
 		b.WriteString("Use get_code_snippet to read one symbol instead of the whole file.")
 	}
 
-	if bugRes, err := a.Engine.Recall(ctx, memory.RecallQuery{
+	if set, err := a.Engine.Recall(ctx, memory.RecallQuery{
 		TaskHint: pattern, Kind: memory.KindBug, Branch: a.Git.Branch, Worktree: a.Git.Worktree, Limit: 5,
 	}); err == nil {
 		var bugLines []string
-		for _, r := range bugRes {
+		for _, r := range set.Results {
 			if r.Record.Kind != memory.KindBug { // recall always includes pinned do_not_repeat
 				continue
 			}

@@ -36,9 +36,10 @@ type RecallQuery struct {
 	Kind        Kind   // "" → any kind
 	Branch      string // current branch, for branch-affinity boost
 	Baseline    bool   // session-start: also seed candidates with recent cerebrum memories (no query needed)
-	Limit       int    // max lexical candidates (0 → default)
-	TokenBudget int    // 0 → default
-	Worktree    string // current worktree absolute path, for ref-resolvability
+	Limit       int     // max lexical candidates (0 → default)
+	TokenBudget int     // 0 → default
+	Worktree    string  // current worktree absolute path, for ref-resolvability
+	MinScore    float64 // drop candidates scoring below this (0 → no floor)
 }
 
 // RecallResult is a selected memory with its score and per-signal breakdown.
@@ -84,10 +85,19 @@ func (r RecallResult) MatchedOn() []string {
 	return out
 }
 
+// RecallResultSet wraps the selected results with budget telemetry so a caller
+// can tell whether ranked candidates were dropped for space (Truncated) and how
+// much of the budget the returned set consumed (TokensUsed).
+type RecallResultSet struct {
+	Results    []RecallResult
+	TokensUsed int
+	Truncated  bool
+}
+
 // Recall scores and ranks memories by structural overlap, lexical (BM25),
 // recency, reinforcement, and branch affinity, all multiplied by confidence.
 // Task 12 wraps the budgeter around the sorted output.
-func (e *Engine) Recall(ctx context.Context, q RecallQuery) ([]RecallResult, error) {
+func (e *Engine) Recall(ctx context.Context, q RecallQuery) (RecallResultSet, error) {
 	limit := q.Limit
 	if limit <= 0 {
 		limit = defaultLimit
@@ -95,7 +105,7 @@ func (e *Engine) Recall(ctx context.Context, q RecallQuery) ([]RecallResult, err
 
 	lex, err := e.lex.Search(ctx, lexicalQueryText(q), limit)
 	if err != nil {
-		return nil, err
+		return RecallResultSet{}, err
 	}
 	lexScore := make(map[string]float64, len(lex))
 	for _, r := range lex {
@@ -104,12 +114,12 @@ func (e *Engine) Recall(ctx context.Context, q RecallQuery) ([]RecallResult, err
 
 	refScore, err := e.structuralScores(ctx, q)
 	if err != nil {
-		return nil, err
+		return RecallResultSet{}, err
 	}
 
 	pinned, err := e.pinnedIDs(ctx, q.Branch)
 	if err != nil {
-		return nil, err
+		return RecallResultSet{}, err
 	}
 
 	idset := map[string]bool{}
@@ -126,7 +136,7 @@ func (e *Engine) Recall(ctx context.Context, q RecallQuery) ([]RecallResult, err
 	if q.Baseline {
 		base, err := e.baselineIDs(ctx, q.Branch, limit)
 		if err != nil {
-			return nil, err
+			return RecallResultSet{}, err
 		}
 		for _, id := range base {
 			idset[id] = true
@@ -135,7 +145,7 @@ func (e *Engine) Recall(ctx context.Context, q RecallQuery) ([]RecallResult, err
 
 	recs, err := e.loadByIDs(ctx, idset)
 	if err != nil {
-		return nil, err
+		return RecallResultSet{}, err
 	}
 
 	now := e.clk.Now().UnixMilli()
@@ -181,24 +191,34 @@ func (e *Engine) Recall(ctx context.Context, q RecallQuery) ([]RecallResult, err
 		scored = append(scored, RecallResult{Record: r, Score: score, Signals: sig, DanglingRefs: dangling})
 	}
 
+	if q.MinScore > 0 {
+		kept := scored[:0]
+		for _, s := range scored {
+			if s.Score >= q.MinScore {
+				kept = append(kept, s)
+			}
+		}
+		scored = kept
+	}
+
 	budget := q.TokenBudget
 	if budget <= 0 {
 		budget = defaultTokenBudget
 	}
-	out, used := selectWithinBudget(scored, budget)
+	out, used, truncated := selectWithinBudget(scored, budget)
 	if len(out) == 0 {
 		// A recall that surfaces nothing above threshold — whether no candidates
 		// matched or the budget excluded them all — is a miss. This counter is the
 		// evidence that justifies (or not) the deferred embeddings path (§9.2/§10).
 		_ = e.led.Incr(ctx, "lifetime", "recall_misses", 1)
-		return nil, nil
+		return RecallResultSet{}, nil
 	}
 	_ = e.led.Incr(ctx, "lifetime", "memories_recalled", int64(len(out)))
 	_ = e.led.Incr(ctx, "lifetime", "recall_tokens_injected", int64(used))
 	// Stamp recall usage so decay can measure "epochs since last used"
 	// (Phase 3 compaction). Best-effort — must not fail the recall.
 	_ = e.stampRecalled(ctx, out)
-	return out, nil
+	return RecallResultSet{Results: out, TokensUsed: used, Truncated: truncated}, nil
 }
 
 // selectWithinBudget always includes pinned do_not_repeat (a dedicated, budget-
@@ -206,7 +226,7 @@ func (e *Engine) Recall(ctx context.Context, q RecallQuery) ([]RecallResult, err
 // the token budget is exhausted. It returns the selection and its estimated
 // token cost. It is a pure function (no side effects) so the caller owns the
 // ledger accounting and the empty-result (miss) decision.
-func selectWithinBudget(scored []RecallResult, budget int) (out []RecallResult, used int) {
+func selectWithinBudget(scored []RecallResult, budget int) (out []RecallResult, used int, truncated bool) {
 	var pinned, rest []RecallResult
 	for _, s := range scored {
 		if s.Record.Kind == KindDoNotRepeat && s.Record.Pinned {
@@ -226,12 +246,13 @@ func selectWithinBudget(scored []RecallResult, budget int) (out []RecallResult, 
 	for _, s := range rest {
 		t := tokensOf(s.Record)
 		if used+t > budget {
+			truncated = true
 			continue
 		}
 		out = append(out, s)
 		used += t
 	}
-	return out, used
+	return out, used, truncated
 }
 
 // lexicalQueryText assembles the BM25 query from the task hint, file basenames,

@@ -94,7 +94,7 @@ type RecallMemoryOutput struct {
 }
 
 func recallMemory(ctx context.Context, a *app.App, in RecallMemoryInput) (RecallMemoryOutput, error) {
-	results, err := a.Engine.Recall(ctx, memory.RecallQuery{
+	set, err := a.Engine.Recall(ctx, memory.RecallQuery{
 		TaskHint:    in.TaskHint,
 		Files:       in.Files,
 		Symbols:     in.Symbols,
@@ -107,6 +107,7 @@ func recallMemory(ctx context.Context, a *app.App, in RecallMemoryInput) (Recall
 	if err != nil {
 		return RecallMemoryOutput{}, err
 	}
+	results := set.Results
 	out := RecallMemoryOutput{Count: len(results), Memories: make([]MemoryView, 0, len(results))}
 	for _, r := range results {
 		v := viewOf(r.Record)
@@ -234,7 +235,7 @@ type SearchBugsOutput struct {
 }
 
 func searchBugs(ctx context.Context, a *app.App, in SearchBugsInput) (SearchBugsOutput, error) {
-	results, err := a.Engine.Recall(ctx, memory.RecallQuery{
+	set, err := a.Engine.Recall(ctx, memory.RecallQuery{
 		TaskHint: in.Query,
 		Kind:     memory.KindBug,
 		Branch:   a.Git.Branch,
@@ -243,6 +244,7 @@ func searchBugs(ctx context.Context, a *app.App, in SearchBugsInput) (SearchBugs
 	if err != nil {
 		return SearchBugsOutput{}, err
 	}
+	results := set.Results
 	out := SearchBugsOutput{Count: len(results), Bugs: make([]MemoryView, 0, len(results))}
 	for _, r := range results {
 		v := viewOf(r.Record)

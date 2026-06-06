@@ -31,7 +31,7 @@ func Recall(ctx context.Context, a *app.App, w io.Writer, args []string) error {
 		return err
 	}
 
-	results, err := a.Engine.Recall(ctx, memory.RecallQuery{
+	set, err := a.Engine.Recall(ctx, memory.RecallQuery{
 		TaskHint:    strings.Join(fs.Args(), " "),
 		Files:       splitCSV(*files),
 		Symbols:     splitCSV(*symbols),
@@ -44,6 +44,7 @@ func Recall(ctx context.Context, a *app.App, w io.Writer, args []string) error {
 	if err != nil {
 		return err
 	}
+	results := set.Results
 	if len(results) == 0 {
 		fmt.Fprintln(w, "(no memories recalled)")
 		return nil
