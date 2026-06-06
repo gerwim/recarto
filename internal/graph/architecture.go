@@ -206,29 +206,102 @@ func projectRoots(worktree string) []string {
 	return roots
 }
 
-// moduleNames assigns each project root a display name: its basename when that
-// basename is unique among the roots, else its full relative path so that two
-// distinct projects sharing a basename (e.g. backend/App and frontend/App) stay
-// separate modules instead of silently merging.
+// genericNameSegments are path segments that carry no disambiguating signal and
+// only inflate a module's display name — the conventional "src" wrapper in a
+// .NET/monorepo layout (".../<area>/src/Types"). They are dropped when computing a
+// disambiguated name, unless dropping them would merge two distinct roots.
+var genericNameSegments = map[string]bool{"src": true}
+
+// moduleNames assigns each project root a compact, unambiguous display name. A root
+// whose basename is unique among the roots keeps just that basename. Roots sharing a
+// basename (e.g. several ".../<area>/src/Types") are disambiguated by the shortest
+// trailing path suffix that is unique within the colliding group, after dropping
+// generic wrapper segments ("src") — so "src/HotChocolate/Core/src/Types" renders as
+// "Core/Types", not its full path. If dropping "src" would make two distinct roots
+// collide, the group falls back to full relative paths rather than silently merge two
+// modules into one. The repo-root marker (".") is skipped.
 func moduleNames(roots []string) map[string]string {
-	count := map[string]int{}
-	for _, r := range roots {
-		if r != "." {
-			count[filepath.Base(r)]++
-		}
-	}
-	names := map[string]string{}
+	byBase := map[string][]string{}
 	for _, r := range roots {
 		if r == "." {
 			continue
 		}
-		if b := filepath.Base(r); count[b] == 1 {
-			names[r] = b
-		} else {
-			names[r] = r
+		b := filepath.Base(r)
+		byBase[b] = append(byBase[b], r)
+	}
+	names := map[string]string{}
+	for _, group := range byBase {
+		if len(group) == 1 {
+			names[group[0]] = filepath.Base(group[0])
+			continue
+		}
+		// Colliding basename: name each by the shortest distinguishing suffix of its
+		// cleaned segments. Detect first whether cleaning collapses two distinct roots
+		// to the same segment list; if so the suffix scheme cannot tell them apart, so
+		// the whole group falls back to full paths.
+		cleaned := make(map[string][]string, len(group))
+		seen := make(map[string]string, len(group))
+		ambiguous := false
+		for _, r := range group {
+			segs := cleanNameSegments(strings.Split(r, "/"))
+			cleaned[r] = segs
+			key := strings.Join(segs, "/")
+			if other, ok := seen[key]; ok && other != r {
+				ambiguous = true
+			}
+			seen[key] = r
+		}
+		if ambiguous {
+			for _, r := range group {
+				names[r] = r
+			}
+			continue
+		}
+		for _, r := range group {
+			names[r] = shortestUniqueSuffix(r, cleaned, group)
 		}
 	}
 	return names
+}
+
+// cleanNameSegments drops generic wrapper segments (genericNameSegments) from all but
+// the final position, so the basename is always preserved even if it is itself generic
+// (a project directory literally named "src").
+func cleanNameSegments(segs []string) []string {
+	out := make([]string, 0, len(segs))
+	for i, s := range segs {
+		if i < len(segs)-1 && genericNameSegments[s] {
+			continue
+		}
+		out = append(out, s)
+	}
+	return out
+}
+
+// shortestUniqueSuffix returns the shortest trailing-segment suffix of r's cleaned
+// segments that is unique among every other root in the group, joined by "/". Because
+// the group shares a basename the result is always at least two segments. The caller's
+// ambiguity guard guarantees a unique suffix exists within the full segment list.
+func shortestUniqueSuffix(r string, cleaned map[string][]string, group []string) string {
+	segs := cleaned[r]
+	for k := 1; k <= len(segs); k++ {
+		suffix := strings.Join(segs[len(segs)-k:], "/")
+		unique := true
+		for _, other := range group {
+			if other == r {
+				continue
+			}
+			os := cleaned[other]
+			if len(os) >= k && strings.Join(os[len(os)-k:], "/") == suffix {
+				unique = false
+				break
+			}
+		}
+		if unique {
+			return suffix
+		}
+	}
+	return strings.Join(segs, "/")
 }
 
 // moduleOf returns the module a path belongs to: the (collision-disambiguated)

@@ -312,6 +312,54 @@ func TestMapArchitectureNoBackfillWhenCoherent(t *testing.T) {
 	}
 }
 
+func TestModuleNamesUniqueBasenameStaysBare(t *testing.T) {
+	names := moduleNames([]string{"src/Foo", "tools/Bar"})
+	if names["src/Foo"] != "Foo" {
+		t.Errorf("unique basename should stay bare: got %q want %q", names["src/Foo"], "Foo")
+	}
+	if names["tools/Bar"] != "Bar" {
+		t.Errorf("unique basename should stay bare: got %q want %q", names["tools/Bar"], "Bar")
+	}
+}
+
+func TestModuleNamesCollisionUsesCompactSuffix(t *testing.T) {
+	// Mirrors graphql-platform: three projects sharing basename "Types" under a
+	// conventional ".../<area>/src/Types" layout. The disambiguated name must drop
+	// the generic "src" wrapper and keep only the shortest distinguishing suffix,
+	// not the full relative path.
+	roots := []string{
+		"src/HotChocolate/Core/src/Types",
+		"src/HotChocolate/MongoDb/src/Types",
+		"src/HotChocolate/Spatial/src/Types",
+	}
+	names := moduleNames(roots)
+	want := map[string]string{
+		"src/HotChocolate/Core/src/Types":    "Core/Types",
+		"src/HotChocolate/MongoDb/src/Types": "MongoDb/Types",
+		"src/HotChocolate/Spatial/src/Types": "Spatial/Types",
+	}
+	for r, w := range want {
+		if names[r] != w {
+			t.Errorf("moduleNames[%q] = %q, want %q", r, names[r], w)
+		}
+	}
+}
+
+func TestModuleNamesCollisionFallsBackWhenCleaningWouldMerge(t *testing.T) {
+	// Dropping "src" would collapse "a/src/Types" and "a/Types" into the same name,
+	// silently merging two distinct projects. The group must fall back to full paths
+	// rather than lose a module.
+	roots := []string{"a/src/Types", "a/Types"}
+	names := moduleNames(roots)
+	if names["a/src/Types"] == names["a/Types"] {
+		t.Fatalf("distinct roots must keep distinct names, both got %q", names["a/Types"])
+	}
+	if names["a/src/Types"] != "a/src/Types" || names["a/Types"] != "a/Types" {
+		t.Errorf("ambiguous cleaning should fall back to full paths, got %q and %q",
+			names["a/src/Types"], names["a/Types"])
+	}
+}
+
 func TestIsTestModuleNameConservative(t *testing.T) {
 	tests := map[string]bool{
 		"ApolloFederation.Tests":                true,
