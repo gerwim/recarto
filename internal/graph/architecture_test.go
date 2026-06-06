@@ -214,6 +214,41 @@ func TestMapArchitectureDemotesTestEndpointDeps(t *testing.T) {
 	}
 }
 
+func TestMapArchitectureDemotesGeneratedSourceDeps(t *testing.T) {
+	// The heaviest edge in a repo is often a generated client's references into a
+	// shared abstractions module — codegen noise, not product architecture. An
+	// edge dominated by generated-source references must rank below genuine
+	// product→product coupling, mirroring test-endpoint demotion.
+	arch := Architecture{Deps: []ModuleEdge{
+		{From: "Client", To: "Types", Count: 9000, GeneratedFrom: 8900}, // codegen client refs
+		{From: "Api", To: "Core", Count: 10},                            // genuine product coupling
+	}}
+	_, deps := MapArchitecture(arch, 1)
+	if len(deps) != 1 {
+		t.Fatalf("want top-1 dep, got %+v", deps)
+	}
+	if deps[0].From != "Api" || deps[0].To != "Core" {
+		t.Errorf("want product edge Api→Core to outrank generated-sourced edge, got %+v", deps[0])
+	}
+}
+
+func TestMapArchitectureKeepsMostlyHandwrittenEdge(t *testing.T) {
+	// An edge with only a minority of generated-sourced references is genuine
+	// coupling and must keep ranking by count — the generated penalty applies only
+	// when generated references dominate the edge.
+	arch := Architecture{Deps: []ModuleEdge{
+		{From: "Api", To: "Core", Count: 100, GeneratedFrom: 10}, // mostly hand-written
+		{From: "X", To: "Y", Count: 50},
+	}}
+	_, deps := MapArchitecture(arch, 1)
+	if len(deps) != 1 {
+		t.Fatalf("want top-1 dep, got %+v", deps)
+	}
+	if deps[0].From != "Api" || deps[0].To != "Core" {
+		t.Errorf("mostly-handwritten edge should rank by count, got %+v", deps[0])
+	}
+}
+
 func TestMapArchitectureBackfillsEdgeEndpoints(t *testing.T) {
 	// A coupling hub and the abstraction it depends on are both small by file
 	// count, so neither makes the top-2-by-files module list — yet their edge is

@@ -191,8 +191,17 @@ func handleAugment(ctx context.Context, a *app.App, ev Event) (Result, error) {
 		}
 	}
 
+	// A Glob pattern (e.g. "*.cs") is a path query, not a symbol query: searching
+	// symbols for its literal stem injects irrelevant matches (minified-bundle
+	// functions named "cs", etc.). Reduce file globs to their identifier stem and
+	// skip injection entirely for stemless ones; plain Grep terms pass through.
+	term, ok := augmentSearchTerm(pattern)
+	if !ok {
+		return Result{}, nil
+	}
+
 	var b strings.Builder
-	if res, err := a.Graph.Search(ctx, a.Git.Worktree, pattern, "", "", 8); err == nil && len(res) > 0 {
+	if res, err := a.Graph.Search(ctx, a.Git.Worktree, term, "", "", 8); err == nil && len(res) > 0 {
 		b.WriteString("Recarto code graph — symbols matching your search:\n")
 		for _, r := range res {
 			fmt.Fprintf(&b, "- [%s] %s  %s:%d\n", r.Kind, r.QualifiedName, r.Path, r.Line)
@@ -201,7 +210,7 @@ func handleAugment(ctx context.Context, a *app.App, ev Event) (Result, error) {
 	}
 
 	if set, err := a.Engine.Recall(ctx, memory.RecallQuery{
-		TaskHint: pattern, Kind: memory.KindBug, Branch: a.Git.Branch, Worktree: a.Git.Worktree, Limit: 5,
+		TaskHint: term, Kind: memory.KindBug, Branch: a.Git.Branch, Worktree: a.Git.Worktree, Limit: 5,
 	}); err == nil {
 		var bugLines []string
 		for _, r := range set.Results {

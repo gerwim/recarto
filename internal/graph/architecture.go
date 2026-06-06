@@ -23,6 +23,11 @@ type ModuleEdge struct {
 	From  string
 	To    string
 	Count int
+	// GeneratedFrom is the subset of Count whose source file is machine-generated
+	// (isGeneratedPath). An edge dominated by generated-source references is
+	// codegen noise rather than product architecture, so the session-start map
+	// demotes it (see MapArchitecture).
+	GeneratedFrom int
 }
 
 // Architecture is a bird's-eye structural map of a worktree.
@@ -113,6 +118,13 @@ func MapArchitecture(arch Architecture, limit int) (mods []Module, deps []Module
 		if ti != tj {
 			return !ti
 		}
+		// Then demote edges dominated by generated-source references: a generated
+		// client's thousands of refs into a shared abstractions module is the
+		// heaviest edge in many monorepos yet is codegen noise, not architecture.
+		gi, gj := genDominatedEdge(deps[i]), genDominatedEdge(deps[j])
+		if gi != gj {
+			return !gi
+		}
 		return deps[i].Count > deps[j].Count
 	})
 	if limit > 0 && len(deps) > limit {
@@ -154,6 +166,13 @@ func MapArchitecture(arch Architecture, limit int) (mods []Module, deps []Module
 	sort.SliceStable(mods, func(i, j int) bool { return mods[i].Name < mods[j].Name })
 
 	return mods, deps
+}
+
+// genDominatedEdge reports whether a majority of an edge's references originate
+// in generated source files, marking it codegen noise rather than product
+// coupling. A minority of generated refs leaves a genuine edge unpenalized.
+func genDominatedEdge(e ModuleEdge) bool {
+	return e.GeneratedFrom*2 > e.Count
 }
 
 // projectRoots returns directories (relative to worktree, slash-separated,
@@ -290,6 +309,7 @@ SELECT srcf.path, dstf.path, COUNT(*)
 		return Architecture{}, err
 	}
 	depCount := map[[2]string]int{}
+	depGen := map[[2]string]int{} // refs whose source file is generated, per edge
 	for depRows.Next() {
 		var sp, dp string
 		var c int
@@ -299,7 +319,11 @@ SELECT srcf.path, dstf.path, COUNT(*)
 		}
 		sm, dm := moduleOf(roots, modNames, sp), moduleOf(roots, modNames, dp)
 		if sm != dm {
-			depCount[[2]string{sm, dm}] += c
+			key := [2]string{sm, dm}
+			depCount[key] += c
+			if isGeneratedPath(sp) {
+				depGen[key] += c
+			}
 		}
 	}
 	if err := depRows.Err(); err != nil {
@@ -308,7 +332,7 @@ SELECT srcf.path, dstf.path, COUNT(*)
 	}
 	depRows.Close()
 	for k, c := range depCount {
-		arch.Deps = append(arch.Deps, ModuleEdge{From: k[0], To: k[1], Count: c})
+		arch.Deps = append(arch.Deps, ModuleEdge{From: k[0], To: k[1], Count: c, GeneratedFrom: depGen[k]})
 	}
 	sort.Slice(arch.Deps, func(i, j int) bool {
 		if arch.Deps[i].From != arch.Deps[j].From {
