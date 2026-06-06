@@ -22,3 +22,17 @@ func TestKindTodoIsValid(t *testing.T) {
 		t.Fatalf("KindTodo = %q, want \"todo\"", KindTodo)
 	}
 }
+
+func TestAllKindsCoversValidKinds(t *testing.T) {
+	if len(AllKinds) != len(validKinds) {
+		t.Fatalf("AllKinds has %d, validKinds has %d", len(AllKinds), len(validKinds))
+	}
+	for _, k := range AllKinds {
+		if !k.Valid() {
+			t.Errorf("AllKinds entry %q not in validKinds", k)
+		}
+	}
+	if AllKinds[len(AllKinds)-1] != KindTodo {
+		t.Errorf("expected todo last, got %q", AllKinds[len(AllKinds)-1])
+	}
+}

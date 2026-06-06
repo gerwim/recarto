@@ -14,10 +14,20 @@ const (
 	KindTodo        Kind = "todo"
 )
 
-var validKinds = map[Kind]bool{
-	KindPreference: true, KindLearning: true, KindDecision: true,
-	KindDoNotRepeat: true, KindBug: true, KindAction: true, KindTodo: true,
+// AllKinds is the canonical, ordered list of memory kinds. It is the single
+// source of truth: validKinds is derived from it, and the MCP kind enum lists it.
+var AllKinds = []Kind{
+	KindPreference, KindLearning, KindDecision,
+	KindDoNotRepeat, KindBug, KindAction, KindTodo,
 }
+
+var validKinds = func() map[Kind]bool {
+	m := make(map[Kind]bool, len(AllKinds))
+	for _, k := range AllKinds {
+		m[k] = true
+	}
+	return m
+}()
 
 // Valid reports whether k is a known memory kind.
 func (k Kind) Valid() bool { return validKinds[k] }
