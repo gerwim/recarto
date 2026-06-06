@@ -189,6 +189,69 @@ func TestAugmentSuppressesRepeatedPattern(t *testing.T) {
 	}
 }
 
+func TestAugmentDedupsBugAlreadySurfacedOnRead(t *testing.T) {
+	a := newTestApp(t, "main")
+	ctx := context.Background()
+	rel := "internal/agents/handle.go"
+	// A bug both anchored to a file (so post-read surfaces it) and matching a
+	// search term (so augment recall finds it).
+	if _, _, err := a.Engine.Record(ctx, memory.NewMemory{
+		Kind: memory.KindBug, Title: "Widget overflow", Body: "Widget overflow",
+		Refs: []memory.Ref{{Type: memory.RefFile, Value: rel}}, Branch: a.Git.Branch,
+		Source: "cli", Extra: map[string]any{"fix": "clamp"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	read, err := handlePostRead(ctx, a, Event{Kind: KindPostRead, SessionID: "s1", FilePath: rel, ToolResult: "package agents"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(read.Context, "Widget overflow") {
+		t.Fatalf("post-read should surface the anchored bug:\n%s", read.Context)
+	}
+
+	// A later search matching the same bug must NOT re-inject it — it is already
+	// sitting in the transcript from the read. Pure token waste otherwise.
+	aug, err := Handle(ctx, a, Event{Kind: KindAugment, SessionID: "s1", Pattern: "Widget"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(aug.Context, "Widget overflow") {
+		t.Fatalf("augment must not re-inject a bug already surfaced on read:\n%s", aug.Context)
+	}
+}
+
+func TestPostReadDedupsBugAlreadySurfacedByAugment(t *testing.T) {
+	a := newTestApp(t, "main")
+	ctx := context.Background()
+	rel := "internal/agents/handle.go"
+	if _, _, err := a.Engine.Record(ctx, memory.NewMemory{
+		Kind: memory.KindBug, Title: "Widget overflow", Body: "Widget overflow",
+		Refs: []memory.Ref{{Type: memory.RefFile, Value: rel}}, Branch: a.Git.Branch,
+		Source: "cli", Extra: map[string]any{"fix": "clamp"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	aug, err := Handle(ctx, a, Event{Kind: KindAugment, SessionID: "s1", Pattern: "Widget"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(aug.Context, "Widget overflow") {
+		t.Fatalf("augment should surface the matching bug:\n%s", aug.Context)
+	}
+
+	// Reading the anchored file must NOT re-inject a bug the search already showed.
+	read, err := handlePostRead(ctx, a, Event{Kind: KindPostRead, SessionID: "s1", FilePath: rel, ToolResult: "package agents"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(read.Context, "Widget overflow") {
+		t.Fatalf("post-read must not re-inject a bug already surfaced by a search:\n%s", read.Context)
+	}
+}
+
 func TestAugmentNoDedupWithoutSession(t *testing.T) {
 	a := newTestApp(t, "main")
 	ctx := context.Background()

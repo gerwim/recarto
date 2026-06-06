@@ -286,9 +286,23 @@ func handleAugment(ctx context.Context, a *app.App, ev Event) (Result, error) {
 	if set, err := a.Engine.Recall(ctx, memory.RecallQuery{
 		TaskHint: term, Kind: memory.KindBug, Branch: a.Git.Branch, Worktree: a.Git.Worktree, Limit: 5,
 	}); err == nil {
+		// Drop bugs already surfaced this session — at session-start, on a read/edit,
+		// or by an earlier search — so the same bug block is never injected twice
+		// (pure token waste). dedupSurfaced also marks the survivors, so a later
+		// read/edit of the same code stays quiet about a bug this search just showed.
+		var bugRecs []*memory.Record
+		for _, r := range set.Results {
+			if r.Record.Kind == memory.KindBug { // recall always includes pinned do_not_repeat
+				bugRecs = append(bugRecs, r.Record)
+			}
+		}
+		fresh := make(map[string]bool, len(bugRecs))
+		for _, r := range dedupSurfaced(ctx, a, ev.SessionID, bugRecs) {
+			fresh[r.ID] = true
+		}
 		var bugLines []string
 		for _, r := range set.Results {
-			if r.Record.Kind != memory.KindBug { // recall always includes pinned do_not_repeat
+			if r.Record.Kind != memory.KindBug || !fresh[r.Record.ID] {
 				continue
 			}
 			if fix, _ := r.Record.Extra["fix"].(string); fix != "" {
