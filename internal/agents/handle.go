@@ -177,6 +177,20 @@ func handleAugment(ctx context.Context, a *app.App, ev Event) (Result, error) {
 		return Result{}, nil
 	}
 
+	// Session-scoped dedup: re-running the same Grep/Glob pattern would re-inject
+	// a symbol/bug block already sitting earlier in the transcript — pure token
+	// waste. Suppress the repeat (mirrors the repeated-read path) and nudge the
+	// agent to rely on the earlier injection instead.
+	scope := "session:" + ev.SessionID
+	metric := "augment:" + pattern
+	if ev.SessionID != "" {
+		if n, err := a.Ledger.Get(ctx, scope, metric); err == nil && n > 0 {
+			_ = a.Ledger.Incr(ctx, "lifetime", "repeated_augments_blocked", 1)
+			return Result{Context: fmt.Sprintf("You already searched %q this session — the matching symbols/bugs were surfaced earlier. "+
+				"Rely on that injection instead of re-searching.", pattern)}, nil
+		}
+	}
+
 	var b strings.Builder
 	if res, err := a.Graph.Search(ctx, a.Git.Worktree, pattern, "", "", 8); err == nil && len(res) > 0 {
 		b.WriteString("Recarto code graph — symbols matching your search:\n")
@@ -212,7 +226,14 @@ func handleAugment(ctx context.Context, a *app.App, ev Event) (Result, error) {
 		}
 	}
 
-	return Result{Context: b.String()}, nil
+	out := b.String()
+	// Mark the pattern as injected so a later repeat in this session is deduped.
+	// Only record when content was actually injected and the session is scoped,
+	// so the reminder never fires for an empty first result.
+	if out != "" && ev.SessionID != "" {
+		_ = a.Ledger.Incr(ctx, scope, metric, 1)
+	}
+	return Result{Context: out}, nil
 }
 
 // handleStop finalizes the session row and returns an advisory reminder.

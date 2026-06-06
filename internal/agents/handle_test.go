@@ -64,6 +64,65 @@ func TestHandlePostReadWarnsOnRepeat(t *testing.T) {
 	}
 }
 
+func TestAugmentSuppressesRepeatedPattern(t *testing.T) {
+	a := newTestApp(t, "main")
+	ctx := context.Background()
+	// Record a bug so the augment hook has injectable content (the empty test
+	// graph yields no symbol hits).
+	if _, _, err := a.Engine.Record(ctx, memory.NewMemory{
+		Kind: memory.KindBug, Title: "Widget overflow", Body: "Widget overflow — fix: clamp",
+		Source: "cli", Extra: map[string]any{"fix": "clamp"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ev := Event{Kind: KindAugment, SessionID: "s1", Pattern: "Widget"}
+
+	first, err := Handle(ctx, a, ev)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(first.Context, "Widget overflow") {
+		t.Fatalf("first augment should surface the matching bug:\n%s", first.Context)
+	}
+
+	second, err := Handle(ctx, a, ev)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(second.Context, "Widget overflow") {
+		t.Errorf("repeated augment should not re-inject the same block:\n%s", second.Context)
+	}
+	if !strings.Contains(second.Context, "already searched") {
+		t.Errorf("repeated augment should emit a short reminder:\n%s", second.Context)
+	}
+	n, _ := a.Ledger.Get(ctx, "lifetime", "repeated_augments_blocked")
+	if n != 1 {
+		t.Errorf("repeated_augments_blocked = %d, want 1", n)
+	}
+}
+
+func TestAugmentNoDedupWithoutSession(t *testing.T) {
+	a := newTestApp(t, "main")
+	ctx := context.Background()
+	if _, _, err := a.Engine.Record(ctx, memory.NewMemory{
+		Kind: memory.KindBug, Title: "Widget overflow", Body: "Widget overflow — fix: clamp",
+		Source: "cli", Extra: map[string]any{"fix": "clamp"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ev := Event{Kind: KindAugment, Pattern: "Widget"} // no SessionID → cannot scope dedup
+
+	for i := range 2 {
+		res, err := Handle(ctx, a, ev)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(res.Context, "Widget overflow") {
+			t.Fatalf("call %d without a session should still inject:\n%s", i, res.Context)
+		}
+	}
+}
+
 func TestSessionBudgetEnvOverride(t *testing.T) {
 	t.Setenv("RECARTO_SESSION_BUDGET", "50")
 	if got := sessionBudget(); got != 50 {
