@@ -11,6 +11,20 @@ import (
 	"git.gerwim.nl/gerwim/recarto/internal/store"
 )
 
+func TestMatchedOnDominantSignal(t *testing.T) {
+	r := RecallResult{Signals: map[string]float64{
+		"structural": 1.0, "lexical": 0, "recency": 0, "reinforcement": 0, "branch": 0,
+	}}
+	if got := r.MatchedOn(); len(got) != 1 || got[0] != "structural" {
+		t.Fatalf("MatchedOn = %v, want [structural]", got)
+	}
+
+	none := RecallResult{Signals: map[string]float64{}}
+	if got := none.MatchedOn(); got != nil {
+		t.Fatalf("MatchedOn (no signals) = %v, want nil", got)
+	}
+}
+
 func TestRecallStructuralBeatsLexical(t *testing.T) {
 	clk := clock.NewFake(time.UnixMilli(10_000_000))
 	e := newTestEngine(t, clk)

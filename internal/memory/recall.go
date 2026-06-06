@@ -49,6 +49,41 @@ type RecallResult struct {
 	DanglingRefs []Ref // code refs absent from the current worktree (nil if none)
 }
 
+// MatchedOn names the signals that drove this result's score, ordered by weighted
+// contribution (desc), keeping any whose contribution is at least 20% of the top
+// signal's. It lets a consuming LLM see *why* a memory surfaced. Returns nil when
+// nothing contributed.
+func (r RecallResult) MatchedOn() []string {
+	weights := map[string]float64{
+		"structural": wStructural, "lexical": wLexical, "recency": wRecency,
+		"reinforcement": wReinforcement, "branch": wBranch,
+	}
+	type contrib struct {
+		name string
+		v    float64
+	}
+	var cs []contrib
+	var top float64
+	for name, w := range weights {
+		v := w * r.Signals[name]
+		if v > top {
+			top = v
+		}
+		cs = append(cs, contrib{name, v})
+	}
+	if top <= 0 {
+		return nil
+	}
+	sort.Slice(cs, func(i, j int) bool { return cs[i].v > cs[j].v })
+	var out []string
+	for _, c := range cs {
+		if c.v >= 0.2*top {
+			out = append(out, c.name)
+		}
+	}
+	return out
+}
+
 // Recall scores and ranks memories by structural overlap, lexical (BM25),
 // recency, reinforcement, and branch affinity, all multiplied by confidence.
 // Task 12 wraps the budgeter around the sorted output.
