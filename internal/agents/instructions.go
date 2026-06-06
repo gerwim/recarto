@@ -31,6 +31,11 @@ per-repo SQLite cache outside the working tree.
   instead of reading whole files. When searching ` + "`search_graph`" + ` by concept, also
   pass ` + "`candidate_symbols`" + ` — the identifier names you expect (e.g. ` + "`AddressLookup`, `Geocode`" + `);
   the names you supply are what make concept search land.
+- **Read one symbol, not the file**: ` + "`get_code_snippet`" + ` takes just a ` + "`symbol`" + `
+  (the ` + "`file`" + ` is optional) and resolves it by name across the repo — the usual
+  next step after a search returns a name, so you needn't know the path. If the
+  bare name is ambiguous it returns ` + "`candidates`" + ` (path/line/qualified_name);
+  re-query with a qualified name (usually unique) or add the file.
 - **Orient first** in unfamiliar code with ` + "`get_architecture`" + ` (module/file/symbol
   map), then ` + "`search_graph` / `query_graph`" + ` to locate symbols and
   ` + "`get_code_snippet`" + ` to read one instead of a whole file. A lookup miss is an
@@ -44,6 +49,9 @@ per-repo SQLite cache outside the working tree.
   its enclosing symbol, and the result reports ` + "`total`/`truncated`" + ` so you know
   whether the page is complete. Prefer it over a shell ` + "`grep`" + `; raise ` + "`limit`" + ` /
   ` + "`max_per_file`" + ` (or narrow with ` + "`path_glob`/`language`" + `) when it says it truncated.
+  It does full regex too: set ` + "`regex=true`" + ` (` + "`ignore_case`" + ` for case-folding). For
+  precise *references* to a type/symbol, prefer a word-boundary regex (` + "`\\bName\\b`" + `)
+  over a bare substring, which also matches ` + "`NameFactory`, `GetName`" + `, etc.
 - **Trace** with ` + "`trace_call_path`" + `: each hop is annotated with a confidence —
   trust high/typed/self hops; treat low/name hops as candidates to verify with
   ` + "`get_code_snippet`" + `. Tracing a *type* (class/interface/record) dead-ends —

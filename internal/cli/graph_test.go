@@ -199,6 +199,67 @@ func TestGraphOutline(t *testing.T) {
 	}
 }
 
+// TestGraphSnippetBySymbol proves `graph snippet <symbol>` resolves the file
+// itself (the common case right after a search), so the agent need not already
+// know the path.
+func TestGraphSnippetBySymbol(t *testing.T) {
+	a := newTestApp(t, "main")
+	wt := t.TempDir()
+	a.Git.Worktree = wt
+	os.WriteFile(filepath.Join(wt, "a.go"),
+		[]byte("package p\n\nfunc Uniq() int {\n\treturn 7\n}\n"), 0o644)
+	if err := Index(context.Background(), a, &bytes.Buffer{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := Graph(context.Background(), a, &out, []string{"snippet", "Uniq"}); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(out.Bytes(), []byte("func Uniq() int")) {
+		t.Errorf("graph snippet by symbol = %q, want the Uniq body", out.String())
+	}
+}
+
+// TestGraphSnippetBySymbolAmbiguous proves a bare name with several definitions
+// lists the candidates (with file:line and qualified name) instead of silently
+// returning one or nothing — keeping the agent inside recarto to disambiguate.
+func TestGraphSnippetBySymbolAmbiguous(t *testing.T) {
+	a := newTestApp(t, "main")
+	wt := t.TempDir()
+	a.Git.Worktree = wt
+	os.WriteFile(filepath.Join(wt, "a.go"), []byte("package a\n\nfunc Dup() {}\n"), 0o644)
+	os.WriteFile(filepath.Join(wt, "b.go"), []byte("package b\n\nfunc Dup() {}\n"), 0o644)
+	if err := Index(context.Background(), a, &bytes.Buffer{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := Graph(context.Background(), a, &out, []string{"snippet", "Dup"}); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(out.Bytes(), []byte("a.go")) || !bytes.Contains(out.Bytes(), []byte("b.go")) {
+		t.Errorf("ambiguous snippet did not list both candidate files; output = %q", out.String())
+	}
+}
+
+// TestGraphHelpListsGrepFlags proves the subcommand flags are discoverable from
+// the CLI itself — an agent cannot read the source, so `graph help` must document
+// the grep search modifiers (regex, ignore-case, glob) it would otherwise miss.
+func TestGraphHelpListsGrepFlags(t *testing.T) {
+	a := newTestApp(t, "main")
+	for _, args := range [][]string{{"help"}, {"grep", "--help"}} {
+		var out bytes.Buffer
+		if err := Graph(context.Background(), a, &out, args); err != nil {
+			t.Fatalf("graph %v: %v", args, err)
+		}
+		s := out.String()
+		for _, want := range []string{"--regex", "--ignore-case", "--glob"} {
+			if !bytes.Contains(out.Bytes(), []byte(want)) {
+				t.Errorf("graph %v help missing %q; output = %q", args, want, s)
+			}
+		}
+	}
+}
+
 func TestGraphRequiresSubcommand(t *testing.T) {
 	a := newTestApp(t, "main")
 	if err := Graph(context.Background(), a, &bytes.Buffer{}, nil); err == nil {

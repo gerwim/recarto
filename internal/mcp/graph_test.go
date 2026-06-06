@@ -226,6 +226,50 @@ func TestGraphHandlersMapping(t *testing.T) {
 	}
 }
 
+// TestGetCodeSnippetBySymbol proves the tool resolves a symbol when File is
+// omitted (the common case after a search returns a name) and lists candidates
+// when the bare name is ambiguous, so the agent never has to know the path first.
+func TestGetCodeSnippetBySymbol(t *testing.T) {
+	a := newTestApp(t, "main")
+	wt := t.TempDir()
+	a.Git.Worktree = wt
+	if err := os.WriteFile(filepath.Join(wt, "a.go"),
+		[]byte("package p\n\nfunc Uniq() int { return 7 }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wt, "b.go"),
+		[]byte("package q\n\nfunc Dup() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wt, "c.go"),
+		[]byte("package r\n\nfunc Dup() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := a.Graph.Reconcile(ctx, wt, graph.FSSource{Root: wt}); err != nil {
+		t.Fatal(err)
+	}
+	// Unique name, no File: resolves to the body.
+	snip, err := getCodeSnippet(ctx, a, GetCodeSnippetInput{Symbol: "Uniq"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !snip.Found || !strings.Contains(snip.Snippet, "func Uniq() int") {
+		t.Errorf("by-symbol snippet = %+v, want the Uniq body", snip)
+	}
+	// Ambiguous name, no File: not found, but candidates returned for disambiguation.
+	amb, err := getCodeSnippet(ctx, a, GetCodeSnippetInput{Symbol: "Dup"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if amb.Found {
+		t.Errorf("ambiguous Dup should not resolve to a single snippet: %+v", amb)
+	}
+	if len(amb.Candidates) != 2 {
+		t.Fatalf("ambiguous Dup candidates = %d, want 2: %+v", len(amb.Candidates), amb.Candidates)
+	}
+}
+
 func TestSearchGraphCandidateSymbolsAndHint(t *testing.T) {
 	a := newTestApp(t, "main")
 	wt := t.TempDir()

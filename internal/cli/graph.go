@@ -16,11 +16,18 @@ func Graph(ctx context.Context, a *app.App, w io.Writer, args []string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("graph: subcommand required (search|grep|callers|callees|impls|annotated|outline|arch|query|snippet)")
 	}
+	sub, rest := args[0], args[1:]
+	// Discoverability: an agent cannot read the source, so the flags (regex,
+	// ignore-case, glob, …) must be reachable from the CLI itself. `graph help`
+	// or `graph <sub> --help` prints the usage block and exits before any work.
+	if isHelpToken(sub) || containsHelpToken(rest) {
+		fmt.Fprint(w, graphUsage)
+		return nil
+	}
 	wt := a.Git.Worktree
 	// Lazy reconcile so query results reflect the current checkout (spec §11).
 	// Best-effort: a reconcile failure must not fail the query.
 	_ = a.Graph.ReconcileIfStale(ctx, wt, graph.NewSource(wt), graph.WorktreeToken(wt))
-	sub, rest := args[0], args[1:]
 	switch sub {
 	case "search":
 		var syms, qwords []string
@@ -82,7 +89,7 @@ func Graph(ctx context.Context, a *app.App, w io.Writer, args []string) error {
 			root := chains[0][0]
 			fmt.Fprintf(w, "(no %s found for %s)\n", dir, sym)
 			if graph.IsTypeKind(root.Kind) {
-				fmt.Fprintf(w, "%s is a type (%s); call traces follow methods, not the declaration. Try: `graph impls %s` (implementers), `graph grep %s` (references), or `graph callers %s.<Method>`\n",
+				fmt.Fprintf(w, "%s is a type (%s); call traces follow methods, not the declaration. Try: `graph impls %s` (implementers), `graph grep -r '\\b%s\\b'` (references), or `graph callers %s.<Method>`\n",
 					sym, root.Kind, sym, sym, sym)
 			}
 			return nil
@@ -302,19 +309,85 @@ func Graph(ctx context.Context, a *app.App, w io.Writer, args []string) error {
 		}
 		return nil
 	case "snippet":
-		if len(rest) < 2 {
-			return fmt.Errorf("graph snippet: <file> <symbol> required")
+		switch len(rest) {
+		case 0:
+			return fmt.Errorf("graph snippet: <symbol> (or <file> <symbol>) required")
+		case 1:
+			// File-less: resolve the symbol's location ourselves. This is the common
+			// path right after a search returns a name — no need to know the file.
+			res, cands, err := a.Graph.SnippetByName(ctx, wt, rest[0])
+			if err != nil {
+				return err
+			}
+			if res.Found {
+				fmt.Fprintln(w, res.Snippet)
+				return nil
+			}
+			if len(cands) == 0 {
+				fmt.Fprintf(w, "(no symbol named %q)\n", rest[0])
+				return nil
+			}
+			// Ambiguous: list the definitions so the agent can re-query with a
+			// qualified name (usually unique) or the file path, staying in recarto.
+			fmt.Fprintf(w, "%q is ambiguous (%d definitions); re-run with a qualified name or the file:\n", rest[0], len(cands))
+			for _, c := range cands {
+				fmt.Fprintf(w, "• [%s] %s  %s:%d\n", c.Kind, c.QualifiedName, c.Path, c.StartLine)
+			}
+			return nil
+		default:
+			res, err := a.Graph.Snippet(ctx, wt, rest[0], rest[1])
+			if err != nil {
+				return err
+			}
+			if !res.Found {
+				return fmt.Errorf("graph snippet: symbol %q not found in %s", rest[1], rest[0])
+			}
+			fmt.Fprintln(w, res.Snippet)
+			return nil
 		}
-		res, err := a.Graph.Snippet(ctx, wt, rest[0], rest[1])
-		if err != nil {
-			return err
-		}
-		if !res.Found {
-			return fmt.Errorf("graph snippet: symbol %q not found in %s", rest[1], rest[0])
-		}
-		fmt.Fprintln(w, res.Snippet)
-		return nil
 	default:
 		return fmt.Errorf("graph: unknown subcommand %q", sub)
 	}
 }
+
+// isHelpToken reports whether a token requests usage.
+func isHelpToken(tok string) bool {
+	return tok == "help" || tok == "-h" || tok == "--help"
+}
+
+// containsHelpToken reports whether any token requests usage.
+func containsHelpToken(toks []string) bool {
+	for _, t := range toks {
+		if isHelpToken(t) {
+			return true
+		}
+	}
+	return false
+}
+
+// graphUsage documents every subcommand and its flags. It is the CLI's only
+// discoverability surface — an agent cannot read the source, so search modifiers
+// (regex, ignore-case, glob) that exist on the engine must be listed here or they
+// are invisible and the agent falls back to shell grep.
+const graphUsage = `recarto graph <sub> — query the code graph
+
+  search <terms…> [--symbol=Name]   concept/identifier search (ranked)
+  grep <pattern> [flags]            full-text search, each hit with its enclosing symbol
+      -r, --regex                   treat pattern as a regular expression (RE2)
+      -i, --ignore-case             case-insensitive match
+      --glob=<glob>                 restrict to paths matching glob (e.g. *.cs, src/**)
+      --lang=<lang>                 restrict to a language (go, csharp, typescript, …)
+      --limit=<n>                   max matches (default 50)
+      --max-per-file=<n>            max matches per file (default 5)
+  callers <symbol>                  who calls a function/method
+  callees <symbol>                  what a function/method calls
+  impls <type> [--super|--up]       implementers (or supertypes) of an interface/base
+  annotated <attr>                  symbols carrying an attribute/decorator
+  outline <file>                    a file's symbols (kind, signature, line) in order
+  arch [scope]                      module/dependency map
+  query <name>                      look up a symbol by name
+  snippet <symbol> | <file> <symbol>  exact source for a symbol (file optional)
+
+Tip: for precise references to a type, use ` + "`grep -r '\\bName\\b'`" + ` (word boundaries)
+rather than a bare substring, which also matches NameFactory, GetName, etc.
+`

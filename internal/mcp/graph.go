@@ -281,8 +281,14 @@ func searchContent(ctx context.Context, a *app.App, in SearchContentInput) (Sear
 // --- get_code_snippet ---
 
 type GetCodeSnippetInput struct {
-	File   string `json:"file" jsonschema:"repo-relative file path"`
+	File   string `json:"file,omitempty" jsonschema:"repo-relative file path. Optional: omit it to resolve the symbol by name across the repo — the common case right after a search returns a name."`
 	Symbol string `json:"symbol" jsonschema:"symbol name or qualified name"`
+}
+type SnippetCandidate struct {
+	Path          string `json:"path"`
+	StartLine     int    `json:"start_line"`
+	Kind          string `json:"kind,omitempty"`
+	QualifiedName string `json:"qualified_name,omitempty"`
 }
 type GetCodeSnippetOutput struct {
 	Found         bool   `json:"found"`
@@ -290,10 +296,30 @@ type GetCodeSnippetOutput struct {
 	EndLine       int    `json:"end_line,omitempty"`
 	QualifiedName string `json:"qualified_name,omitempty"`
 	Snippet       string `json:"snippet,omitempty"`
+	// Candidates is populated only when file was omitted and the bare name matched
+	// several definitions: Found is false, and the agent should re-query with a
+	// qualified_name (usually unique) or by supplying the file.
+	Candidates []SnippetCandidate `json:"candidates,omitempty"`
 }
 
 func getCodeSnippet(ctx context.Context, a *app.App, in GetCodeSnippetInput) (GetCodeSnippetOutput, error) {
 	ensureFresh(ctx, a)
+	if in.File == "" {
+		r, cands, err := a.Graph.SnippetByName(ctx, a.Git.Worktree, in.Symbol)
+		if err != nil {
+			return GetCodeSnippetOutput{}, err
+		}
+		out := GetCodeSnippetOutput{
+			Found: r.Found, StartLine: r.StartLine, EndLine: r.EndLine,
+			QualifiedName: r.QualifiedName, Snippet: r.Snippet,
+		}
+		for _, c := range cands {
+			out.Candidates = append(out.Candidates, SnippetCandidate{
+				Path: c.Path, StartLine: c.StartLine, Kind: c.Kind, QualifiedName: c.QualifiedName,
+			})
+		}
+		return out, nil
+	}
 	r, err := a.Graph.Snippet(ctx, a.Git.Worktree, in.File, in.Symbol)
 	if err != nil {
 		return GetCodeSnippetOutput{}, err
