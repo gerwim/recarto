@@ -214,16 +214,79 @@ func TestMapArchitectureDemotesTestEndpointDeps(t *testing.T) {
 	}
 }
 
+func TestMapArchitectureBackfillsEdgeEndpoints(t *testing.T) {
+	// A coupling hub and the abstraction it depends on are both small by file
+	// count, so neither makes the top-2-by-files module list — yet their edge is
+	// the heaviest in the repo. The displayed edge must not point at modules the
+	// map never lists, so the endpoints are backfilled with their real counts.
+	arch := Architecture{
+		Modules: []Module{
+			{Name: "big1", Files: 100, Symbols: 1000},
+			{Name: "big2", Files: 90, Symbols: 900},
+			{Name: "hub", Files: 5, Symbols: 800},
+			{Name: "abstractions", Files: 3, Symbols: 40},
+		},
+		Deps: []ModuleEdge{{From: "hub", To: "abstractions", Count: 9999}},
+	}
+	mods, deps := MapArchitecture(arch, 2)
+	if len(deps) != 1 {
+		t.Fatalf("want 1 edge, got %+v", deps)
+	}
+	got := map[string]int{}
+	for _, m := range mods {
+		got[m.Name] = m.Files
+	}
+	for _, d := range deps {
+		if _, ok := got[d.From]; !ok {
+			t.Errorf("edge endpoint %q missing from module list %v", d.From, got)
+		}
+		if _, ok := got[d.To]; !ok {
+			t.Errorf("edge endpoint %q missing from module list %v", d.To, got)
+		}
+	}
+	// Backfilled endpoints carry their real file counts, not zero placeholders.
+	if got["hub"] != 5 {
+		t.Errorf("backfilled hub Files=%d, want 5", got["hub"])
+	}
+	if got["abstractions"] != 3 {
+		t.Errorf("backfilled abstractions Files=%d, want 3", got["abstractions"])
+	}
+	// Display stays name-sorted for stability after backfill.
+	for i := 1; i < len(mods); i++ {
+		if mods[i-1].Name > mods[i].Name {
+			t.Errorf("modules not name-sorted after backfill: %+v", mods)
+		}
+	}
+}
+
+func TestMapArchitectureNoBackfillWhenCoherent(t *testing.T) {
+	// When every displayed edge already connects modules in the top-N list, the
+	// map is coherent and backfill must add nothing (the common case — only large
+	// monorepos diverge). This guards the no-op on the repos that are already fine.
+	arch := Architecture{
+		Modules: []Module{
+			{Name: "a", Files: 100, Symbols: 10},
+			{Name: "b", Files: 90, Symbols: 10},
+			{Name: "c", Files: 1, Symbols: 10},
+		},
+		Deps: []ModuleEdge{{From: "a", To: "b", Count: 50}},
+	}
+	mods, _ := MapArchitecture(arch, 2)
+	if len(mods) != 2 {
+		t.Errorf("coherent map must not backfill; got %d modules: %+v", len(mods), mods)
+	}
+}
+
 func TestIsTestModuleNameConservative(t *testing.T) {
 	tests := map[string]bool{
-		"ApolloFederation.Tests":               true,
+		"ApolloFederation.Tests":                true,
 		"src/HotChocolate/Core/test/Types.Test": true,
-		"Mocha.Tests":                          true,
-		"Core":                                 false,
-		"Types.Analyzers":                      false,
-		"CostAnalysis":                         false, // "analysis" must not match "test"-like
-		"Testing":                              false, // segment "testing" != "test"
-		"contest":                              false,
+		"Mocha.Tests":                           true,
+		"Core":                                  false,
+		"Types.Analyzers":                       false,
+		"CostAnalysis":                          false, // "analysis" must not match "test"-like
+		"Testing":                               false, // segment "testing" != "test"
+		"contest":                               false,
 	}
 	for name, want := range tests {
 		if got := isTestModuleName(name); got != want {

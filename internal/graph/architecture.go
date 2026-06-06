@@ -124,6 +124,35 @@ func MapArchitecture(arch Architecture, limit int) (mods []Module, deps []Module
 		}
 		return deps[i].To < deps[j].To
 	})
+
+	// Backfill: ensure every endpoint of a displayed edge appears in the module
+	// list, so the map never points at a module it never introduced. Module
+	// selection ranks by file count while edges rank by reference count, so on
+	// large monorepos a coupling hub (many refs, few files) can anchor the
+	// heaviest edge yet fall out of the top-N list — leaving a dangling endpoint
+	// the agent has no context for. Coherent maps (the common case) add nothing.
+	// Endpoints with no Module entry are left as-is (rare; the edge still shows).
+	present := make(map[string]bool, len(mods))
+	for _, m := range mods {
+		present[m.Name] = true
+	}
+	byName := make(map[string]Module, len(arch.Modules))
+	for _, m := range arch.Modules {
+		byName[m.Name] = m
+	}
+	for _, d := range deps {
+		for _, end := range [2]string{d.From, d.To} {
+			if present[end] {
+				continue
+			}
+			if m, ok := byName[end]; ok {
+				mods = append(mods, m)
+				present[end] = true
+			}
+		}
+	}
+	sort.SliceStable(mods, func(i, j int) bool { return mods[i].Name < mods[j].Name })
+
 	return mods, deps
 }
 
