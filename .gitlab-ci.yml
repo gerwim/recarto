@@ -11,7 +11,7 @@ test:
     - go vet ./...
     - go test ./...
 
-# Cross-compile all three targets: linux+windows via zig, darwin via osxcross.
+# Cross-compile linux+windows via zig. Darwin (osxcross) is disabled for now.
 build:
   stage: build
   image: "$BUILDER_IMAGE"
@@ -19,7 +19,8 @@ build:
     - if: '$CI_COMMIT_TAG'
   script:
     - make linux windows VERSION="$CI_COMMIT_TAG"
-    - make darwin DARWIN_CC="oa64-clang" VERSION="$CI_COMMIT_TAG"
+    # Darwin build disabled until osxcross is working again.
+    # - make darwin DARWIN_CC="oa64-clang" VERSION="$CI_COMMIT_TAG"
   artifacts:
     paths:
       - releases/
@@ -48,7 +49,6 @@ publish:
       -version "$VER" -released "$NOW"
       -in index.json -out index.json
       -artifact "linux-amd64=releases/linux-amd64/recarto:recarto/${VER}/recarto-linux-amd64"
-      -artifact "darwin-arm64=releases/darwin-arm64/recarto:recarto/${VER}/recarto-darwin-arm64"
       -artifact "windows-amd64=releases/windows-amd64/recarto.exe:recarto/${VER}/recarto-windows-amd64.exe"
     # Sign the manifest. RECARTO_MINISIGN_KEY is a File-type CI variable, so the
     # value is a path to the (passphrase-less) secret key. </dev/null guards
@@ -56,7 +56,6 @@ publish:
     - minisign -S -s "$RECARTO_MINISIGN_KEY" -m index.json </dev/null
     # Upload immutable versioned binaries (long cache), then the manifest (short cache).
     - aws s3 cp releases/linux-amd64/recarto       "s3://${R2_BUCKET}/recarto/${VER}/recarto-linux-amd64"      --endpoint-url "$R2_ENDPOINT" --cache-control "public,max-age=31536000,immutable"
-    - aws s3 cp releases/darwin-arm64/recarto      "s3://${R2_BUCKET}/recarto/${VER}/recarto-darwin-arm64"     --endpoint-url "$R2_ENDPOINT" --cache-control "public,max-age=31536000,immutable"
     - aws s3 cp releases/windows-amd64/recarto.exe "s3://${R2_BUCKET}/recarto/${VER}/recarto-windows-amd64.exe" --endpoint-url "$R2_ENDPOINT" --cache-control "public,max-age=31536000,immutable"
     - aws s3 cp index.json         "s3://${R2_BUCKET}/recarto/index.json"         --endpoint-url "$R2_ENDPOINT" --cache-control "public,max-age=60"
     - aws s3 cp index.json.minisig "s3://${R2_BUCKET}/recarto/index.json.minisig" --endpoint-url "$R2_ENDPOINT" --cache-control "public,max-age=60"
