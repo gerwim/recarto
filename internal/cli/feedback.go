@@ -142,8 +142,8 @@ func feedbackResolve(ctx context.Context, b *feedback.Bundle, w io.Writer, args 
 func sourceRepos(r *memory.Record) string {
 	var repos []string
 	for _, ref := range r.Refs {
-		if ref.Type == memory.RefTag && strings.HasPrefix(ref.Value, "repo:") {
-			repos = append(repos, strings.TrimPrefix(ref.Value, "repo:"))
+		if ref.Type == memory.RefTag && strings.HasPrefix(ref.Value, feedback.RepoRefPrefix) {
+			repos = append(repos, strings.TrimPrefix(ref.Value, feedback.RepoRefPrefix))
 		}
 	}
 	return strings.Join(repos, ", ")

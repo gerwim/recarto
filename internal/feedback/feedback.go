@@ -16,6 +16,11 @@ import (
 // git-hash derived, so a leading-underscore sentinel cannot collide with one.
 const StoreID = "_recarto_feedback"
 
+// RepoRefPrefix prefixes the source-repo tag ref carried on a feedback report, so
+// reinforcement unions the set of repos a report was seen in. The report handler
+// writes RepoRefPrefix+<repo>; the `recarto feedback` CLI strips it for display.
+const RepoRefPrefix = "repo:"
+
 // Bundle is an open feedback store and its memory engine. Close it when done.
 type Bundle struct {
 	Store  *store.Store

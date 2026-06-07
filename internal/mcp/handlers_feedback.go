@@ -61,7 +61,7 @@ func reportRecartoIssue(ctx context.Context, a *app.App, in ReportRecartoIssueIn
 	// repo it was reported from (occurrence count = reinforcement_count + 1).
 	var refs []memory.Ref
 	if source != "" {
-		refs = append(refs, memory.Ref{Type: memory.RefTag, Value: "repo:" + source})
+		refs = append(refs, memory.Ref{Type: memory.RefTag, Value: feedback.RepoRefPrefix + source})
 	}
 	id, reinforced, err := b.Engine.Record(ctx, memory.NewMemory{
 		Kind:   memory.KindFeedback,
