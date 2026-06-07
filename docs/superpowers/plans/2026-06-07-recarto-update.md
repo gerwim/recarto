@@ -554,14 +554,15 @@ git commit -m "feat(update): minisign manifest-signature verification"
 - Create: `internal/update/pubkey.go`
 - Test: `internal/update/pubkey_test.go`
 
-- [ ] **Step 1: Generate the production keypair (one-time, keep the secret offline)**
+- [ ] **Step 1: Production keypair (ALREADY GENERATED — do not regenerate)**
 
-Run:
-```bash
-minisign -G -p recarto-minisign.pub -s recarto-minisign.key
-cat recarto-minisign.pub
+The keypair was generated passphrase-less with `minisign -GW -p recarto-minisign.pub -s recarto-minisign.key`. The armored public key is:
+
 ```
-The public file's second line is the armored public key (starts with `RW`). Keep `recarto-minisign.key` **out of git** — it goes into a masked GitLab CI variable later (Task 11). Add the local key files to ignore:
+RWRAMnGihrJ8EmiPipeK6yvoSTh0v7zpkW+/EOm++cSbnDmuHXZlDhiy
+```
+
+**Do not run `minisign -G` again** — that would produce a different key and invalidate the constant below. The secret key file `recarto-minisign.key` is unencrypted (no passphrase) and goes into the masked GitLab CI variable `RECARTO_MINISIGN_KEY` (Task 12); never commit it. Add the local key files to ignore:
 ```bash
 printf 'recarto-minisign.key\nrecarto-minisign.pub\n' >> .gitignore
 ```
@@ -596,16 +597,15 @@ Expected: FAIL — `undefined: ManifestPublicKey`.
 
 - [ ] **Step 4: Write the implementation with the real key**
 
-Create `internal/update/pubkey.go`, pasting the armored key line printed in Step 1 (the line beginning `RW`):
+Create `internal/update/pubkey.go` with the real public key from Step 1:
 ```go
 package update
 
 // ManifestPublicKey is the minisign public key that signs the release manifest.
 // The matching secret key lives only in CI (masked variable RECARTO_MINISIGN_KEY)
 // and offline — never in this repo. Rotating it requires shipping a new binary.
-const ManifestPublicKey = "RWQ_PASTE_THE_REAL_KEY_LINE_FROM_STEP_1_HERE"
+const ManifestPublicKey = "RWRAMnGihrJ8EmiPipeK6yvoSTh0v7zpkW+/EOm++cSbnDmuHXZlDhiy"
 ```
-Replace the placeholder string with the actual `RW...` line. (This is the only value in the plan you must fill from a generated artifact; the test in Step 2 fails until it is a real, decodable key.)
 
 - [ ] **Step 5: Run test to verify it passes**
 
@@ -1767,7 +1767,7 @@ git commit -m "feat(release): manifest publish helper that hashes binaries and m
 **Files:**
 - Create: `.gitlab-ci.yml`
 
-> Prerequisites configured in the GitLab project (Settings → CI/CD → Variables), all **masked**: `RECARTO_MINISIGN_KEY` (contents of `recarto-minisign.key` from Task 5), `RECARTO_MINISIGN_PASSWORD` (its passphrase), `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_ACCOUNT_ID`, `R2_BUCKET`. The CI image must provide `minisign`, `zig`, Go 1.26, and the AWS CLI (or `rclone`).
+> Prerequisites configured in the GitLab project (Settings → CI/CD → Variables), all **masked**: `RECARTO_MINISIGN_KEY` (contents of the unencrypted `recarto-minisign.key` from Task 5), `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_ACCOUNT_ID`, `R2_BUCKET`. The key is passphrase-less (`-GW`), so there is **no** `RECARTO_MINISIGN_PASSWORD`. The CI image must provide `minisign`, `zig`, Go 1.26, and the AWS CLI (or `rclone`).
 
 - [ ] **Step 1: Write the publish pipeline**
 
@@ -1824,9 +1824,10 @@ publish:
       -artifact "linux-amd64=releases/linux-amd64/recarto:recarto/${VER}/recarto-linux-amd64"
       -artifact "darwin-arm64=releases/darwin-arm64/recarto:recarto/${VER}/recarto-darwin-arm64"
       -artifact "windows-amd64=releases/windows-amd64/recarto.exe:recarto/${VER}/recarto-windows-amd64.exe"
-    # Sign the manifest (non-interactive passphrase).
+    # Sign the manifest. The key is unencrypted (-GW), so no passphrase is needed;
+    # </dev/null guards against any prompt. Produces index.json.minisig.
     - echo "$RECARTO_MINISIGN_KEY" > minisign.key
-    - minisign -S -s minisign.key -m index.json <<< "$RECARTO_MINISIGN_PASSWORD"
+    - minisign -S -s minisign.key -m index.json </dev/null
     - rm -f minisign.key
     # Upload immutable versioned binaries (long cache), then the manifest (short cache).
     - aws s3 cp releases/linux-amd64/recarto   "s3://${R2_BUCKET}/recarto/${VER}/recarto-linux-amd64"     --endpoint-url "$R2_ENDPOINT" --cache-control "public,max-age=31536000,immutable"
@@ -1836,7 +1837,7 @@ publish:
     - aws s3 cp index.json.minisig "s3://${R2_BUCKET}/recarto/index.json.minisig" --endpoint-url "$R2_ENDPOINT" --cache-control "public,max-age=60"
 ```
 
-> The `minisign -S ... <<< "$PASSWORD"` form feeds the passphrase on stdin. If the CI image's minisign build does not read the passphrase from stdin, generate the key with `-W` (no passphrase) in Task 5 and drop `RECARTO_MINISIGN_PASSWORD` — the key still lives only in the masked CI variable.
+> The signing key is passphrase-less (generated with `-GW`), so `minisign -S` signs without prompting. The secret key still lives only in the masked `RECARTO_MINISIGN_KEY` variable and is written to a temp file that is deleted right after signing.
 
 - [ ] **Step 2: Validate the YAML locally**
 
