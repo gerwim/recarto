@@ -65,3 +65,18 @@ func TestReportRecartoIssueWritesToFeedbackStore(t *testing.T) {
 		t.Fatalf("second report = (id=%s reinforced=%v), want reinforce of %s", out2.ID, out2.Reinforced, out.ID)
 	}
 }
+
+func TestReportRecartoIssueRequiresFields(t *testing.T) {
+	a := newTestApp(t, "main")
+	ctx := context.Background()
+	cases := []ReportRecartoIssueInput{
+		{Title: "t", Detail: "d"},                  // missing signal_type
+		{SignalType: "error", Detail: "d"},          // missing title
+		{SignalType: "error", Title: "t"},           // missing detail
+	}
+	for i, in := range cases {
+		if _, err := reportRecartoIssue(ctx, a, in); err == nil {
+			t.Errorf("case %d: expected error for missing required field, got nil", i)
+		}
+	}
+}
