@@ -119,5 +119,6 @@ func usage(w io.Writer) error {
 	fmt.Fprintln(w, "  compact           prune/decay memory (--force --dry-run --budget-tokens)")
 	fmt.Fprintln(w, "  snapshot          export|import the committable team memory (.recarto/memory.jsonl)")
 	fmt.Fprintln(w, "  todo list|done    list open todos, or mark one done")
+	fmt.Fprintln(w, "  update            self-update to the latest (or a chosen) release (--version --list --check --yes)")
 	return nil
 }
