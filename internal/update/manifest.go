@@ -6,6 +6,11 @@ package update
 import (
 	"encoding/json"
 	"fmt"
+	"runtime"
+	"sort"
+	"strings"
+
+	"golang.org/x/mod/semver"
 )
 
 // SchemaVersion is the manifest schema this build understands. A manifest with a
@@ -57,4 +62,75 @@ func Parse(data []byte) (*Manifest, error) {
 // Marshal renders the manifest as indented JSON (the exact bytes CI signs/uploads).
 func (m *Manifest) Marshal() ([]byte, error) {
 	return json.MarshalIndent(m, "", "  ")
+}
+
+// CurrentPlatform is the "<goos>-<goarch>" key for the running binary.
+func CurrentPlatform() string { return platformKey(runtime.GOOS, runtime.GOARCH) }
+
+func platformKey(goos, goarch string) string { return goos + "-" + goarch }
+
+// Find returns the release with the exact version (with or without a leading "v").
+func (m *Manifest) Find(version string) (*Release, bool) {
+	want := normalizeSemver(version)
+	for i := range m.Versions {
+		if normalizeSemver(m.Versions[i].Version) == want {
+			return &m.Versions[i], true
+		}
+	}
+	return nil, false
+}
+
+// LatestRelease returns the release named by the manifest's Latest field.
+func (m *Manifest) LatestRelease() (*Release, bool) { return m.Find(m.Latest) }
+
+// ArtifactFor returns the artifact for a "<goos>-<goarch>" platform key.
+func (r *Release) ArtifactFor(platform string) (Artifact, bool) {
+	a, ok := r.Artifacts[platform]
+	return a, ok
+}
+
+// normalizeSemver ensures a leading "v" so golang.org/x/mod/semver accepts it.
+func normalizeSemver(v string) string {
+	if v == "" {
+		return v
+	}
+	if !strings.HasPrefix(v, "v") {
+		return "v" + v
+	}
+	return v
+}
+
+// CompareVersions orders two versions by semver (-1, 0, +1). Invalid versions
+// sort below valid ones, then lexically, so a "dev"/"garbage" current build is
+// always considered older than any real release.
+func CompareVersions(a, b string) int {
+	na, nb := normalizeSemver(a), normalizeSemver(b)
+	va, vb := semver.IsValid(na), semver.IsValid(nb)
+	switch {
+	case va && vb:
+		return semver.Compare(na, nb)
+	case va:
+		return 1
+	case vb:
+		return -1
+	default:
+		return strings.Compare(a, b)
+	}
+}
+
+// SortedVersions returns releases newest-first without mutating the manifest.
+func (m *Manifest) SortedVersions() []Release {
+	out := make([]Release, len(m.Versions))
+	copy(out, m.Versions)
+	sort.SliceStable(out, func(i, j int) bool {
+		return CompareVersions(out[i].Version, out[j].Version) > 0
+	})
+	return out
+}
+
+// IsReleaseBuild reports whether v is a clean release version (MAJOR.MINOR.PATCH,
+// no prerelease or build metadata). Dev/dirty/unparseable builds return false.
+func IsReleaseBuild(v string) bool {
+	n := normalizeSemver(v)
+	return semver.IsValid(n) && semver.Prerelease(n) == "" && semver.Build(n) == "" && semver.Canonical(n) == n
 }
