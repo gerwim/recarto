@@ -68,6 +68,13 @@ func Update(out io.Writer, stdin io.Reader, isTTY bool, args []string) error {
 		fmt.Fprintln(out, "no changes made.")
 		return nil
 	}
+	// Skip a redundant re-install when the auto/Enter-selected target equals the
+	// current release (e.g. `update --yes` on the latest). An explicit --version
+	// is honored as a deliberate reinstall.
+	if *wantVersion == "" && update.IsReleaseBuild(st.Current) && update.CompareVersions(target, st.Current) == 0 {
+		fmt.Fprintf(out, "recarto %s is already up to date.\n", st.Current)
+		return nil
+	}
 	if !update.IsReleaseBuild(st.Current) {
 		fmt.Fprintf(out, "note: current build %q is not a release build.\n", st.Current)
 	}
