@@ -97,6 +97,39 @@ additionally needs the macOS SDK frameworks (`CoreFoundation`, `Security`, linke
 Go's `crypto/x509`), which zig does not bundle — so build it on a macOS host
 (`make native`) or with an SDK available (e.g. [osxcross](https://github.com/tpoechtrager/osxcross)).
 
+## Updating
+
+`recarto update` upgrades (or downgrades) the binary in place from
+`https://releases.gerwim.com/recarto/`. Releases are signed with
+[minisign](https://jedisct1.github.io/minisign/); the public key is embedded in the
+binary, so a download is applied only if **both** its signature and its sha256 verify
+— a compromised mirror cannot ship a malicious update.
+
+```sh
+recarto update                 # pick the latest (default) or, interactively, an older version
+recarto update --version 1.3.0 # install a specific version (downgrade / pin)
+recarto update --list          # list available versions
+recarto update --check         # report whether an update exists; exit 0 = current, 10 = available
+recarto update --yes           # skip prompts (always installs the latest)
+```
+
+`update` makes no changes under `--check`/`--list`. If the binary lives on a
+read-only path (e.g. `/usr/local/bin`), re-run with the privileges needed to replace
+it. Development builds (non-release versions) are always offered the latest release.
+
+### Releasing
+
+Tag a commit (`git tag X.Y.Z && git push origin X.Y.Z`). GitLab CI cross-compiles the
+three targets (darwin via an osxcross builder image), computes sha256s, merges
+`index.json`, signs it with minisign, and uploads the binaries + manifest + signature
+to the Cloudflare R2 bucket behind `releases.gerwim.com`. The minisign secret key and
+R2 credentials live only in masked CI variables; the minisign **public** key is
+committed (`internal/update/pubkey.go`) and embedded in the binary.
+
+The one-time setup — extracting the macOS SDK, building/pushing the builder image,
+the Cloudflare R2 bucket, and the exact GitLab CI/CD variables — is documented in
+[`ci/README.md`](ci/README.md).
+
 ## Setup
 
 From inside a git repository, run:

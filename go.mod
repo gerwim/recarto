@@ -3,11 +3,13 @@ module git.gerwim.nl/gerwim/recarto
 go 1.26.4
 
 require (
+	aead.dev/minisign v0.3.0
 	github.com/bmatcuk/doublestar/v4 v4.10.0
 	github.com/google/jsonschema-go v0.4.3
 	github.com/google/uuid v1.6.0
 	github.com/knights-analytics/hugot v0.7.4
 	github.com/mattn/go-isatty v0.0.20
+	github.com/minio/selfupdate v0.6.0
 	github.com/modelcontextprotocol/go-sdk v1.6.1
 	github.com/schollz/progressbar/v3 v3.19.0
 	github.com/tree-sitter/go-tree-sitter v0.25.0
@@ -15,6 +17,7 @@ require (
 	github.com/tree-sitter/tree-sitter-go v0.25.0
 	github.com/tree-sitter/tree-sitter-javascript v0.25.0
 	github.com/tree-sitter/tree-sitter-typescript v0.23.2
+	golang.org/x/mod v0.36.0
 	modernc.org/sqlite v1.51.0
 )
 

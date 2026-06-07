@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -30,6 +31,16 @@ func main() {
 	case "debug-stress":
 		if err := runDebugStress(os.Args[2:]); err != nil {
 			fmt.Fprintln(os.Stderr, "debug-stress:", err)
+			os.Exit(1)
+		}
+	case "update":
+		isTTY := isatty.IsTerminal(os.Stdin.Fd())
+		err := cli.Update(os.Stdout, os.Stdin, isTTY, os.Args[2:])
+		if errors.Is(err, cli.ErrUpdateAvailable) {
+			os.Exit(10)
+		}
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "recarto:", err)
 			os.Exit(1)
 		}
 	case "init":
