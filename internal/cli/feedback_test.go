@@ -31,6 +31,21 @@ func seedFeedback(t *testing.T) string {
 	return id
 }
 
+func TestFeedbackNoArgsDefaultsToList(t *testing.T) {
+	t.Setenv("RECARTO_CACHE_DIR", t.TempDir())
+	ctx := context.Background()
+	seedFeedback(t)
+
+	// No subcommand at all must behave like "list", not panic on args[1:].
+	var out bytes.Buffer
+	if err := Feedback(ctx, &out, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "search_content rejected") {
+		t.Fatalf("no-args feedback did not default to list:\n%s", out.String())
+	}
+}
+
 func TestFeedbackListShowResolve(t *testing.T) {
 	t.Setenv("RECARTO_CACHE_DIR", t.TempDir())
 	ctx := context.Background()

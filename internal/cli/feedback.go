@@ -24,16 +24,18 @@ func Feedback(ctx context.Context, w io.Writer, args []string) error {
 	defer b.Close()
 
 	sub := "list"
+	rest := args
 	if len(args) > 0 {
 		sub = args[0]
+		rest = args[1:]
 	}
 	switch sub {
 	case "list":
-		return feedbackList(ctx, b, w, args[1:])
+		return feedbackList(ctx, b, w, rest)
 	case "show":
-		return feedbackShow(ctx, b, w, args[1:])
+		return feedbackShow(ctx, b, w, rest)
 	case "resolve":
-		return feedbackResolve(ctx, b, w, args[1:])
+		return feedbackResolve(ctx, b, w, rest)
 	default:
 		return fmt.Errorf("feedback: unknown subcommand %q (list|show|resolve)", sub)
 	}
