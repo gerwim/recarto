@@ -126,6 +126,10 @@ to the Cloudflare R2 bucket behind `releases.gerwim.com`. The minisign secret ke
 R2 credentials live only in masked CI variables; the minisign **public** key is
 committed (`internal/update/pubkey.go`) and embedded in the binary.
 
+The one-time setup — extracting the macOS SDK, building/pushing the builder image,
+the Cloudflare R2 bucket, and the exact GitLab CI/CD variables — is documented in
+[`ci/README.md`](ci/README.md).
+
 ## Setup
 
 From inside a git repository, run:

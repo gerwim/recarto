@@ -35,6 +35,11 @@ publish:
   script:
     - export VER="$CI_COMMIT_TAG"
     - export NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    # The aws CLI authenticates to R2 via the standard AWS_* env vars; map the R2
+    # token onto them. R2 expects region "auto".
+    - export AWS_ACCESS_KEY_ID="$R2_ACCESS_KEY_ID"
+    - export AWS_SECRET_ACCESS_KEY="$R2_SECRET_ACCESS_KEY"
+    - export AWS_DEFAULT_REGION=auto
     # Pull the current manifest if it exists (ignore failure on first release).
     - aws s3 cp "s3://${R2_BUCKET}/recarto/index.json" index.json --endpoint-url "$R2_ENDPOINT" || true
     # Build the merged manifest from the freshly built binaries.
@@ -45,11 +50,10 @@ publish:
       -artifact "linux-amd64=releases/linux-amd64/recarto:recarto/${VER}/recarto-linux-amd64"
       -artifact "darwin-arm64=releases/darwin-arm64/recarto:recarto/${VER}/recarto-darwin-arm64"
       -artifact "windows-amd64=releases/windows-amd64/recarto.exe:recarto/${VER}/recarto-windows-amd64.exe"
-    # Sign the manifest. The key is unencrypted (-GW), so no passphrase is needed;
-    # </dev/null guards against any prompt. Produces index.json.minisig.
-    - echo "$RECARTO_MINISIGN_KEY" > minisign.key
-    - minisign -S -s minisign.key -m index.json </dev/null
-    - rm -f minisign.key
+    # Sign the manifest. RECARTO_MINISIGN_KEY is a File-type CI variable, so the
+    # value is a path to the (passphrase-less) secret key. </dev/null guards
+    # against any prompt. Produces index.json.minisig.
+    - minisign -S -s "$RECARTO_MINISIGN_KEY" -m index.json </dev/null
     # Upload immutable versioned binaries (long cache), then the manifest (short cache).
     - aws s3 cp releases/linux-amd64/recarto       "s3://${R2_BUCKET}/recarto/${VER}/recarto-linux-amd64"      --endpoint-url "$R2_ENDPOINT" --cache-control "public,max-age=31536000,immutable"
     - aws s3 cp releases/darwin-arm64/recarto      "s3://${R2_BUCKET}/recarto/${VER}/recarto-darwin-arm64"     --endpoint-url "$R2_ENDPOINT" --cache-control "public,max-age=31536000,immutable"
