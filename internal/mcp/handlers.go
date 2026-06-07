@@ -53,6 +53,9 @@ func recordMemory(ctx context.Context, a *app.App, in RecordMemoryInput) (Record
 	if !kind.Valid() {
 		return RecordMemoryOutput{}, fmt.Errorf("invalid kind %q", in.Kind)
 	}
+	if kind == memory.KindFeedback {
+		return RecordMemoryOutput{}, fmt.Errorf("kind %q is recorded via report_recarto_issue, not record_memory", in.Kind)
+	}
 	if in.Body == "" {
 		return RecordMemoryOutput{}, fmt.Errorf("body is required")
 	}

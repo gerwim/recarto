@@ -46,3 +46,8 @@ func traceCallPathSchema() *jsonschema.Schema {
 func queryGraphSchema() *jsonschema.Schema {
 	return withEnum(schemaFor[QueryGraphInput](), "edge_direction", "in", "out")
 }
+
+func reportRecartoIssueSchema() *jsonschema.Schema {
+	return withEnum(schemaFor[ReportRecartoIssueInput](), "signal_type",
+		"error", "quality", "friction", "gap")
+}
