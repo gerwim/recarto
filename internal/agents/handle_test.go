@@ -58,6 +58,17 @@ func TestHandleStopNudgePromptsPreferences(t *testing.T) {
 	}
 }
 
+func TestHandleStopNudgesFeedback(t *testing.T) {
+	a := newTestApp(t, "main")
+	res, err := Handle(context.Background(), a, Event{Kind: KindStop, Agent: "claude-code", SessionID: "s1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(res.SystemMessage, "report_recarto_issue") {
+		t.Fatalf("Stop message missing feedback nudge:\n%s", res.SystemMessage)
+	}
+}
+
 func TestHandlePostReadWarnsOnRepeat(t *testing.T) {
 	a := newTestApp(t, "main")
 	ctx := context.Background()

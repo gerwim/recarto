@@ -299,7 +299,10 @@ func TestMigrateV12AllowsTodoAndDone(t *testing.T) {
 	}
 }
 
-func TestV12MigrationPreservesMemoriesAndColumns(t *testing.T) {
+// TestLatestCheckMigrationPreservesMemoriesAndColumns verifies a writable_schema
+// CHECK-widening migration (the latest, always schemaVersion-1 from a freshly
+// migrated store) preserves data rows and ALTER-appended columns.
+func TestLatestCheckMigrationPreservesMemoriesAndColumns(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "store.db")
 	st, err := Open(p)
 	if err != nil {
@@ -328,12 +331,12 @@ func TestV12MigrationPreservesMemoriesAndColumns(t *testing.T) {
 		VALUES('t2','todo','done',1,1)`)
 }
 
-func TestSchemaVersionIs16(t *testing.T) {
-	if schemaVersion != 16 {
-		t.Fatalf("schemaVersion = %d, want 16", schemaVersion)
+func TestSchemaVersionIs17(t *testing.T) {
+	if schemaVersion != 17 {
+		t.Fatalf("schemaVersion = %d, want 17", schemaVersion)
 	}
-	if len(migrations) != 16 {
-		t.Fatalf("len(migrations) = %d, want 16", len(migrations))
+	if len(migrations) != 17 {
+		t.Fatalf("len(migrations) = %d, want 17", len(migrations))
 	}
 	st, err := Open(filepath.Join(t.TempDir(), "store.db"))
 	if err != nil {
@@ -344,7 +347,29 @@ func TestSchemaVersionIs16(t *testing.T) {
 	if err := st.DB.QueryRow("PRAGMA user_version").Scan(&v); err != nil {
 		t.Fatal(err)
 	}
-	if v != 16 {
-		t.Fatalf("user_version = %d, want 16", v)
+	if v != 17 {
+		t.Fatalf("user_version = %d, want 17", v)
+	}
+}
+
+// TestMigrateV17AllowsFeedbackAndResolved mirrors TestMigrateV12AllowsTodoAndDone:
+// the widened CHECKs admit the new kind/status while still rejecting bogus values.
+func TestMigrateV17AllowsFeedbackAndResolved(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "store.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	mustExec(t, st, `INSERT INTO memories(id,kind,title,body,created_at,updated_at)
+		VALUES('f1','feedback','search_content rejected query','body',1,1)`)
+	mustExec(t, st, `UPDATE memories SET status='resolved' WHERE id='f1'`)
+
+	if _, err := st.DB.Exec(
+		`INSERT INTO memories(id,kind,created_at,updated_at) VALUES('x','bogus',1,1)`); err == nil {
+		t.Fatal("expected CHECK to still reject an invalid kind")
+	}
+	if _, err := st.DB.Exec(`UPDATE memories SET status='bogus' WHERE id='f1'`); err == nil {
+		t.Fatal("expected CHECK to still reject an invalid status")
 	}
 }

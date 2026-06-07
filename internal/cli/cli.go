@@ -41,8 +41,14 @@ func Run(args []string, out io.Writer) error {
 		return Init(out, dir, binaryPath(), rest)
 	}
 
+	// feedback reads the global feedback store directly — no git/app resolution —
+	// so it works from anywhere, including outside a git repo.
+	if cmd == "feedback" {
+		return Feedback(context.Background(), out, rest)
+	}
+
 	if !known(cmd) {
-		return fmt.Errorf("unknown command %q (try: init serve hook status doctor remember forget recall bug memory index graph compact snapshot todo)", cmd)
+		return fmt.Errorf("unknown command %q (try: init serve hook status doctor remember forget recall bug feedback memory index graph compact snapshot todo)", cmd)
 	}
 
 	a, err := app.Open(app.Config{})
@@ -113,6 +119,7 @@ func usage(w io.Writer) error {
 	fmt.Fprintln(w, "  forget <id>       hard-delete a memory by id")
 	fmt.Fprintln(w, "  recall [hint]     ranked, budgeted recall (--files --symbols --kind --limit --budget)")
 	fmt.Fprintln(w, "  bug add|search    record or search bug memories")
+	fmt.Fprintln(w, "  feedback          triage cross-repo Recarto bug reports (list|show|resolve) — works anywhere")
 	fmt.Fprintln(w, "  memory show       render all active memory as markdown (--branch)")
 	fmt.Fprintln(w, "  index             build/refresh the code graph for this worktree")
 	fmt.Fprintln(w, "  graph <sub>       query the code graph (search|grep|callers|callees|impls|annotated|outline|arch|query|snippet)")

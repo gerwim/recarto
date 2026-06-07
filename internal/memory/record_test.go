@@ -38,8 +38,11 @@ func TestKindTodoIsValid(t *testing.T) {
 }
 
 func TestAllKindsCoversValidKinds(t *testing.T) {
-	if len(AllKinds) != len(validKinds) {
-		t.Fatalf("AllKinds has %d, validKinds has %d", len(AllKinds), len(validKinds))
+	// AllKinds is the user-facing enum (record_memory MCP tool); validKinds is a
+	// superset that also includes internal kinds (e.g. KindFeedback) that must be
+	// accepted by Engine.Record but must NOT appear in the MCP enum.
+	if len(validKinds) < len(AllKinds) {
+		t.Fatalf("validKinds has %d, AllKinds has %d — validKinds must be a superset", len(validKinds), len(AllKinds))
 	}
 	for _, k := range AllKinds {
 		if !k.Valid() {
@@ -48,5 +51,16 @@ func TestAllKindsCoversValidKinds(t *testing.T) {
 	}
 	if AllKinds[len(AllKinds)-1] != KindTodo {
 		t.Errorf("expected todo last, got %q", AllKinds[len(AllKinds)-1])
+	}
+	// Internal kinds must be valid but absent from the user-facing AllKinds list.
+	for _, k := range []Kind{KindFeedback} {
+		if !k.Valid() {
+			t.Errorf("internal kind %q should be valid", k)
+		}
+		for _, pub := range AllKinds {
+			if pub == k {
+				t.Errorf("internal kind %q must not appear in AllKinds (MCP enum)", k)
+			}
+		}
 	}
 }

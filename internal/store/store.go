@@ -70,6 +70,9 @@ func open(path string, busyTimeoutMs int) (*Store, error) {
 // Close closes the underlying pool.
 func (s *Store) Close() error { return s.DB.Close() }
 
+// Path returns the database file path this store was opened from.
+func (s *Store) Path() string { return s.path }
+
 // Checkpoint flushes the WAL into the main database file and truncates the WAL,
 // bounding on-disk growth during a long sequence of writes (e.g. a full graph
 // index, where the WAL would otherwise accumulate every inserted row until the

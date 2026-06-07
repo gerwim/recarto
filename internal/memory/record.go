@@ -13,6 +13,11 @@ const (
 	KindDoNotRepeat Kind = "do_not_repeat"
 	KindBug         Kind = "bug"
 	KindTodo        Kind = "todo"
+	// KindFeedback is an INTERNAL kind: reports about Recarto itself, recorded only
+	// via report_recarto_issue into the dedicated feedback store. It is deliberately
+	// absent from AllKinds so it never appears in the record_memory enum, but Valid()
+	// accepts it so Engine.Record will store it.
+	KindFeedback Kind = "feedback"
 )
 
 // AllKinds is the canonical, ordered list of memory kinds. It is the single
@@ -23,10 +28,11 @@ var AllKinds = []Kind{
 }
 
 var validKinds = func() map[Kind]bool {
-	m := make(map[Kind]bool, len(AllKinds))
+	m := make(map[Kind]bool, len(AllKinds)+1)
 	for _, k := range AllKinds {
 		m[k] = true
 	}
+	m[KindFeedback] = true // internal kind, not user-recordable via record_memory
 	return m
 }()
 
