@@ -48,7 +48,7 @@ func Run(args []string, out io.Writer) error {
 	}
 
 	if !known(cmd) {
-		return fmt.Errorf("unknown command %q (try: init serve hook status doctor remember forget recall bug memory index graph compact snapshot todo)", cmd)
+		return fmt.Errorf("unknown command %q (try: init serve hook status doctor remember forget recall bug feedback memory index graph compact snapshot todo)", cmd)
 	}
 
 	a, err := app.Open(app.Config{})

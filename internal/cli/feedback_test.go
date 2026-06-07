@@ -62,6 +62,15 @@ func TestFeedbackListShowResolve(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// show after resolve must surface the resolution note (proves --note was parsed).
+	out.Reset()
+	if err := Feedback(ctx, &out, []string{"show", id}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "fixed") {
+		t.Fatalf("resolution note not persisted/shown:\n%s", out.String())
+	}
+
 	// list is now empty; list --all shows the resolved one.
 	out.Reset()
 	if err := Feedback(ctx, &out, []string{"list"}); err != nil {

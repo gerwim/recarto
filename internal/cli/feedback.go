@@ -116,16 +116,17 @@ func feedbackShow(ctx context.Context, b *feedback.Bundle, w io.Writer, args []s
 }
 
 func feedbackResolve(ctx context.Context, b *feedback.Bundle, w io.Writer, args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("feedback resolve: id required")
+	}
+	id := args[0]
 	fs := flag.NewFlagSet("feedback resolve", flag.ContinueOnError)
 	fs.SetOutput(w)
 	note := fs.String("note", "", "resolution note")
-	if helped, err := parseFlags(fs, args); err != nil || helped {
+	if helped, err := parseFlags(fs, args[1:]); err != nil || helped {
 		return err
 	}
-	if fs.NArg() == 0 {
-		return fmt.Errorf("feedback resolve: id required")
-	}
-	ok, err := b.Engine.ResolveFeedback(ctx, fs.Arg(0), *note)
+	ok, err := b.Engine.ResolveFeedback(ctx, id, *note)
 	if err != nil {
 		return err
 	}
@@ -133,7 +134,7 @@ func feedbackResolve(ctx context.Context, b *feedback.Bundle, w io.Writer, args 
 		fmt.Fprintln(w, "(no active feedback with that id)")
 		return nil
 	}
-	fmt.Fprintf(w, "resolved %s\n", fs.Arg(0))
+	fmt.Fprintf(w, "resolved %s\n", id)
 	return nil
 }
 
