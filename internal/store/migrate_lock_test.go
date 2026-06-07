@@ -70,7 +70,7 @@ func TestMigratePendingRetriesPastTransientBusy(t *testing.T) {
 	ctx := context.Background()
 
 	// Roll the recorded version back one so the last migration is pending again.
-	// Re-running it is idempotent (see TestV12MigrationPreservesMemoriesAndColumns),
+	// Re-running it is idempotent (see TestLatestCheckMigrationPreservesMemoriesAndColumns),
 	// so this exercises the lock + apply path without a bespoke migration.
 	if _, err := st.DB.ExecContext(ctx,
 		fmt.Sprintf("PRAGMA user_version = %d", schemaVersion-1)); err != nil {

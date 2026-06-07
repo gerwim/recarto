@@ -299,7 +299,10 @@ func TestMigrateV12AllowsTodoAndDone(t *testing.T) {
 	}
 }
 
-func TestV12MigrationPreservesMemoriesAndColumns(t *testing.T) {
+// TestLatestCheckMigrationPreservesMemoriesAndColumns verifies a writable_schema
+// CHECK-widening migration (the latest, always schemaVersion-1 from a freshly
+// migrated store) preserves data rows and ALTER-appended columns.
+func TestLatestCheckMigrationPreservesMemoriesAndColumns(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "store.db")
 	st, err := Open(p)
 	if err != nil {
