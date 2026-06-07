@@ -16,7 +16,7 @@ Two pragmatic departures from `docs/superpowers/specs/2026-06-07-recarto-feedbac
 
 1. **Stop-hook gating dropped.** The spec wanted the reflection nudge gated to "only when a Recarto MCP tool was used this session." The MCP server (`recarto serve`) holds no per-session id — handlers are `(ctx, *app.App, In)` with no session/agent — so per-session MCP-usage tracking isn't cleanly available. Since `handleStop` *already* emits an unconditional `SystemMessage` every session, the reflection clause is appended to that existing message (Task 6). Net effect: one extra sentence on a nudge that already fires; no new gating machinery.
 
-2. **Agent host is best-effort.** Auto-captured from a `RECARTO_AGENT` env var if the host sets it, else omitted. Wiring each host installer to set it is out of scope here (low value — the source repo and symptom are what matter for triage).
+2. **Agent host dropped.** The spec listed "agent host (claude/opencode/copilot)" among the auto-captured fields, but the host identity isn't available at MCP-tool time (only at hook time, via `Event.Agent`). Rather than ship a dead field, it is omitted entirely. If wanted later, an installer task would inject the host into each MCP config's `env` block. The source repo and symptom are what matter for triage.
 
 `--note` on `resolve` is kept (via `json_set`). If the reviewer prefers strict spec fidelity on gating, that's a follow-up.
 
@@ -572,7 +572,6 @@ package mcp
 import (
 	"context"
 	"fmt"
-	"os"
 
 	"git.gerwim.nl/gerwim/recarto/internal/app"
 	"git.gerwim.nl/gerwim/recarto/internal/feedback"
@@ -582,7 +581,7 @@ import (
 
 // ReportRecartoIssueInput are the arguments to report_recarto_issue. signal_type,
 // title and detail are required; the rest are optional. Context (source repo,
-// version, host) is auto-captured by the handler — the agent does not supply it.
+// version) is auto-captured by the handler — the agent does not supply it.
 type ReportRecartoIssueInput struct {
 	SignalType   string `json:"signal_type" jsonschema:"the kind of problem: error (a tool errored/crashed/returned a clearly-wrong empty result), quality (it worked but ranked/returned the wrong thing), friction (confusing or awkward API), or gap (a capability you needed was missing)"`
 	Title        string `json:"title" jsonschema:"one-line summary of the problem"`
@@ -626,9 +625,6 @@ func reportRecartoIssue(ctx context.Context, a *app.App, in ReportRecartoIssueIn
 		"source_repo_id":   a.Git.RepoID,
 		"source_repo_name": a.Git.RepoName,
 		"recarto_version":  version.Version,
-	}
-	if host := os.Getenv("RECARTO_AGENT"); host != "" {
-		extra["agent_host"] = host
 	}
 	// Source repo as a tag ref: reinforce unions refs, so one entry accumulates every
 	// repo it was reported from (occurrence count = reinforcement_count + 1).
@@ -914,7 +910,7 @@ func feedbackShow(ctx context.Context, b *feedback.Bundle, w io.Writer, args []s
 	fmt.Fprintf(w, "id:        %s\n", r.ID)
 	fmt.Fprintf(w, "status:    %s\n", r.Status)
 	fmt.Fprintf(w, "occurrences: %d\n", r.ReinforcementCount+1)
-	for _, k := range []string{"signal_type", "severity", "tool", "recarto_version", "agent_host", "source_repo_name", "repro", "suggested_fix", "resolution_note"} {
+	for _, k := range []string{"signal_type", "severity", "tool", "recarto_version", "source_repo_name", "repro", "suggested_fix", "resolution_note"} {
 		if v, _ := r.Extra[k].(string); v != "" {
 			fmt.Fprintf(w, "%s: %s\n", k, v)
 		}

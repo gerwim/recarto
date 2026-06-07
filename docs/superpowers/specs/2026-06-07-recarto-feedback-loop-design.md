@@ -92,11 +92,13 @@ Input schema:
 | `suggested_fix` | no | the agent's proposed fix, if any |
 
 Auto-captured (the agent does **not** supply these; the handler fills them):
-- source repo-id (so the developer knows where it came from — the id, not the
-  source),
+- source repo-id and name (so the developer knows where it came from — the id, not
+  the source),
 - Recarto version,
-- agent host (`claude` / `opencode` / `copilot`),
 - timestamp.
+
+(Agent host was considered but dropped: the host identity isn't available at
+MCP-tool time, only at hook time. Not worth a dead field; see the plan.)
 
 Behavior:
 - Writes the record to the **feedback store** (reserved id), **never** to the
@@ -149,7 +151,7 @@ agent in repo X
   └─ Stop hook reflection nudge       ─┤
                                        ▼
                        report_recarto_issue (MCP)
-                                       │  auto-captures repo-id, version, host, ts
+                                       │  auto-captures repo-id/name, version, ts
                                        ▼
                  feedback store  <cache>/recarto/_recarto_feedback/store.db
                                        │  engine dedups + reinforces (occurrence count, source repos)
