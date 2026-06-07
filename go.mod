@@ -3,10 +3,12 @@ module git.gerwim.nl/gerwim/recarto
 go 1.26.4
 
 require (
+	aead.dev/minisign v0.3.0
 	github.com/google/jsonschema-go v0.4.3
 	github.com/google/uuid v1.6.0
 	github.com/knights-analytics/hugot v0.7.4
 	github.com/mattn/go-isatty v0.0.20
+	github.com/minio/selfupdate v0.6.0
 	github.com/modelcontextprotocol/go-sdk v1.6.1
 	github.com/schollz/progressbar/v3 v3.19.0
 	github.com/tree-sitter/go-tree-sitter v0.25.0
@@ -14,11 +16,11 @@ require (
 	github.com/tree-sitter/tree-sitter-go v0.25.0
 	github.com/tree-sitter/tree-sitter-javascript v0.25.0
 	github.com/tree-sitter/tree-sitter-typescript v0.23.2
+	golang.org/x/mod v0.36.0
 	modernc.org/sqlite v1.51.0
 )
 
 require (
-	aead.dev/minisign v0.3.0 // indirect
 	github.com/daulet/tokenizers v1.27.0 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/go-errors/errors v1.5.1 // indirect
@@ -31,7 +33,6 @@ require (
 	github.com/gomlx/onnx-gomlx v0.4.2 // indirect
 	github.com/knights-analytics/ortgenai v0.3.1 // indirect
 	github.com/mattn/go-pointer v0.0.1 // indirect
-	github.com/minio/selfupdate v0.6.0 // indirect
 	github.com/mitchellh/colorstring v0.0.0-20190213212951-d06e56a500db // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
@@ -46,7 +47,6 @@ require (
 	golang.org/x/crypto v0.52.0 // indirect
 	golang.org/x/exp v0.0.0-20260508232706-74f9aab9d74a // indirect
 	golang.org/x/image v0.41.0 // indirect
-	golang.org/x/mod v0.36.0 // indirect
 	golang.org/x/oauth2 v0.35.0 // indirect
 	golang.org/x/sync v0.20.0 // indirect
 	golang.org/x/sys v0.45.0 // indirect

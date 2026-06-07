@@ -2,3 +2,4 @@
 /releases/
 recarto-minisign.key
 recarto-minisign.pub
+ci/osxcross-sdk/

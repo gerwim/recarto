@@ -26,8 +26,12 @@ linux:
 	GOOS=linux GOARCH=amd64 CGO_ENABLED=1 CC="zig cc -target x86_64-linux-musl" \
 		go build $(TAGS) $(LDFLAGS) -o releases/linux-amd64/$(BINARY_NAME) $(PKG)
 
+# darwin needs the macOS SDK to link (CoreFoundation/Security via crypto/x509).
+# Locally this defaults to zig (works only on a macOS host); CI overrides
+# DARWIN_CC with the osxcross compiler (oa64-clang) which carries the SDK.
+DARWIN_CC ?= zig cc -target aarch64-macos
 darwin:
-	GOOS=darwin GOARCH=arm64 CGO_ENABLED=1 CC="zig cc -target aarch64-macos" \
+	GOOS=darwin GOARCH=arm64 CGO_ENABLED=1 CC="$(DARWIN_CC)" \
 		go build $(TAGS) $(LDFLAGS) -o releases/darwin-arm64/$(BINARY_NAME) $(PKG)
 
 windows:
