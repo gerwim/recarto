@@ -86,8 +86,8 @@ type RecallMemoryInput struct {
 	TaskHint    string   `json:"task_hint,omitempty" jsonschema:"free-text description of the current task"`
 	Files       []string `json:"files,omitempty" jsonschema:"files relevant to the current task"`
 	Symbols     []string `json:"symbols,omitempty" jsonschema:"symbols relevant to the current task"`
-	Kind        string   `json:"kind,omitempty" jsonschema:"restrict to a single kind"`
-	Limit       int      `json:"limit,omitempty" jsonschema:"max candidates to consider"`
+	Kind        string   `json:"kind,omitempty" jsonschema:"restrict to a single kind (authoritative — pinned do_not_repeat are filtered too)"`
+	Limit       int      `json:"limit,omitempty" jsonschema:"maximum memories to return"`
 	TokenBudget int      `json:"token_budget,omitempty" jsonschema:"token budget for the returned set"`
 	MinScore    float64  `json:"min_score,omitempty" jsonschema:"drop candidates scoring below this (0-1)"`
 }

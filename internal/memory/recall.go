@@ -23,6 +23,12 @@ const (
 	defaultTokenBudget = 1500
 	defaultLimit       = 50
 
+	// pinSubBudgetDivisor bounds the "dedicated sub-budget" for pinned do_not_repeat
+	// (spec §9.2): pins may consume at most budget/pinSubBudgetDivisor tokens, so a
+	// pin-heavy branch cannot drown the query. The single top-ranked pin is always
+	// included regardless (the §9.2 floor).
+	pinSubBudgetDivisor = 2
+
 	// danglingDemotion multiplies the score of a non-pinned, non-bug memory whose
 	// every code ref is absent from the current worktree (spec §5.3).
 	danglingDemotion = 0.25
@@ -36,7 +42,7 @@ type RecallQuery struct {
 	Kind        Kind    // "" → any kind
 	Branch      string  // current branch, for branch-affinity boost
 	Baseline    bool    // session-start: also seed candidates with recent cerebrum memories (no query needed)
-	Limit       int     // max lexical candidates (0 → default)
+	Limit       int     // max returned query-matched results (0 → default)
 	TokenBudget int     // 0 → default
 	Worktree    string  // current worktree absolute path, for ref-resolvability
 	MinScore    float64 // drop candidates scoring below this (0 → no floor)
@@ -102,8 +108,12 @@ func (e *Engine) Recall(ctx context.Context, q RecallQuery) (RecallResultSet, er
 	if limit <= 0 {
 		limit = defaultLimit
 	}
+	// `limit` caps the *returned* set (applied in selectWithinBudget). The
+	// candidate pool stays at least defaultLimit wide so ranking quality does not
+	// degrade when the caller asks for only a few results.
+	candidateN := max(limit, defaultLimit)
 
-	lex, err := e.lex.Search(ctx, lexicalQueryText(q), limit)
+	lex, err := e.lex.Search(ctx, lexicalQueryText(q), candidateN)
 	if err != nil {
 		return RecallResultSet{}, err
 	}
@@ -134,7 +144,7 @@ func (e *Engine) Recall(ctx context.Context, q RecallQuery) (RecallResultSet, er
 	}
 
 	if q.Baseline {
-		base, err := e.baselineIDs(ctx, q.Branch, limit)
+		base, err := e.baselineIDs(ctx, q.Branch, candidateN)
 		if err != nil {
 			return RecallResultSet{}, err
 		}
@@ -154,11 +164,12 @@ func (e *Engine) Recall(ctx context.Context, q RecallQuery) (RecallResultSet, er
 		if r.Status != "active" {
 			continue
 		}
-		// The kind filter applies to lexical/structural candidates, but a pinned
-		// do_not_repeat is ALWAYS eligible (spec §9.2) and must never be filtered
-		// out by q.Kind.
-		isPin := r.Kind == KindDoNotRepeat && r.Pinned
-		if q.Kind != "" && r.Kind != q.Kind && !isPin {
+		// An explicit kind filter is authoritative: pinned do_not_repeat are
+		// filtered like any other kind. §9.2's always-include guarantee applies to
+		// UNFILTERED recall (q.Kind == ""); pins additionally retain their
+		// session-start tier and just-in-time anchored surfacing, so they are not
+		// lost when a caller deliberately narrows by kind.
+		if q.Kind != "" && r.Kind != q.Kind {
 			continue
 		}
 		sig := map[string]float64{
@@ -205,7 +216,7 @@ func (e *Engine) Recall(ctx context.Context, q RecallQuery) (RecallResultSet, er
 	if budget <= 0 {
 		budget = defaultTokenBudget
 	}
-	out, used, truncated := selectWithinBudget(scored, budget)
+	out, used, truncated := selectWithinBudget(scored, budget, limit)
 	if len(out) == 0 {
 		// A recall that surfaces nothing above threshold — whether no candidates
 		// matched or the budget excluded them all — is a miss. This counter is the
@@ -221,12 +232,14 @@ func (e *Engine) Recall(ctx context.Context, q RecallQuery) (RecallResultSet, er
 	return RecallResultSet{Results: out, TokensUsed: used, Truncated: truncated}, nil
 }
 
-// selectWithinBudget always includes pinned do_not_repeat (a dedicated, budget-
-// exempt slice), then greedily adds the highest-scoring remaining records until
-// the token budget is exhausted. It returns the selection and its estimated
-// token cost. It is a pure function (no side effects) so the caller owns the
-// ledger accounting and the empty-result (miss) decision.
-func selectWithinBudget(scored []RecallResult, budget int) (out []RecallResult, used int, truncated bool) {
+// selectWithinBudget assembles the returned set: pinned do_not_repeat first under
+// a dedicated sub-budget (spec §9.2 — the top-ranked pin is always kept; lower-
+// ranked pins are dropped once the sub-budget is spent so a pin-heavy branch
+// cannot drown the query), then the highest-ranked remaining records up to the
+// token budget and the caller's `limit` (max returned query-matched results). It
+// returns the selection and its estimated token cost. It is a pure function (no
+// side effects) so the caller owns the ledger accounting and the miss decision.
+func selectWithinBudget(scored []RecallResult, budget, limit int) (out []RecallResult, used int, truncated bool) {
 	var pinned, rest []RecallResult
 	for _, s := range scored {
 		if s.Record.Kind == KindDoNotRepeat && s.Record.Pinned {
@@ -239,11 +252,27 @@ func selectWithinBudget(scored []RecallResult, budget int) (out []RecallResult, 
 	sort.Slice(rest, func(i, j int) bool { return rest[i].Score > rest[j].Score })
 
 	tokensOf := func(r *Record) int { return ledger.EstimateTokens(r.Title + " " + r.Body) }
-	for _, s := range pinned { // pins are always included, budget-exempt
+
+	// Pins: the top-ranked pin is always included (the §9.2 floor); add further
+	// pins by score only while the dedicated sub-budget allows.
+	pinBudget := budget / pinSubBudgetDivisor
+	for i, s := range pinned {
+		t := tokensOf(s.Record)
+		if i > 0 && used+t > pinBudget {
+			truncated = true
+			continue
+		}
 		out = append(out, s)
-		used += tokensOf(s.Record)
+		used += t
 	}
+
+	// Rest: highest-ranked first, bounded by the token budget and `limit`.
+	restCount := 0
 	for _, s := range rest {
+		if limit > 0 && restCount >= limit {
+			truncated = true
+			break
+		}
 		t := tokensOf(s.Record)
 		if used+t > budget {
 			truncated = true
@@ -251,6 +280,7 @@ func selectWithinBudget(scored []RecallResult, budget int) (out []RecallResult, 
 		}
 		out = append(out, s)
 		used += t
+		restCount++
 	}
 	return out, used, truncated
 }

@@ -211,10 +211,12 @@ func TestRecallMissIncrementsCounter(t *testing.T) {
 	}
 }
 
-// TestRecallPinnedSurvivesKindFilter guards C1: a kind-filtered recall must
-// still surface pinned do_not_repeat memories (spec §9.2 — pins are always
-// included), even though their kind differs from the requested kind.
-func TestRecallPinnedSurvivesKindFilter(t *testing.T) {
+// TestRecallExplicitKindIsAuthoritative: an explicit `kind` filter is now
+// authoritative — pinned do_not_repeat are filtered like any other kind. This
+// supersedes spec §9.2's filtered-recall behavior; pins keep their session-start
+// tier and just-in-time anchored surfacing, so they are not lost. With NO kind
+// filter the pin still surfaces.
+func TestRecallExplicitKindIsAuthoritative(t *testing.T) {
 	e := newTestEngine(t, clock.NewFake(time.UnixMilli(30_000_000)))
 	ctx := context.Background()
 
@@ -229,22 +231,103 @@ func TestRecallPinnedSurvivesKindFilter(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// kind=bug → the do_not_repeat pin must NOT appear (filter is authoritative).
 	set, err := e.Recall(ctx, RecallQuery{
-		Kind:  KindBug, // restrict to bugs ...
+		Kind:  KindBug,
 		Files: []string{"internal/memory/recall.go"},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	res := set.Results
+	for _, r := range set.Results {
+		if r.Record.ID == pinID {
+			t.Error("explicit kind filter must exclude a non-matching pinned do_not_repeat")
+		}
+	}
+
+	// no kind filter → the pin still surfaces (§9.2 retained for unfiltered recall).
+	set, err = e.Recall(ctx, RecallQuery{Files: []string{"internal/memory/recall.go"}})
+	if err != nil {
+		t.Fatal(err)
+	}
 	var sawPin bool
-	for _, r := range res {
-		if r.Record.ID == pinID { // ... the pin must still appear
+	for _, r := range set.Results {
+		if r.Record.ID == pinID {
 			sawPin = true
 		}
 	}
 	if !sawPin {
-		t.Error("pinned do_not_repeat must survive a kind-filtered recall (spec §9.2)")
+		t.Error("unfiltered recall must still surface pinned do_not_repeat (§9.2)")
+	}
+}
+
+// TestRecallLimitCapsReturned: `limit` caps the number of returned query-matched
+// results — it is no longer just the lexical-candidate fetch size.
+func TestRecallLimitCapsReturned(t *testing.T) {
+	e := newTestEngine(t, clock.NewFake(time.UnixMilli(40_000_000)))
+	ctx := context.Background()
+	// Six DISTINCT-body learnings (distinct so MinHash dedup does not collapse
+	// them) sharing one file ref. Structural candidates enter idset independent of
+	// the lexical fetch size, so they reveal whether `limit` caps the *returned* set.
+	bodies := []string{
+		"alpha concurrency wal busy timeout immediate writer pool serialized mutex per connection",
+		"bravo migration guarded user_version pragma idempotent first run lock serializes processes",
+		"charlie recall structural lexical recency reinforcement branch budget greedy selection order",
+		"delta synonym expansion identifier split camel snake kebab dotted token search text build",
+		"echo minhash lsh band signature jaccard shingle near duplicate reinforce threshold confirm",
+		"foxtrot embedding vector cosine ann index quantize recall candidate rerank distance metric",
+	}
+	for _, b := range bodies {
+		if _, _, err := e.Record(ctx, NewMemory{Kind: KindLearning,
+			Body: b,
+			Refs: []Ref{{Type: RefFile, Value: "internal/limit/probe.go"}}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	set, err := e.Recall(ctx, RecallQuery{Files: []string{"internal/limit/probe.go"}, Limit: 3, TokenBudget: 100000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(set.Results) > 3 {
+		t.Fatalf("limit=3 must cap returned results, got %d", len(set.Results))
+	}
+}
+
+// TestRecallPinSubBudgetCapsPins: pinned do_not_repeat are bounded by a dedicated
+// sub-budget (spec §9.2) — the top pin is always kept, but a pin-heavy branch can
+// no longer flood an (unfiltered) recall with every pin.
+func TestRecallPinSubBudgetCapsPins(t *testing.T) {
+	e := newTestEngine(t, clock.NewFake(time.UnixMilli(41_000_000)))
+	ctx := context.Background()
+	bodies := []string{
+		"never hardcode secrets in source files or config because rotation becomes impossible later",
+		"never disable the busy_timeout pragma on the store connection or writers will fail under load",
+		"never add a redundant toolchain directive to go.mod since it silently breaks reproducible builds",
+		"never run migrations outside the user_version guard or concurrent processes will corrupt state",
+		"never block the writer pool with a long running transaction that starves every other caller",
+		"never skip the wal checkpoint on the shutdown path or the database file grows without bound",
+	}
+	for _, b := range bodies {
+		if _, _, err := e.Record(ctx, NewMemory{Kind: KindDoNotRepeat, Body: b}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// kind="" so pins flow; tiny budget so the pin sub-budget (budget/2) bites.
+	set, err := e.Recall(ctx, RecallQuery{TaskHint: "anything", TokenBudget: 40})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pinCount int
+	for _, r := range set.Results {
+		if r.Record.Kind == KindDoNotRepeat {
+			pinCount++
+		}
+	}
+	if pinCount == 0 {
+		t.Fatal("at least the top-ranked pin must always surface")
+	}
+	if pinCount == len(bodies) {
+		t.Fatalf("pin sub-budget must cap pins; all %d surfaced", pinCount)
 	}
 }
 
