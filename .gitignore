@@ -1,2 +1,4 @@
 # Build output (make linux|windows|darwin|native)
 /releases/
+recarto-minisign.key
+recarto-minisign.pub
