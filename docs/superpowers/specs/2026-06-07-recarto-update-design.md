@@ -145,7 +145,12 @@ New `internal/cli/update.go` subcommand, dispatched like the existing ones.
 
 A `publish` stage after the existing cross-compile, gated on tag pipelines:
 
-1. Build the three binaries (existing `make`/zig steps).
+1. Build the three binaries. linux/amd64 and windows/amd64 cross-compile with
+   zig on the Linux runner (verified). darwin/arm64 cannot — bare zig has no
+   macOS SDK (fails on `resolv`/`CoreFoundation`/`Security`) — so it is built
+   with **osxcross** (the macOS SDK) baked into a custom GitLab CI builder image;
+   the Makefile's darwin compiler is overridable (`DARWIN_CC`) so CI swaps in
+   `oa64-clang`.
 2. Compute sha256 for each.
 3. Fetch the current `index.json` from R2, merge the new version in (newest
    first), and render the updated manifest.

@@ -1762,14 +1762,99 @@ git commit -m "feat(release): manifest publish helper that hashes binaries and m
 
 ---
 
-## Task 12: GitLab CI publish stage
+## Task 12: GitLab CI publish stage (with osxcross for darwin)
 
 **Files:**
+- Modify: `Makefile` (make the darwin compiler overridable)
+- Create: `ci/builder.Dockerfile` (release builder image: Go + zig + osxcross + minisign + awscli)
 - Create: `.gitlab-ci.yml`
 
-> Prerequisites configured in the GitLab project (Settings → CI/CD → Variables), all **masked**: `RECARTO_MINISIGN_KEY` (contents of the unencrypted `recarto-minisign.key` from Task 5), `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_ACCOUNT_ID`, `R2_BUCKET`. The key is passphrase-less (`-GW`), so there is **no** `RECARTO_MINISIGN_PASSWORD`. The CI image must provide `minisign`, `zig`, Go 1.26, and the AWS CLI (or `rclone`).
+> **Empirically verified in this environment:** `linux/amd64` (zig musl) and `windows/amd64` (zig mingw) cross-build cleanly on a Linux runner; `darwin/arm64` does **not** — bare `zig cc -target aarch64-macos` fails (`unable to find dynamic system library 'resolv'`, and it links `-framework CoreFoundation -framework Security`). darwin therefore needs the macOS SDK, supplied via **osxcross** in the builder image. The darwin build below could NOT be verified in the sandbox (no Apple SDK); it is verified in your CI on first run.
 
-- [ ] **Step 1: Write the publish pipeline**
+> Prerequisites in the GitLab project (Settings → CI/CD → Variables), all **masked**: `RECARTO_MINISIGN_KEY` (the unencrypted `recarto-minisign.key` from Task 5), `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_ACCOUNT_ID`, `R2_BUCKET`. The key is passphrase-less (`-GW`), so there is **no** `RECARTO_MINISIGN_PASSWORD`.
+
+- [ ] **Step 1: Make the darwin compiler overridable in the Makefile**
+
+In `Makefile`, introduce a `DARWIN_CC` variable (defaulting to the existing zig command for local/native use) and use it in the `darwin` target, so CI can swap in the osxcross compiler. Find:
+```makefile
+darwin:
+	GOOS=darwin GOARCH=arm64 CGO_ENABLED=1 CC="zig cc -target aarch64-macos" \
+		go build $(TAGS) $(LDFLAGS) -o releases/darwin-arm64/$(BINARY_NAME) $(PKG)
+```
+Replace with:
+```makefile
+# darwin needs the macOS SDK to link (CoreFoundation/Security via crypto/x509).
+# Locally this defaults to zig (works only on a macOS host); CI overrides
+# DARWIN_CC with the osxcross compiler (oa64-clang) which carries the SDK.
+DARWIN_CC ?= zig cc -target aarch64-macos
+darwin:
+	GOOS=darwin GOARCH=arm64 CGO_ENABLED=1 CC="$(DARWIN_CC)" \
+		go build $(TAGS) $(LDFLAGS) -o releases/darwin-arm64/$(BINARY_NAME) $(PKG)
+```
+
+- [ ] **Step 2: Verify the Makefile change does not break the non-darwin targets**
+
+Run:
+```bash
+make linux windows VERSION=test-ci
+ls -la releases/linux-amd64/recarto releases/windows-amd64/recarto.exe
+```
+Expected: both binaries build (these were verified to cross-compile on Linux). Then clean up: `make clean`.
+
+- [ ] **Step 3: Create the builder image Dockerfile**
+
+Create `ci/builder.Dockerfile`:
+```dockerfile
+# Release builder for recarto: cross-compiles linux/amd64 + windows/amd64 with zig
+# and darwin/arm64 with osxcross (macOS SDK), and carries the publish tools.
+#
+# The macOS SDK is NOT redistributable, so it is not baked in here by URL. Before
+# building this image, place a macOS SDK tarball (e.g. MacOSX14.sdk.tar.xz, made
+# with osxcross's tools/gen_sdk_package*.sh on a machine with Xcode) into the build
+# context at ci/osxcross-sdk/. See Step 4.
+FROM golang:1.26-bookworm
+
+# osxcross build deps + publish tools (minisign, awscli) + xz/curl for zig.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      clang llvm lld cmake make patch xz-utils libxml2-dev libssl-dev zlib1g-dev \
+      curl ca-certificates git python3 minisign awscli \
+    && rm -rf /var/lib/apt/lists/*
+
+# zig for linux/amd64 (musl) and windows/amd64.
+ARG ZIG_VERSION=0.13.0
+RUN curl -sSL https://ziglang.org/download/${ZIG_VERSION}/zig-linux-x86_64-${ZIG_VERSION}.tar.xz \
+      | tar -xJ -C /opt \
+    && ln -s /opt/zig-linux-x86_64-${ZIG_VERSION}/zig /usr/local/bin/zig
+
+# osxcross for darwin/arm64. Provides oa64-clang carrying the macOS SDK.
+RUN git clone --depth 1 https://github.com/tpoechtrager/osxcross /opt/osxcross
+COPY ci/osxcross-sdk/ /opt/osxcross/tarballs/
+RUN cd /opt/osxcross && UNATTENDED=1 ./build.sh
+ENV PATH="/opt/osxcross/target/bin:${PATH}"
+```
+
+- [ ] **Step 4: Build and push the builder image (manual, one-time; needs the SDK)**
+
+This is done once (and whenever the toolchain changes), outside the normal pipeline, because it needs the Apple SDK tarball you provide:
+```bash
+# 1) On a machine with Xcode / Command Line Tools, generate the SDK tarball with
+#    osxcross (see osxcross README: tools/gen_sdk_package_pbzx.sh). Copy the result
+#    (e.g. MacOSX14.sdk.tar.xz) to ci/osxcross-sdk/ in this repo checkout.
+mkdir -p ci/osxcross-sdk
+cp /path/to/MacOSX14.sdk.tar.xz ci/osxcross-sdk/
+
+# 2) Build and push to the project's GitLab container registry.
+docker login registry.gerwim.nl
+docker build -f ci/builder.Dockerfile -t registry.gerwim.nl/gerwim/recarto/builder:latest .
+docker push registry.gerwim.nl/gerwim/recarto/builder:latest
+```
+Add the SDK to ignore so it is never committed:
+```bash
+printf 'ci/osxcross-sdk/\n' >> .gitignore
+```
+Expected: an image whose `oa64-clang` can link a darwin/arm64 CGO binary. (Smoke-test inside the image if desired: `make darwin DARWIN_CC=oa64-clang`.)
+
+- [ ] **Step 5: Write the pipeline**
 
 Create `.gitlab-ci.yml`:
 ```yaml
@@ -1777,6 +1862,7 @@ stages: [test, build, publish]
 
 variables:
   R2_ENDPOINT: "https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+  BUILDER_IMAGE: "registry.gerwim.nl/gerwim/recarto/builder:latest"
 
 test:
   stage: test
@@ -1785,18 +1871,15 @@ test:
     - go vet ./...
     - go test ./...
 
-# Cross-compile the three release binaries (same toolchain as the Makefile).
+# Cross-compile all three targets: linux+windows via zig, darwin via osxcross.
 build:
   stage: build
-  image: golang:1.26
+  image: "$BUILDER_IMAGE"
   rules:
     - if: '$CI_COMMIT_TAG'
-  before_script:
-    - apt-get update && apt-get install -y --no-install-recommends curl xz-utils
-    - curl -sSL https://ziglang.org/download/0.13.0/zig-linux-x86_64-0.13.0.tar.xz | tar -xJ -C /opt
-    - export PATH="/opt/zig-linux-x86_64-0.13.0:$PATH"
   script:
-    - make all VERSION="$CI_COMMIT_TAG"
+    - make linux windows VERSION="$CI_COMMIT_TAG"
+    - make darwin DARWIN_CC="oa64-clang" VERSION="$CI_COMMIT_TAG"
   artifacts:
     paths:
       - releases/
@@ -1805,12 +1888,10 @@ build:
 # Hash binaries, merge index.json, sign with minisign, upload everything to R2.
 publish:
   stage: publish
-  image: golang:1.26
+  image: "$BUILDER_IMAGE"
   rules:
     - if: '$CI_COMMIT_TAG'
   needs: [build]
-  before_script:
-    - apt-get update && apt-get install -y --no-install-recommends minisign awscli ca-certificates
   script:
     - export VER="$CI_COMMIT_TAG"
     - export NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -1830,33 +1911,33 @@ publish:
     - minisign -S -s minisign.key -m index.json </dev/null
     - rm -f minisign.key
     # Upload immutable versioned binaries (long cache), then the manifest (short cache).
-    - aws s3 cp releases/linux-amd64/recarto   "s3://${R2_BUCKET}/recarto/${VER}/recarto-linux-amd64"     --endpoint-url "$R2_ENDPOINT" --cache-control "public,max-age=31536000,immutable"
-    - aws s3 cp releases/darwin-arm64/recarto  "s3://${R2_BUCKET}/recarto/${VER}/recarto-darwin-arm64"    --endpoint-url "$R2_ENDPOINT" --cache-control "public,max-age=31536000,immutable"
+    - aws s3 cp releases/linux-amd64/recarto       "s3://${R2_BUCKET}/recarto/${VER}/recarto-linux-amd64"      --endpoint-url "$R2_ENDPOINT" --cache-control "public,max-age=31536000,immutable"
+    - aws s3 cp releases/darwin-arm64/recarto      "s3://${R2_BUCKET}/recarto/${VER}/recarto-darwin-arm64"     --endpoint-url "$R2_ENDPOINT" --cache-control "public,max-age=31536000,immutable"
     - aws s3 cp releases/windows-amd64/recarto.exe "s3://${R2_BUCKET}/recarto/${VER}/recarto-windows-amd64.exe" --endpoint-url "$R2_ENDPOINT" --cache-control "public,max-age=31536000,immutable"
     - aws s3 cp index.json         "s3://${R2_BUCKET}/recarto/index.json"         --endpoint-url "$R2_ENDPOINT" --cache-control "public,max-age=60"
     - aws s3 cp index.json.minisig "s3://${R2_BUCKET}/recarto/index.json.minisig" --endpoint-url "$R2_ENDPOINT" --cache-control "public,max-age=60"
 ```
 
-> The signing key is passphrase-less (generated with `-GW`), so `minisign -S` signs without prompting. The secret key still lives only in the masked `RECARTO_MINISIGN_KEY` variable and is written to a temp file that is deleted right after signing.
+> The signing key is passphrase-less (`-GW`), so `minisign -S` signs without prompting. The secret key lives only in the masked `RECARTO_MINISIGN_KEY` variable, is written to a temp file, and is deleted immediately after signing. The `build` and `publish` jobs use the custom `$BUILDER_IMAGE` (zig + osxcross + minisign + awscli already installed); only `test` uses the stock `golang:1.26`.
 
-- [ ] **Step 2: Validate the YAML locally**
+- [ ] **Step 6: Validate the YAML locally**
 
 Run:
 ```bash
-python3 -c "import yaml,sys; yaml.safe_load(open('.gitlab-ci.yml')); print('yaml ok')"
+python3 -c "import yaml; yaml.safe_load(open('.gitlab-ci.yml')); print('yaml ok')"
 ```
 Expected: `yaml ok`.
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
-git add .gitlab-ci.yml
-git commit -m "ci(release): publish signed manifest and binaries to R2 on tag"
+git add Makefile ci/builder.Dockerfile .gitlab-ci.yml .gitignore
+git commit -m "ci(release): build all targets (osxcross for darwin) and publish signed releases to R2"
 ```
 
-- [ ] **Step 4: First real release (manual verification, after merge)**
+- [ ] **Step 8: First real release (manual verification, after merge + image pushed)**
 
-After this branch is merged and the CI variables are set:
+After this branch is merged, the builder image is pushed (Step 4), and the CI variables are set:
 ```bash
 git tag 0.2.0 && git push origin 0.2.0
 ```
@@ -1865,7 +1946,7 @@ Then verify the artifacts are public and the client round-trips:
 curl -fsS https://releases.gerwim.com/recarto/index.json | head
 RECARTO_UPDATE_BASE_URL=https://releases.gerwim.com/ go run ./cmd/recarto update --check ; echo "exit=$?"
 ```
-Expected: manifest downloads; `--check` reports up-to-date (exit 0) or available (exit 10) depending on the local build's version.
+Expected: manifest downloads with all three platform entries; `--check` reports up-to-date (exit 0) or available (exit 10) depending on the local build's version.
 
 ---
 
