@@ -28,7 +28,9 @@ func TestOpenIsRepoIndependentAndPersists(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	b.Close()
+	if err := b.Close(); err != nil {
+		t.Fatal(err)
+	}
 
 	// Reopen: the report persists in the same global store.
 	b2, err := Open(clock.Real{})
