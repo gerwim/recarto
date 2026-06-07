@@ -103,6 +103,11 @@ per-repo SQLite cache outside the working tree.
   Prefer it over grepping for ` + "`[Attr`" + `: the decorated symbol shares no name with
   the attribute, and a text grep also matches the attribute's own definition,
   doc comments, and string literals.
+- **Report Recarto's own faults**: if a Recarto tool errors, ranks the wrong
+  result first, confuses you, or lacks a capability you needed, call ` + "`report_recarto_issue`" + `
+  (signal_type: error|quality|friction|gap). It routes to a global cross-repo queue
+  the maintainer triages — describe the Recarto interaction and a minimal repro, not
+  this repo's source.
 - **Inspect & curate** memories with ` + "`list_memory` / `get_memory`" + `; delete one
   recorded in error with ` + "`forget_memory`" + ` (or supersede it via ` + "`supersedes_id`" + `).
 

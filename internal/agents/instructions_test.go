@@ -64,6 +64,12 @@ func TestInstructionsExplainQualifiedNameCanonical(t *testing.T) {
 	}
 }
 
+func TestInstructionsMentionReportTool(t *testing.T) {
+	if !strings.Contains(Instructions, "report_recarto_issue") {
+		t.Fatal("Instructions should encourage report_recarto_issue")
+	}
+}
+
 func TestInstructionsAdvertiseFullToolset(t *testing.T) {
 	for _, want := range []string{
 		"get_architecture", "query_graph", "list_memory", "get_memory",
