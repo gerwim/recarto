@@ -189,6 +189,33 @@ func TestEvictExemptKindsNeverArchived(t *testing.T) {
 	}
 }
 
+func TestEvictSkipsPinned(t *testing.T) {
+	e := newTestEngine(t, clock.NewFake(time.UnixMilli(14_250_000)))
+	ctx := context.Background()
+	// `learning` is normally evictable, but pinning a still-valid one must exempt it
+	// from decay-eviction even under hard budget pressure — record_memory advertises
+	// pinned as "pin so it is never evicted".
+	pinned := insertActive(t, e, KindLearning, "a still-valid learning the user pinned to keep forever", 1)
+	if err := e.st.WriteTx(ctx, func(c store.Conn) error {
+		_, err := c.ExecContext(ctx, `UPDATE memories SET pinned=1 WHERE id=?`, pinned)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	unpinned := insertActive(t, e, KindLearning, "an unpinned learning that may be evicted away", 1)
+
+	// Tiny budget => eviction pressure on both rows.
+	if _, _, _, err := e.evictToBudget(ctx, 100, 1, false); err != nil {
+		t.Fatal(err)
+	}
+	if statusOf(t, e, pinned) != "active" {
+		t.Error("a pinned memory must be exempt from decay-eviction even under budget pressure")
+	}
+	if statusOf(t, e, unpinned) != "archived" {
+		t.Error("the unpinned evictable memory should still be archived under budget pressure")
+	}
+}
+
 func TestEvictRemovesFromFTS(t *testing.T) {
 	e := newTestEngine(t, clock.NewFake(time.UnixMilli(14_300_000)))
 	ctx := context.Background()

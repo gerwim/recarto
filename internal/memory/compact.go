@@ -188,6 +188,7 @@ type candidate struct {
 	lastUsedEpoch int64
 	reinforcement int
 	confidence    float64
+	pinned        bool
 }
 
 // loadActive scans every active row once, returning each as a candidate and the
@@ -195,7 +196,7 @@ type candidate struct {
 // (EstimateTokens(title + " " + body)).
 func (e *Engine) loadActive(ctx context.Context) (cands []candidate, liveTokens int, err error) {
 	rows, err := e.st.DB.QueryContext(ctx,
-		`SELECT id, kind, title, body, last_used_epoch, reinforcement_count, confidence
+		`SELECT id, kind, title, body, last_used_epoch, reinforcement_count, confidence, pinned
 		   FROM memories WHERE status='active'`)
 	if err != nil {
 		return nil, 0, err
@@ -204,11 +205,13 @@ func (e *Engine) loadActive(ctx context.Context) (cands []candidate, liveTokens 
 	for rows.Next() {
 		var c candidate
 		var kind, title, body string
+		var pinned int
 		if err := rows.Scan(&c.id, &kind, &title, &body, &c.lastUsedEpoch,
-			&c.reinforcement, &c.confidence); err != nil {
+			&c.reinforcement, &c.confidence, &pinned); err != nil {
 			return nil, 0, err
 		}
 		c.kind = Kind(kind)
+		c.pinned = pinned != 0
 		c.tokens = ledger.EstimateTokens(title + " " + body)
 		liveTokens += c.tokens
 		cands = append(cands, c)
@@ -253,9 +256,10 @@ func (e *Engine) evictToBudget(ctx context.Context, epoch int64, budget int, dry
 	}
 
 	// Eviction-eligible candidates, ranked by relevance ascending (worst first).
+	// Pinned rows are exempt regardless of kind (pinned = "never evicted").
 	var elig []candidate
 	for _, c := range cands {
-		if evictable(c.kind) {
+		if evictable(c.kind) && !c.pinned {
 			elig = append(elig, c)
 		}
 	}
