@@ -7,21 +7,21 @@ manifest with minisign, and uploads everything to a Cloudflare R2 bucket served 
 update only if the minisign signature **and** the sha256 verify.
 
 ```
-  Your Mac (once) ── extract macOS SDK ──► ci/osxcross-sdk/MacOSX*.sdk.tar.xz
-        │
-        └─ docker build -f ci/builder.Dockerfile  ──►  osxcross bakes the SDK INTO the image
+   docker build -f ci/builder.Dockerfile  ──►  Go + zig + minisign + awscli image
                                                             │
                                                 docker push to GitLab registry
                                                             │
-   git tag X.Y.Z ──► GitLab CI pulls the image ──► build (zig: linux/windows,
-                     oa64-clang: darwin) ──► hash + merge index.json ──► minisign
+   git tag X.Y.Z ──► GitLab CI pulls the image ──► build (zig: linux/windows)
+                     ──► hash + merge index.json ──► minisign
                      sign ──► upload binaries + index.json + index.json.minisig to R2
 ```
 
-The macOS SDK is **never committed** (Apple's license restricts redistribution, and
-it would bloat the repo). It is consumed once, at image-build time, and lives only
-inside the builder image in your private registry — so the ephemeral CI containers
-get it from the image, not from the repo. `ci/osxcross-sdk/` is gitignored.
+> **Darwin/arm64 is disabled for now.** The builder image and the `build` job
+> currently produce linux/amd64 + windows/amd64 only. Bringing macOS back means
+> re-adding the osxcross layers to `ci/builder.Dockerfile`, restoring the commented
+> `make darwin` step in `.gitlab-ci.yml`, and supplying a macOS SDK (steps below,
+> kept for that day). The SDK is **never committed** (Apple's license restricts
+> redistribution); `ci/osxcross-sdk/` is gitignored.
 
 ---
 
@@ -40,7 +40,10 @@ minisign -GW -p recarto-minisign.pub -s recarto-minisign.key
 - The **secret** key (`recarto-minisign.key`) is gitignored. It goes into the
   `RECARTO_MINISIGN_KEY` CI variable (step 5). Never commit it.
 
-### 2. Extract the macOS SDK (on a Mac, once)
+### 2. Extract the macOS SDK (on a Mac, once) — darwin only, currently disabled
+
+> Skip this while darwin is disabled. Needed only when you re-add the osxcross
+> layers to `ci/builder.Dockerfile` to bring the macOS build back.
 
 osxcross needs Apple's SDK (the `CoreFoundation`/`Security` frameworks that
 `crypto/x509` links). On a Mac with Xcode **or** the Command Line Tools installed:
@@ -64,20 +67,15 @@ cp /path/to/MacOSX14.sdk.tar.xz ci/osxcross-sdk/
 ### 3. Build and push the builder image (once; repeat on toolchain/SDK changes)
 
 ```sh
-docker login registry.gerwim.nl
-docker build -f ci/builder.Dockerfile -t registry.gerwim.nl/gerwim/recarto/builder:latest .
-docker push registry.gerwim.nl/gerwim/recarto/builder:latest
+docker login reg.gerwim.nl
+docker build -f ci/builder.Dockerfile -t reg.gerwim.nl/gerwim/recarto/builder:latest .
+docker push reg.gerwim.nl/gerwim/recarto/builder:latest
 ```
 
-This image carries Go, zig (linux/windows), osxcross + the SDK (darwin), `minisign`,
-and the `aws` CLI. `.gitlab-ci.yml`'s `build` and `publish` jobs reference it via
-`$BUILDER_IMAGE`. Rebuild and push only when you bump Go/zig, update osxcross, or
-refresh the macOS SDK — otherwise every release reuses the existing image.
-
-> Verified locally: the zig linux/windows builds and the full
-> build → hash → merge → minisign-sign pipeline run inside this image, and a
-> minisign-CLI signature is accepted by recarto's own verifier. The darwin/osxcross
-> compile itself is exercised the first time the real image (with your SDK) runs.
+This image carries Go, zig (linux/windows), `minisign`, and the `aws` CLI.
+`.gitlab-ci.yml`'s `build` and `publish` jobs reference it via `$BUILDER_IMAGE`.
+Rebuild and push only when you bump Go/zig — otherwise every release reuses the
+existing image. (When darwin is re-enabled, also rebuild on osxcross/SDK changes.)
 
 ### 4. Cloudflare R2
 
@@ -121,7 +119,7 @@ git push origin X.Y.Z
 ```
 
 The pipeline runs `test → build → publish`. `build` produces
-`releases/{linux-amd64/recarto, darwin-arm64/recarto, windows-amd64/recarto.exe}`;
+`releases/{linux-amd64/recarto, windows-amd64/recarto.exe}` (darwin disabled);
 `publish` fetches the current `index.json` (absent on the first release), merges the
 new version in, signs it, and uploads the versioned binaries (cached forever) plus
 `index.json` + `index.json.minisig` (short TTL) to `recarto/` in the bucket.

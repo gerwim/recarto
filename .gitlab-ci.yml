@@ -2,7 +2,7 @@ stages: [test, build, publish]
 
 variables:
   R2_ENDPOINT: "https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
-  BUILDER_IMAGE: "registry.gerwim.nl/gerwim/recarto/builder:latest"
+  BUILDER_IMAGE: "reg.gerwim.nl/gerwim/recarto/builder:latest"
 
 test:
   stage: test
