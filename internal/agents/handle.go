@@ -346,5 +346,5 @@ func handleStop(ctx context.Context, a *app.App, ev Event) (Result, error) {
 			return Result{}, err
 		}
 	}
-	return Result{SystemMessage: "recarto: record any new learnings (record_memory) and bug fixes (record_bug) before ending."}, nil
+	return Result{SystemMessage: "recarto: before ending, record any new learnings (record_memory), bug fixes (record_bug), and preferences — e.g. if the user corrected your approach or stated a style/workflow choice."}, nil
 }

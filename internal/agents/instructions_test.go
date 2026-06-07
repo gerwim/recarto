@@ -19,6 +19,19 @@ func TestInstructionsMentionTodo(t *testing.T) {
 	}
 }
 
+func TestInstructionsPromptPreferenceCapture(t *testing.T) {
+	// Preferences are signalled conversationally (the user corrects you, states a
+	// style/workflow choice, rejects a suggestion) — not by a file edit — so without
+	// an explicit capture trigger the agent never records one (rollout had 0). The
+	// instructions must name that trigger, like the `todo` bullet does for open work.
+	lower := strings.ToLower(Instructions)
+	for _, want := range []string{"preference", "correct", "style"} {
+		if !strings.Contains(lower, want) {
+			t.Errorf("Instructions should give a preference-capture trigger; missing %q", want)
+		}
+	}
+}
+
 func TestInstructionsExplainJustInTimeAnchoring(t *testing.T) {
 	// Agents must learn that anchoring a memory to files/symbols (via record_memory
 	// refs) is what makes bugs, do-not-repeats and decisions resurface the moment

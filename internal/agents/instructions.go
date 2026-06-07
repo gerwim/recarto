@@ -32,6 +32,10 @@ per-repo SQLite cache outside the working tree.
 - **Track open work** as a ` + "`todo`" + ` memory (` + "`record_memory`" + ` with kind ` + "`todo`" + `): it
   resurfaces at session start and when you touch its referenced files. Close it with
   ` + "`complete_todo`" + ` (or ` + "`recarto todo done <id>`" + `) when the work is finished.
+- **Capture preferences** as they surface: the moment the user corrects your approach,
+  states a style / workflow / naming choice, or rejects a suggestion, record a
+  ` + "`preference`" + ` memory with what they preferred instead. These cues are conversational —
+  not anchored to a file edit — so they are the easiest to miss; the bar is low.
 - Query the code graph with ` + "`search_graph` / `get_code_snippet` / `trace_call_path`" + `
   instead of reading whole files. When searching ` + "`search_graph`" + ` by concept, also
   pass ` + "`candidate_symbols`" + ` — the identifier names you expect (e.g. ` + "`AddressLookup`, `Geocode`" + `);

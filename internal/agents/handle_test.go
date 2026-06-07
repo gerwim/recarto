@@ -43,6 +43,21 @@ func TestHandleStopNudge(t *testing.T) {
 	}
 }
 
+func TestHandleStopNudgePromptsPreferences(t *testing.T) {
+	// Preferences are signalled conversationally (the user corrects your approach or
+	// states a style/workflow choice), not by a file edit, so they are the kind most
+	// often missed in the moment. The end-of-session nudge is the backstop, so it must
+	// explicitly prompt for them — not just learnings and bug fixes.
+	a := newTestApp(t, "main")
+	res, err := Handle(context.Background(), a, Event{Kind: KindStop, Agent: "claude-code", SessionID: "s1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.ToLower(res.SystemMessage), "preference") {
+		t.Errorf("stop nudge should prompt for preferences, got: %q", res.SystemMessage)
+	}
+}
+
 func TestHandlePostReadWarnsOnRepeat(t *testing.T) {
 	a := newTestApp(t, "main")
 	ctx := context.Background()
