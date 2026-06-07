@@ -1,7 +1,9 @@
 // Package memory is Recarto's write+dedup and recall engine over the store.
 package memory
 
-// Kind enumerates the unified memory kinds (mirrors the memories.kind CHECK).
+// Kind enumerates the unified memory kinds. The memories.kind CHECK is a
+// permissive superset: it still lists the retired `action` kind so existing
+// stores stay valid, but `action` is no longer a Kind and Valid() rejects it.
 type Kind string
 
 const (
@@ -10,7 +12,6 @@ const (
 	KindDecision    Kind = "decision"
 	KindDoNotRepeat Kind = "do_not_repeat"
 	KindBug         Kind = "bug"
-	KindAction      Kind = "action"
 	KindTodo        Kind = "todo"
 )
 
@@ -18,7 +19,7 @@ const (
 // source of truth: validKinds is derived from it, and the MCP kind enum lists it.
 var AllKinds = []Kind{
 	KindPreference, KindLearning, KindDecision,
-	KindDoNotRepeat, KindBug, KindAction, KindTodo,
+	KindDoNotRepeat, KindBug, KindTodo,
 }
 
 var validKinds = func() map[Kind]bool {

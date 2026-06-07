@@ -58,7 +58,7 @@ func TestRenderEmpty(t *testing.T) {
 func TestRenderUntitledAndMultilineBody(t *testing.T) {
 	recs := []*memory.Record{
 		{
-			Kind:      memory.KindAction,
+			Kind:      memory.KindLearning,
 			Title:     "",
 			Body:      "line one\nline two",
 			UpdatedAt: 1_700_000_000_000,
@@ -67,7 +67,7 @@ func TestRenderUntitledAndMultilineBody(t *testing.T) {
 	}
 	want := "# Recarto Memory — demo\n\n" +
 		"_1 active memories_\n\n" +
-		"## Actions\n\n" +
+		"## Learnings\n\n" +
 		"- **(untitled)**\n" +
 		"  line one\n" +
 		"  line two\n" +

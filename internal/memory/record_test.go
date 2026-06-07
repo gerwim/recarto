@@ -4,13 +4,27 @@ import "testing"
 
 func TestKindValid(t *testing.T) {
 	for _, k := range []Kind{KindPreference, KindLearning, KindDecision,
-		KindDoNotRepeat, KindBug, KindAction} {
+		KindDoNotRepeat, KindBug, KindTodo} {
 		if !k.Valid() {
 			t.Errorf("%q should be valid", k)
 		}
 	}
 	if Kind("nonsense").Valid() {
 		t.Error(`"nonsense" should be invalid`)
+	}
+}
+
+func TestActionKindRemoved(t *testing.T) {
+	// The `action` activity-log kind was never instructed and is unused in practice;
+	// it has been removed so it can't be recorded by mistake. (The DB CHECK still
+	// permits it as a harmless superset; enforcement is at the validation layer.)
+	if Kind("action").Valid() {
+		t.Error(`"action" kind should be removed (no longer a valid kind)`)
+	}
+	for _, k := range AllKinds {
+		if k == "action" {
+			t.Error("AllKinds must not contain the removed action kind")
+		}
 	}
 }
 

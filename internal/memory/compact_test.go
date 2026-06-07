@@ -31,15 +31,8 @@ func TestRelevanceDecaysWithAge(t *testing.T) {
 	}
 }
 
-func TestActionDecaysFasterThanLearning(t *testing.T) {
-	age := 10.0
-	if !(relevance(KindAction, age, 0, 1.0) < relevance(KindLearning, age, 0, 1.0)) {
-		t.Error("action should decay faster than learning at the same age")
-	}
-}
-
 func TestEvictableKinds(t *testing.T) {
-	for _, k := range []Kind{KindAction, KindPreference, KindLearning} {
+	for _, k := range []Kind{KindPreference, KindLearning, KindTodo} {
 		if !evictable(k) {
 			t.Errorf("%s should be evictable", k)
 		}

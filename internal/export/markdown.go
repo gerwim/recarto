@@ -22,7 +22,6 @@ var kindSections = []struct {
 	{memory.KindPreference, "Preferences"},
 	{memory.KindLearning, "Learnings"},
 	{memory.KindBug, "Bugs"},
-	{memory.KindAction, "Actions"},
 }
 
 // Render returns a markdown document for recs, grouped by kind in display order.

@@ -21,8 +21,7 @@ const (
 	// safety valve against runaway growth, not routine behavior.
 	DefaultBudgetTokens = 250_000
 
-	halfLifeActionEpochs = 5.0  // disposable activity log: fastest decay
-	halfLifeStdEpochs    = 30.0 // preference / learning
+	halfLifeStdEpochs = 30.0 // preference / learning / todo
 	archiveGraceEpochs   = 30   // archived -> hard-deleted after this many epochs
 
 	defaultDedupBuckets = 1000 // dedup sweep work budget per pass (cursor resumes)
@@ -93,22 +92,21 @@ func (e *Engine) Epoch(ctx context.Context) (int64, error) {
 
 // evictable reports whether a kind may be archived by decay. do_not_repeat is
 // pinned; decision and bug carry durable rationale/fix history and are exempt
-// (they can still be deduped). action/preference/learning decay, and so do todos:
+// (they can still be deduped). preference/learning decay, and so do todos:
 // an untouched todo fades (reinforcing it via a near-dup record refreshes it).
 func evictable(k Kind) bool {
 	switch k {
-	case KindAction, KindPreference, KindLearning, KindTodo:
+	case KindPreference, KindLearning, KindTodo:
 		return true
 	}
 	return false
 }
 
-// halfLifeEpochs is the decay half-life (in activity epochs) for a kind.
-func halfLifeEpochs(k Kind) float64 {
-	if k == KindAction {
-		return halfLifeActionEpochs
-	}
-	return halfLifeStdEpochs // preference / learning
+// halfLifeEpochs is the decay half-life (in activity epochs) for a kind. Only
+// evictable kinds (preference/learning/todo) are ever scored; they share one
+// half-life.
+func halfLifeEpochs(Kind) float64 {
+	return halfLifeStdEpochs
 }
 
 // relevance scores an eviction candidate; lower = more evictable. Decay is

@@ -25,7 +25,7 @@ func BenchmarkCompact(b *testing.B) {
 	e := New(st, ledger.New(st), clk)
 	ctx := context.Background()
 
-	kinds := []Kind{KindAction, KindPreference, KindLearning, KindDecision, KindBug}
+	kinds := []Kind{KindTodo, KindPreference, KindLearning, KindDecision, KindBug}
 	// Seed 50k rows in ONE transaction (fast). last_used_epoch stays 0 — the
 	// dry-run scan/sort cost we are measuring is independent of its exact value.
 	if err := st.WriteTx(ctx, func(c store.Conn) error {

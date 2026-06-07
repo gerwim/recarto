@@ -314,7 +314,6 @@ func TestBaselineRecallSurfacesCerebrumKinds(t *testing.T) {
 		{Kind: KindPreference, Title: "pref", Body: "use tabs not spaces here", Branch: "main", Source: "cli"},
 		{Kind: KindLearning, Title: "learn", Body: "store lives outside the worktree", Branch: "main", Source: "cli"},
 		{Kind: KindDecision, Title: "decide", Body: "chose sqlite over flat files", Branch: "main", Source: "cli"},
-		{Kind: KindAction, Title: "act", Body: "ran the formatter once today", Branch: "main", Source: "cli"},
 	} {
 		if _, _, err := e.Record(ctx, nm); err != nil {
 			t.Fatal(err)
@@ -333,9 +332,6 @@ func TestBaselineRecallSurfacesCerebrumKinds(t *testing.T) {
 		if !got[k] {
 			t.Errorf("baseline recall missing kind %s", k)
 		}
-	}
-	if got[KindAction] {
-		t.Errorf("baseline recall must exclude action (ephemeral)")
 	}
 }
 

@@ -340,8 +340,8 @@ func (e *Engine) pinnedIDs(ctx context.Context, branch string) ([]string, error)
 // baselineIDs returns active, branch-visible "cerebrum" memories — preference,
 // learning, decision, (unpinned) do_not_repeat, and open todos — most-recently-
 // updated first, capped at limit. It seeds an empty-query session-start recall so
-// durable knowledge and open work surface without a task hint. Ephemeral kinds
-// (action) and bugs are excluded: bugs surface just-in-time on code contact.
+// durable knowledge and open work surface without a task hint. Bugs are
+// excluded: they surface just-in-time on code contact.
 func (e *Engine) baselineIDs(ctx context.Context, branch string, limit int) ([]string, error) {
 	rows, err := e.st.DB.QueryContext(ctx,
 		`SELECT id FROM memories

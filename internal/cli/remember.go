@@ -16,7 +16,7 @@ import (
 //	                        [--tags ...] [--pin] [--global]
 func Remember(ctx context.Context, a *app.App, w io.Writer, args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("remember: kind required (preference|learning|decision|do_not_repeat|bug|action|todo)")
+		return fmt.Errorf("remember: kind required (preference|learning|decision|do_not_repeat|bug|todo)")
 	}
 	kind := memory.Kind(args[0])
 	if !kind.Valid() {
