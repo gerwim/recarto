@@ -3,6 +3,7 @@ module git.gerwim.nl/gerwim/recarto
 go 1.26.4
 
 require (
+	github.com/bmatcuk/doublestar/v4 v4.10.0
 	github.com/google/jsonschema-go v0.4.3
 	github.com/google/uuid v1.6.0
 	github.com/knights-analytics/hugot v0.7.4

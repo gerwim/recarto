@@ -6,6 +6,33 @@ import (
 	"testing"
 )
 
+func TestGlobMatch(t *testing.T) {
+	cases := []struct {
+		glob, p string
+		want    bool
+	}{
+		// Bare filename glob matches the basename at any depth.
+		{"*.cs", "src/Foo/Handlers/DeployCompleted.cs", true},
+		{"*Handler*.cs", "src/Foo/DeployCompletedHandler.cs", true},
+		{"*.go", "src/Foo/Bar.cs", false},
+		// Doublestar matches across path separators (the false-negative cases).
+		{"**/*.cs", "src/Foo/Handlers/DeployCompleted.cs", true},
+		{"src/**", "src/Foo/Handlers/DeployCompleted.cs", true},
+		{"src/**/*.cs", "src/Foo/Handlers/DeployCompleted.cs", true},
+		{"**/Handlers/*.cs", "src/Foo/Handlers/DeployCompleted.cs", true},
+		// A single star stays within one path segment.
+		{"src/*", "src/Foo/Handlers/DeployCompleted.cs", false},
+		{"src/*.cs", "src/Bar.cs", true},
+		// Doublestar under a subtree does not leak to siblings.
+		{"src/**/*.cs", "other/Foo/Bar.cs", false},
+	}
+	for _, c := range cases {
+		if got := globMatch(c.glob, c.p); got != c.want {
+			t.Errorf("globMatch(%q, %q) = %v, want %v", c.glob, c.p, got, c.want)
+		}
+	}
+}
+
 // indexInto writes a file to wt and indexes it, returning the source length.
 func indexInto(t *testing.T, e *Engine, wt, rel, content string) {
 	t.Helper()

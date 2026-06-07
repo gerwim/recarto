@@ -11,6 +11,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/bmatcuk/doublestar/v4"
 )
 
 // ContentMatch is one line in a source file matching a content search, annotated
@@ -28,7 +30,7 @@ type ContentMatch struct {
 type ContentSearchOpts struct {
 	Regex      bool   // treat pattern as a regular expression (default: literal substring)
 	IgnoreCase bool   // case-insensitive match
-	PathGlob   string // optional filepath.Match glob over the repo-relative path
+	PathGlob   string // optional doublestar glob over the repo-relative path (** spans dirs)
 	Language   string // optional language filter (go, csharp, …)
 	Limit      int    // max matches returned (default 50)
 	MaxPerFile int    // max matches per file (default 5)
@@ -278,16 +280,19 @@ func looksBinary(content []byte) bool {
 	return bytes.IndexByte(content[:min(len(content), 8000)], 0) >= 0
 }
 
-// globMatch reports whether a repo-relative path matches glob. A glob with no
-// slash is matched against the basename (so "*.cs" hits "src/a.cs"); otherwise it
-// is matched against the full path.
+// globMatch reports whether the repo-relative, slash-separated path p matches
+// glob. It uses doublestar semantics: a single * stays within one path segment
+// while ** spans separators, so recursive patterns (**/*.cs, src/**, src/**/*.cs)
+// work — unlike stdlib path.Match, which has no ** and silently filtered every
+// nested file to zero. A glob with no slash is matched against the basename so
+// the common *.cs / *Handler*.cs forms still match files at any depth.
 func globMatch(glob, p string) bool {
 	if !strings.Contains(glob, "/") {
-		if ok, _ := path.Match(glob, path.Base(p)); ok {
+		if ok, _ := doublestar.Match(glob, path.Base(p)); ok {
 			return true
 		}
 	}
-	ok, _ := path.Match(glob, p)
+	ok, _ := doublestar.Match(glob, p)
 	return ok
 }
 
