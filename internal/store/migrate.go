@@ -8,7 +8,7 @@ import (
 )
 
 // schemaVersion is the number of applied migrations.
-const schemaVersion = 16
+const schemaVersion = 17
 
 // migrations are applied in order; index+1 becomes user_version.
 var migrations = []string{
@@ -429,6 +429,29 @@ DELETE FROM edges;
 DELETE FROM nodes;
 DELETE FROM files;
 DELETE FROM meta WHERE key LIKE 'graph_token:%';
+`,
+	// v17 (feedback kind): widen the memories CHECK constraints to admit
+	// kind='feedback' (recorded only via report_recarto_issue, into the dedicated
+	// global feedback store) and status='resolved' (the feedback triage terminal).
+	// Same mechanism and rationale as v12's todo widening: SQLite cannot ALTER a
+	// CHECK and a table rebuild is unsafe inside the migration transaction, so edit
+	// the stored schema text via writable_schema, swapping ONLY the two CHECK
+	// value-lists with replace() to preserve ALTER-appended columns, then RESET so
+	// pooled connections reparse. The `sql NOT LIKE` guards keep it idempotent. This
+	// is NOT a graph migration; the derived graph is left untouched.
+	`
+PRAGMA writable_schema=ON;
+UPDATE sqlite_master
+   SET sql = replace(sql,
+     '''preference'',''learning'',''decision'',''do_not_repeat'',''bug'',''action'',''todo''',
+     '''preference'',''learning'',''decision'',''do_not_repeat'',''bug'',''action'',''todo'',''feedback''')
+ WHERE type='table' AND name='memories' AND sql NOT LIKE '%''feedback''%';
+UPDATE sqlite_master
+   SET sql = replace(sql,
+     '''active'',''superseded'',''archived'',''done''',
+     '''active'',''superseded'',''archived'',''done'',''resolved''')
+ WHERE type='table' AND name='memories' AND sql NOT LIKE '%''resolved''%';
+PRAGMA writable_schema=RESET;
 `,
 }
 
