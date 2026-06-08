@@ -18,18 +18,55 @@ import (
 // resolution is partial.
 func (e *Engine) Resolve(ctx context.Context, worktree string) error {
 	return e.st.WriteTx(ctx, func(c store.Conn) error {
+		// A single-worktree store (the common `recarto index` case) owns every
+		// edge_candidate and call edge, so the clear below can use a table-wide
+		// truncate instead of probing edge_candidates once per call edge — the
+		// per-edge filtered delete cost ~25s on graphql-platform's re-resolve.
+		var hasOthers int
+		if err := c.QueryRowContext(ctx,
+			`SELECT EXISTS(SELECT 1 FROM files WHERE worktree <> ?)`, worktree).Scan(&hasOthers); err != nil {
+			return err
+		}
+		singleWorktree := hasOthers == 0
+
+		// idx_edge_candidates_dst (dst_node_id) exists for cascade-on-node-delete and
+		// the candidate/trace readers, but NO resolve query uses it: the strategies
+		// dedup via the PRIMARY KEY (edge_id, dst_node_id), and S5's NOT EXISTS, the
+		// denormalize, and the clear all key on edge_id. Maintaining it across the
+		// ~900k candidate inserts (and the clear's deletes) is pure overhead, so drop
+		// it for the duration and rebuild it once at the end. The DROP/CREATE live in
+		// this write tx, so WAL readers keep the committed index until COMMIT then see
+		// the rebuilt one; a rolled-back attempt restores it. Incremental resolve
+		// touches few rows and leaves the index in place.
+		if _, err := c.ExecContext(ctx, `DROP INDEX IF EXISTS idx_edge_candidates_dst`); err != nil {
+			return err
+		}
+
 		// Idempotent re-resolve: clear this worktree's call candidates and reset
-		// the call edges' denormalized target before recomputing.
-		if _, err := c.ExecContext(ctx, `
+		// the call edges' denormalized target before recomputing. The
+		// `dst_node_id IS NOT NULL` guard skips rewriting already-NULL rows — every
+		// call edge on a first index — turning a 300k-row no-op UPDATE into nothing.
+		if singleWorktree {
+			if _, err := c.ExecContext(ctx, `DELETE FROM edge_candidates`); err != nil {
+				return err
+			}
+			if _, err := c.ExecContext(ctx,
+				`UPDATE edges SET dst_node_id = NULL WHERE kind = 'calls' AND dst_node_id IS NOT NULL`); err != nil {
+				return err
+			}
+		} else {
+			if _, err := c.ExecContext(ctx, `
 DELETE FROM edge_candidates WHERE edge_id IN (
   SELECT e.id FROM edges e JOIN files f ON f.id = e.file_id
    WHERE f.worktree = ? AND e.kind = 'calls')`, worktree); err != nil {
-			return err
-		}
-		if _, err := c.ExecContext(ctx, `
+				return err
+			}
+			if _, err := c.ExecContext(ctx, `
 UPDATE edges SET dst_node_id = NULL
- WHERE kind = 'calls' AND file_id IN (SELECT id FROM files WHERE worktree = ?)`, worktree); err != nil {
-			return err
+ WHERE kind = 'calls' AND dst_node_id IS NOT NULL
+   AND file_id IN (SELECT id FROM files WHERE worktree = ?)`, worktree); err != nil {
+				return err
+			}
 		}
 
 		// Non-call edges: unchanged name-match resolution.
@@ -37,12 +74,38 @@ UPDATE edges SET dst_node_id = NULL
 			return err
 		}
 
-		// Call edges: candidate strategies, highest-confidence first. OR IGNORE
-		// keeps the first (best) confidence for a given (edge, target) pair.
-		for _, strat := range callStrategies {
-			if _, err := c.ExecContext(ctx, strat, worktree, worktree); err != nil {
-				return err
-			}
+		// The typed-receiver (S2) and interface (S4) strategies share an identical,
+		// expensive prefix: resolving each receiver call's receiver token — via a
+		// type_binding whose scope contains the calling method — to a bound type.
+		// That scope-containment join over every receiver call dominates resolve
+		// (~14s each on graphql-platform), so compute it ONCE into a temp table the
+		// two strategies read, instead of once per strategy. DISTINCT collapses
+		// duplicate (edge,type) rows from overlapping in-scope bindings; the
+		// downstream INSERT OR IGNORE would dedup the resulting candidates anyway,
+		// so the candidate set is byte-for-byte identical.
+		if err := buildReceiverTypes(ctx, c, worktree); err != nil {
+			return err
+		}
+
+		// Call edges: candidate strategies, highest-confidence first. OR IGNORE keeps
+		// the first (best) confidence for a given (edge, target) pair, so the ORDER —
+		// S1 self, S2 typed, S3 static, S4 iface, S5 name — is significant and must be
+		// preserved. S2/S4 read recv_types (one bound arg); the rest scope by
+		// (worktree, worktree).
+		if _, err := c.ExecContext(ctx, stratSelf, worktree, worktree); err != nil {
+			return err
+		}
+		if _, err := c.ExecContext(ctx, stratTypedReceiverShared, worktree); err != nil {
+			return err
+		}
+		if _, err := c.ExecContext(ctx, stratStatic, worktree, worktree); err != nil {
+			return err
+		}
+		if _, err := c.ExecContext(ctx, stratInterfaceShared, worktree); err != nil {
+			return err
+		}
+		if _, err := c.ExecContext(ctx, stratNameFallback, worktree, worktree); err != nil {
+			return err
 		}
 
 		// Denormalize: edges.dst_node_id = best candidate per call edge — highest
@@ -68,6 +131,18 @@ UPDATE edges SET dst_node_id = (
      mf.path, n.start_byte, ec.dst_node_id
    LIMIT 1)
  WHERE kind = 'calls' AND file_id IN (SELECT id FROM files WHERE worktree = ?)`, worktree)
+		if err != nil {
+			return err
+		}
+		// Rebuild the dst_node_id index dropped above, in one bulk pass over the final
+		// candidate set rather than incrementally across every insert.
+		if _, err := c.ExecContext(ctx,
+			`CREATE INDEX IF NOT EXISTS idx_edge_candidates_dst ON edge_candidates(dst_node_id)`); err != nil {
+			return err
+		}
+		// Drop the shared prefix temp table so it does not linger on this pooled
+		// connection after the transaction commits.
+		_, err = c.ExecContext(ctx, `DROP TABLE IF EXISTS recv_types`)
 		return err
 	})
 }
@@ -104,8 +179,42 @@ WHERE dst_node_id IS NULL
 	return err
 }
 
-// callStrategies are INSERT OR IGNORE passes into edge_candidates, applied in
-// priority order (highest confidence first). Each binds (worktree, worktree).
+// buildReceiverTypes (re)creates the recv_types temp table: for every receiver
+// call in the worktree, the bound type(s) of its receiver token, resolved via a
+// type_binding whose scope contains the calling method. This is the shared,
+// dominant-cost prefix of the typed-receiver (S2) and interface (S4) strategies,
+// materialized once so neither recomputes it. DISTINCT collapses duplicate
+// (edge, type) rows that overlapping in-scope bindings would yield — harmless,
+// because both strategies' INSERT OR IGNORE dedups candidates by the
+// (edge_id, dst_node_id) primary key, so the candidate set is unchanged.
+func buildReceiverTypes(ctx context.Context, c store.Conn, worktree string) error {
+	if _, err := c.ExecContext(ctx, `DROP TABLE IF EXISTS recv_types`); err != nil {
+		return err
+	}
+	_, err := c.ExecContext(ctx, `
+CREATE TEMP TABLE recv_types AS
+SELECT DISTINCT ed.id AS edge_id, ed.dst_name AS dst_name,
+       ef.language AS ef_language, tb.type_name AS type_name
+  FROM files ef
+  CROSS JOIN edges ed ON ed.file_id = ef.id
+       AND ed.kind = 'calls' AND ed.dst_recv <> ''
+  CROSS JOIN nodes src ON src.id = ed.src_node_id
+  CROSS JOIN type_bindings tb ON tb.file_id = ed.file_id
+       AND tb.name = ed.dst_recv
+       AND tb.scope_start_byte <= src.start_byte
+       AND src.end_byte <= tb.scope_end_byte
+ WHERE ef.worktree = ?`, worktree)
+	return err
+}
+
+// callStrategies are the canonical INSERT OR IGNORE passes into edge_candidates,
+// applied in priority order (highest confidence first); each binds
+// (worktree, worktree). The full Resolve runs S2/S4 from a shared recv_types prefix
+// instead (stratTypedReceiverShared/stratInterfaceShared) — a whole-worktree
+// optimization — but the INCREMENTAL resolver (resolve_incremental.go) scopes each
+// of these by edge via scopeStrategy, where the per-edge set is tiny and prefix
+// sharing buys nothing, so it keeps driving from (files -> call edges). The two
+// forms are result-identical.
 var callStrategies = []string{
 	stratSelf,
 	stratTypedReceiver,
@@ -136,6 +245,39 @@ SELECT ed.id, m.id, 0.5, 'iface'
   CROSS JOIN nodes m   ON m.id = cm.dst_node_id AND m.kind = 'method' AND m.name = ed.dst_name
   JOIN files mf  ON mf.id = m.file_id
  WHERE ef.worktree = ? AND mf.worktree = ?`
+
+// stratTypedReceiverShared (S2) and stratInterfaceShared (S4) are the full-Resolve
+// forms of the two receiver strategies. They read the recv_types temp table
+// (buildReceiverTypes) — the materialized, deduplicated (edge -> bound type) prefix
+// both otherwise recompute — so the dominant scope-containment join runs once for
+// the whole worktree rather than once per strategy. Each binds a single (worktree)
+// for the target file. Their candidate output is byte-identical to the inline
+// stratTypedReceiver / stratInterface above.
+const stratTypedReceiverShared = `
+INSERT OR IGNORE INTO edge_candidates(edge_id, dst_node_id, confidence, method)
+SELECT rt.edge_id, m.id, 0.9, 'typed'
+  FROM recv_types rt
+  CROSS JOIN nodes m ON m.name = rt.dst_name
+       AND m.parent_name = substr(rt.type_name, length(rtrim(rt.type_name, replace(rt.type_name,'.',''))) + 1)
+       AND m.kind IN ('method','property','constructor','function')
+       AND ( m.qualified_name = rt.type_name || '.' || rt.dst_name
+             OR m.qualified_name LIKE '%.' || rt.type_name || '.' || rt.dst_name )
+  JOIN files mf ON mf.id = m.file_id
+ WHERE mf.worktree = ?
+   AND ( rt.ef_language = mf.language
+         OR ( rt.ef_language IN ('typescript','tsx','javascript')
+              AND mf.language IN ('typescript','tsx','javascript') ) )`
+
+const stratInterfaceShared = `
+INSERT OR IGNORE INTO edge_candidates(edge_id, dst_node_id, confidence, method)
+SELECT rt.edge_id, m.id, 0.5, 'iface'
+  FROM recv_types rt
+  CROSS JOIN nodes iface ON iface.name = rt.type_name AND iface.kind IN ('interface','class')
+  CROSS JOIN edges ext ON ext.kind = 'extends' AND ext.dst_node_id = iface.id
+  CROSS JOIN edges cm  ON cm.kind = 'contains' AND cm.src_node_id = ext.src_node_id
+  CROSS JOIN nodes m   ON m.id = cm.dst_node_id AND m.kind = 'method' AND m.name = rt.dst_name
+  JOIN files mf  ON mf.id = m.file_id
+ WHERE mf.worktree = ?`
 
 // stratStatic (S3): the receiver token is itself a type name T (Foo.Create());
 // bind to T.<method>. Confidence 0.9. A receiver that is a variable (no matching
