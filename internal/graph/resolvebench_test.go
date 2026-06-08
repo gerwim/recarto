@@ -136,17 +136,6 @@ func TestResolveBenchProfile(t *testing.T) {
      f.path, n.start_byte, n.id LIMIT 1)
 WHERE dst_node_id IS NULL AND dst_name <> '' AND kind <> 'calls'
   AND file_id IN (SELECT id FROM files WHERE worktree = ?)`
-	const denorm = `UPDATE edges SET dst_node_id = (
-  SELECT ec.dst_node_id FROM edge_candidates ec
-    JOIN nodes n  ON n.id = ec.dst_node_id
-    JOIN files mf ON mf.id = n.file_id
-    JOIN files ef ON ef.id = edges.file_id
-   WHERE ec.edge_id = edges.id
-   ORDER BY ec.confidence DESC, CASE WHEN mf.id = edges.file_id THEN 0 ELSE 1 END,
-     CASE WHEN substr(mf.path,1,instr(mf.path,'/')) = substr(ef.path,1,instr(ef.path,'/')) THEN 0 ELSE 1 END,
-     mf.path, n.start_byte, ec.dst_node_id LIMIT 1)
- WHERE kind = 'calls' AND file_id IN (SELECT id FROM files WHERE worktree = ?)`
-
 	total := time.Now()
 	if err := e.st.WriteTx(ctx, func(c store.Conn) error {
 		step := func(name string, fn func() (int64, error)) {
@@ -183,8 +172,8 @@ WHERE dst_node_id IS NULL AND dst_name <> '' AND kind <> 'calls'
 		step("S2 typed (shared)", exec(stratTypedReceiverShared, wt))
 		step("S3 static", exec(stratStatic, wt, wt))
 		step("S4 iface (shared)", exec(stratInterfaceShared, wt))
-		step("S5 name", exec(stratNameFallback, wt, wt))
-		step("denormalize", exec(denorm, wt))
+		step("S5 name", func() (int64, error) { return 0, resolveNameFallback(ctx, c, wt) })
+		step("denormalize", func() (int64, error) { return 0, denormalizeBestCandidate(ctx, c, wt) })
 		step("rebuild idx_dst", exec(`CREATE INDEX IF NOT EXISTS idx_edge_candidates_dst ON edge_candidates(dst_node_id)`))
 		step("drop recv_types", exec(`DROP TABLE IF EXISTS recv_types`))
 		return nil

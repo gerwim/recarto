@@ -2,6 +2,9 @@ package graph
 
 import (
 	"context"
+	"database/sql"
+	"sort"
+	"strings"
 
 	"git.gerwim.nl/gerwim/recarto/internal/store"
 )
@@ -104,7 +107,7 @@ UPDATE edges SET dst_node_id = NULL
 		if _, err := c.ExecContext(ctx, stratInterfaceShared, worktree); err != nil {
 			return err
 		}
-		if _, err := c.ExecContext(ctx, stratNameFallback, worktree, worktree); err != nil {
+		if err := resolveNameFallback(ctx, c, worktree); err != nil {
 			return err
 		}
 
@@ -112,26 +115,9 @@ UPDATE edges SET dst_node_id = NULL
 		// confidence, then locality (same-file, then same-top-level-directory),
 		// then a stable id order. Locality is the tiebreak among equal-confidence
 		// candidates (e.g. several S5 name matches), mirroring the non-call
-		// resolver so a sibling call binds to its own file's definition.
-		_, err := c.ExecContext(ctx, `
-UPDATE edges SET dst_node_id = (
-  SELECT ec.dst_node_id FROM edge_candidates ec
-    JOIN nodes n  ON n.id = ec.dst_node_id
-    JOIN files mf ON mf.id = n.file_id
-    JOIN files ef ON ef.id = edges.file_id
-   WHERE ec.edge_id = edges.id
-   ORDER BY ec.confidence DESC,
-     CASE WHEN mf.id = edges.file_id THEN 0 ELSE 1 END,
-     CASE WHEN substr(mf.path,1,instr(mf.path,'/')) = substr(ef.path,1,instr(ef.path,'/'))
-          THEN 0 ELSE 1 END,
-     -- Stable tiebreak (path, then position) so the winner among equal-confidence,
-     -- equal-locality candidates is reproducible across indexes rather than decided
-     -- by a random node id — which made two indexes of the same code disagree and
-     -- defeated incremental-resolve equivalence. The id stays last for a total order.
-     mf.path, n.start_byte, ec.dst_node_id
-   LIMIT 1)
- WHERE kind = 'calls' AND file_id IN (SELECT id FROM files WHERE worktree = ?)`, worktree)
-		if err != nil {
+		// resolver so a sibling call binds to its own file's definition. Computed in
+		// one in-memory pass; relies on the clear above having NULLed every call edge.
+		if err := denormalizeBestCandidate(ctx, c, worktree); err != nil {
 			return err
 		}
 		// Rebuild the dst_node_id index dropped above, in one bulk pass over the final
@@ -142,7 +128,7 @@ UPDATE edges SET dst_node_id = (
 		}
 		// Drop the shared prefix temp table so it does not linger on this pooled
 		// connection after the transaction commits.
-		_, err = c.ExecContext(ctx, `DROP TABLE IF EXISTS recv_types`)
+		_, err := c.ExecContext(ctx, `DROP TABLE IF EXISTS recv_types`)
 		return err
 	})
 }
@@ -187,24 +173,550 @@ WHERE dst_node_id IS NULL
 // (edge, type) rows that overlapping in-scope bindings would yield — harmless,
 // because both strategies' INSERT OR IGNORE dedups candidates by the
 // (edge_id, dst_node_id) primary key, so the candidate set is unchanged.
+//
+// The membership test is an interval-CONTAINMENT join
+// (tb.scope_start_byte <= src.start_byte AND src.end_byte <= tb.scope_end_byte),
+// which SQLite cannot index: a hot (file, receiver-name) bucket holds thousands
+// of bindings, so the per-call seek scans the whole bucket and the SQL form cost
+// ~18s on graphql-platform — the single largest resolve step. Computing it in Go
+// over in-memory maps (the whole graph fits in RAM) collapses that to ~1s: bucket
+// the bindings by (file_id, name) once, then test each receiver call against only
+// its own bucket. The materialized rows are identical, so S2/S4 (still SQL, still
+// reading recv_types) emit a byte-for-byte identical candidate set.
 func buildReceiverTypes(ctx context.Context, c store.Conn, worktree string) error {
 	if _, err := c.ExecContext(ctx, `DROP TABLE IF EXISTS recv_types`); err != nil {
 		return err
 	}
-	_, err := c.ExecContext(ctx, `
-CREATE TEMP TABLE recv_types AS
-SELECT DISTINCT ed.id AS edge_id, ed.dst_name AS dst_name,
-       ef.language AS ef_language, tb.type_name AS type_name
-  FROM files ef
-  CROSS JOIN edges ed ON ed.file_id = ef.id
-       AND ed.kind = 'calls' AND ed.dst_recv <> ''
-  CROSS JOIN nodes src ON src.id = ed.src_node_id
-  CROSS JOIN type_bindings tb ON tb.file_id = ed.file_id
-       AND tb.name = ed.dst_recv
-       AND tb.scope_start_byte <= src.start_byte
-       AND src.end_byte <= tb.scope_end_byte
- WHERE ef.worktree = ?`, worktree)
+	// Explicit TEXT columns matching the affinities the old CREATE ... AS SELECT
+	// inferred (edges.id, edges.dst_name, files.language, type_bindings.type_name),
+	// so the downstream joins on rt.* behave identically.
+	if _, err := c.ExecContext(ctx, `CREATE TEMP TABLE recv_types (
+  edge_id     TEXT,
+  dst_name    TEXT,
+  ef_language TEXT,
+  type_name   TEXT)`); err != nil {
+		return err
+	}
+
+	// Load the worktree slice of the graph into memory. The single write
+	// connection cannot hold an open cursor while inserting, so every result set
+	// is fully drained and closed before the next query or the insert loop runs.
+
+	// file_id -> language (worktree files only); also the worktree file set.
+	fileLang := map[string]string{}
+	if err := scan(ctx, c, `SELECT id, language FROM files WHERE worktree = ?`,
+		func(rows *sql.Rows) error {
+			var id, lang string
+			if err := rows.Scan(&id, &lang); err != nil {
+				return err
+			}
+			fileLang[id] = lang
+			return nil
+		}, worktree); err != nil {
+		return err
+	}
+
+	// node id -> [start_byte, end_byte], to test scope containment of the caller.
+	type span struct{ start, end int64 }
+	nodeSpan := make(map[string]span, 1<<17)
+	if err := scan(ctx, c, `SELECT id, start_byte, end_byte FROM nodes`,
+		func(rows *sql.Rows) error {
+			var id string
+			var s span
+			if err := rows.Scan(&id, &s.start, &s.end); err != nil {
+				return err
+			}
+			nodeSpan[id] = s
+			return nil
+		}); err != nil {
+		return err
+	}
+
+	// (file_id, receiver name) -> bindings in the worktree.
+	type binding struct {
+		typeName   string
+		start, end int64
+	}
+	type fileName struct{ file, name string }
+	bindings := map[fileName][]binding{}
+	if err := scan(ctx, c, `
+SELECT tb.file_id, tb.name, tb.type_name, tb.scope_start_byte, tb.scope_end_byte
+  FROM type_bindings tb JOIN files f ON f.id = tb.file_id
+ WHERE f.worktree = ?`,
+		func(rows *sql.Rows) error {
+			var k fileName
+			var b binding
+			if err := rows.Scan(&k.file, &k.name, &b.typeName, &b.start, &b.end); err != nil {
+				return err
+			}
+			bindings[k] = append(bindings[k], b)
+			return nil
+		}, worktree); err != nil {
+		return err
+	}
+
+	// Receiver call edges in the worktree, materialized so the cursor is closed
+	// before inserting (one connection cannot read and write concurrently).
+	type recvEdge struct {
+		id, dstName, dstRecv, fileID string
+		src                          sql.NullString
+	}
+	var edges []recvEdge
+	if err := scan(ctx, c, `
+SELECT ed.id, ed.src_node_id, ed.dst_name, ed.dst_recv, ed.file_id
+  FROM edges ed JOIN files f ON f.id = ed.file_id
+ WHERE f.worktree = ? AND ed.kind = 'calls' AND ed.dst_recv <> ''`,
+		func(rows *sql.Rows) error {
+			var e recvEdge
+			if err := rows.Scan(&e.id, &e.src, &e.dstName, &e.dstRecv, &e.fileID); err != nil {
+				return err
+			}
+			edges = append(edges, e)
+			return nil
+		}, worktree); err != nil {
+		return err
+	}
+
+	stmt, err := c.PrepareContext(ctx,
+		`INSERT INTO recv_types(edge_id, dst_name, ef_language, type_name) VALUES (?,?,?,?)`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+
+	seen := map[string]struct{}{} // DISTINCT type per edge; reused across edges
+	for i := range edges {
+		e := &edges[i]
+		if !e.src.Valid {
+			continue // file-scope call: no enclosing definition to scope-test
+		}
+		sp, ok := nodeSpan[e.src.String]
+		if !ok {
+			continue
+		}
+		bs := bindings[fileName{e.fileID, e.dstRecv}]
+		if len(bs) == 0 {
+			continue
+		}
+		lang := fileLang[e.fileID]
+		for k := range seen {
+			delete(seen, k)
+		}
+		for _, b := range bs {
+			if b.start <= sp.start && sp.end <= b.end {
+				if _, dup := seen[b.typeName]; dup {
+					continue
+				}
+				seen[b.typeName] = struct{}{}
+				if _, err := stmt.ExecContext(ctx, e.id, e.dstName, lang, b.typeName); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// scan runs query and invokes fn for each row, draining and closing the cursor
+// before returning — the pattern the single write connection requires (it cannot
+// hold an open Rows while a later query or insert runs on the same connection).
+func scan(ctx context.Context, c store.Conn, query string, fn func(*sql.Rows) error, args ...any) error {
+	rows, err := c.QueryContext(ctx, query, args...)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		if err := fn(rows); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
+}
+
+// resolveNameFallback is the Go form of stratNameFallback (S5): for every call
+// edge that no higher-confidence strategy matched, bind it to same-name callables
+// in the language family, capped at 10 per edge in locality order, with a
+// confidence that reflects ambiguity (a unique match is 0.45, several are 0.2).
+//
+// It is the name-only fallback and by far the largest candidate producer, so the
+// SQL form's PARTITION-BY window sort over ~786k rows was the largest resolve step
+// (~19-23s). Computing it over in-memory maps — same global hyper-common-name skip,
+// same language family, same per-edge locality order and 10-cap — emits a
+// byte-identical candidate set far faster; the floor becomes the unavoidable
+// ~786k-row insert. Must run after S1-S4 (it reads their candidates to skip edges
+// already resolved) and before the denormalize.
+func resolveNameFallback(ctx context.Context, c store.Conn, worktree string) error {
+	// Names shared by more than 50 callables anywhere in the store are skipped: a
+	// name-only match on them is pure noise, and their full (edge x same-name)
+	// product is what made the SQL form blow up. The SQL counts globally (no
+	// worktree filter), so this must too.
+	common := map[string]struct{}{}
+	if err := scan(ctx, c, `
+SELECT name FROM nodes
+ WHERE kind IN ('method','property','constructor','function')
+ GROUP BY name HAVING COUNT(*) > 50`,
+		func(rows *sql.Rows) error {
+			var n string
+			if err := rows.Scan(&n); err != nil {
+				return err
+			}
+			common[n] = struct{}{}
+			return nil
+		}); err != nil {
+		return err
+	}
+
+	// Edges already carrying a candidate (resolved by S1-S4) are excluded — S5 is
+	// the fallback only where nothing better matched (the SQL's NOT EXISTS).
+	resolved := map[string]struct{}{}
+	if err := scan(ctx, c, `SELECT DISTINCT edge_id FROM edge_candidates`,
+		func(rows *sql.Rows) error {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				return err
+			}
+			resolved[id] = struct{}{}
+			return nil
+		}); err != nil {
+		return err
+	}
+
+	// Worktree files: path + language for the locality and language-family tests.
+	type fileInfo struct{ path, lang string }
+	files := map[string]fileInfo{}
+	if err := scan(ctx, c, `SELECT id, path, language FROM files WHERE worktree = ?`,
+		func(rows *sql.Rows) error {
+			var id string
+			var fi fileInfo
+			if err := rows.Scan(&id, &fi.path, &fi.lang); err != nil {
+				return err
+			}
+			files[id] = fi
+			return nil
+		}, worktree); err != nil {
+		return err
+	}
+
+	// Callable nodes in the worktree, indexed by name (the S5 match target set;
+	// the SQL requires mf.worktree = worktree, satisfied by the join filter here).
+	type matchNode struct {
+		id, fileID string
+		start      int64
+	}
+	byName := map[string][]matchNode{}
+	if err := scan(ctx, c, `
+SELECT n.id, n.name, n.file_id, n.start_byte
+  FROM nodes n JOIN files f ON f.id = n.file_id
+ WHERE f.worktree = ?
+   AND n.kind IN ('method','property','constructor','function')`,
+		func(rows *sql.Rows) error {
+			var name string
+			var m matchNode
+			if err := rows.Scan(&m.id, &name, &m.fileID, &m.start); err != nil {
+				return err
+			}
+			byName[name] = append(byName[name], m)
+			return nil
+		}, worktree); err != nil {
+		return err
+	}
+
+	// Eligible call edges, materialized so the cursor is closed before inserting
+	// (one connection cannot read and write concurrently).
+	type callEdge struct{ id, dstName, fileID string }
+	var calls []callEdge
+	if err := scan(ctx, c, `
+SELECT ed.id, ed.dst_name, ed.file_id
+  FROM edges ed JOIN files f ON f.id = ed.file_id
+ WHERE f.worktree = ? AND ed.kind = 'calls' AND ed.dst_name <> ''`,
+		func(rows *sql.Rows) error {
+			var e callEdge
+			if err := rows.Scan(&e.id, &e.dstName, &e.fileID); err != nil {
+				return err
+			}
+			calls = append(calls, e)
+			return nil
+		}, worktree); err != nil {
+		return err
+	}
+
+	stmt, err := c.PrepareContext(ctx,
+		`INSERT OR IGNORE INTO edge_candidates(edge_id, dst_node_id, confidence, method) VALUES (?,?,?,'name')`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+
+	// ranked is a candidate match with its locality keys precomputed relative to
+	// the calling edge, ready for the S5 ordering.
+	type ranked struct {
+		id                string
+		sameFile, sameDir bool
+		path              string
+		start             int64
+	}
+	var cand []ranked
+	for i := range calls {
+		e := &calls[i]
+		if _, skip := common[e.dstName]; skip {
+			continue
+		}
+		if _, done := resolved[e.id]; done {
+			continue
+		}
+		ef := files[e.fileID]
+		efTop := topDir(ef.path)
+		cand = cand[:0]
+		for _, m := range byName[e.dstName] {
+			mf := files[m.fileID]
+			if !sameLangFamily(ef.lang, mf.lang) {
+				continue
+			}
+			cand = append(cand, ranked{
+				id:       m.id,
+				sameFile: m.fileID == e.fileID,
+				sameDir:  topDir(mf.path) == efTop,
+				path:     mf.path,
+				start:    m.start,
+			})
+		}
+		if len(cand) == 0 {
+			continue
+		}
+		// Confidence keys on the FULL match count (uncapped), mirroring the SQL's
+		// COUNT(*) OVER (PARTITION BY edge) — only the emitted rows are capped at 10.
+		conf := 0.2
+		if len(cand) == 1 {
+			conf = 0.45
+		}
+		sort.Slice(cand, func(a, b int) bool {
+			x, y := cand[a], cand[b]
+			if x.sameFile != y.sameFile {
+				return x.sameFile // same-file (rank 0) sorts first
+			}
+			if x.sameDir != y.sameDir {
+				return x.sameDir // same-top-dir next
+			}
+			if x.path != y.path {
+				return x.path < y.path
+			}
+			if x.start != y.start {
+				return x.start < y.start
+			}
+			return x.id < y.id // unique id: a total, reproducible order
+		})
+		n := min(len(cand), 10)
+		for _, r := range cand[:n] {
+			if _, err := stmt.ExecContext(ctx, e.id, r.id, conf); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// denormalizeBestCandidate sets edges.dst_node_id to the single best candidate
+// per call edge — the Go form of the final UPDATE ... (SELECT ... ORDER BY ...
+// LIMIT 1). The SQL ran one correlated subquery, each with its own ORDER BY sort,
+// for all ~300k worktree call edges (~10s); a single in-memory pass over the
+// candidate set picks each edge's winner by the identical key
+// (confidence DESC, same-file, same-top-dir, mf.path, dst start_byte, dst id) and
+// writes only the resolved edges.
+//
+// It relies on the preceding clear having reset every worktree call edge's
+// dst_node_id to NULL (Resolve always clears first): edges with no candidate keep
+// that NULL, so only the resolved edges need writing — fewer updates than the SQL,
+// same result. Candidate dst nodes and their files may live in any worktree (the
+// SQL's mf join is unfiltered), so all nodes/files are loaded, not just the
+// worktree slice.
+func denormalizeBestCandidate(ctx context.Context, c store.Conn, worktree string) error {
+	// file id -> path (all worktrees: a candidate's target file is unfiltered).
+	filePath := map[string]string{}
+	if err := scan(ctx, c, `SELECT id, path FROM files`,
+		func(rows *sql.Rows) error {
+			var id, p string
+			if err := rows.Scan(&id, &p); err != nil {
+				return err
+			}
+			filePath[id] = p
+			return nil
+		}); err != nil {
+		return err
+	}
+
+	// node id -> (file id, start_byte), for the target node's locality keys.
+	type nodeLoc struct {
+		fileID string
+		start  int64
+	}
+	nodes := make(map[string]nodeLoc, 1<<17)
+	if err := scan(ctx, c, `SELECT id, file_id, start_byte FROM nodes`,
+		func(rows *sql.Rows) error {
+			var id string
+			var n nodeLoc
+			if err := rows.Scan(&id, &n.fileID, &n.start); err != nil {
+				return err
+			}
+			nodes[id] = n
+			return nil
+		}); err != nil {
+		return err
+	}
+
+	// Worktree call edges -> their file id and top-level dir (the ef side of the
+	// locality comparison). Only these edges are candidates for an update.
+	type edgeLoc struct {
+		fileID string
+		top    string
+	}
+	edges := map[string]edgeLoc{}
+	if err := scan(ctx, c, `
+SELECT ed.id, ed.file_id
+  FROM edges ed JOIN files f ON f.id = ed.file_id
+ WHERE f.worktree = ? AND ed.kind = 'calls'`,
+		func(rows *sql.Rows) error {
+			var id, fileID string
+			if err := rows.Scan(&id, &fileID); err != nil {
+				return err
+			}
+			edges[id] = edgeLoc{fileID: fileID, top: topDir(filePath[fileID])}
+			return nil
+		}, worktree); err != nil {
+		return err
+	}
+
+	// winners holds the running best candidate per edge; a candidate replaces the
+	// incumbent when it ranks strictly higher under the denormalize order.
+	winners := make(map[string]denormWinner, len(edges))
+	if err := scan(ctx, c, `SELECT edge_id, dst_node_id, confidence FROM edge_candidates`,
+		func(rows *sql.Rows) error {
+			var edgeID, dstID string
+			var conf float64
+			if err := rows.Scan(&edgeID, &dstID, &conf); err != nil {
+				return err
+			}
+			el, ok := edges[edgeID]
+			if !ok {
+				return nil // candidate for a call edge outside this worktree
+			}
+			n, ok := nodes[dstID]
+			if !ok {
+				return nil
+			}
+			mfPath := filePath[n.fileID]
+			cand := denormWinner{
+				dstID:    dstID,
+				conf:     conf,
+				sameFile: n.fileID == el.fileID,
+				sameDir:  topDir(mfPath) == el.top,
+				path:     mfPath,
+				start:    n.start,
+			}
+			cur, seen := winners[edgeID]
+			if !seen || betterCandidate(cand, cur) {
+				winners[edgeID] = cand
+			}
+			return nil
+		}); err != nil {
+		return err
+	}
+
+	// Stage the winners in a temp table, then apply them with one bulk UPDATE.
+	// ~190k individual UPDATE round-trips proved slower than the original single
+	// SQL statement; a temp table + one set-based UPDATE keeps the in-memory pick
+	// while letting SQLite do the write in a single pass. Insert in edge-id order
+	// so the temp PK fills sequentially instead of churning random-UUID pages.
+	if _, err := c.ExecContext(ctx, `DROP TABLE IF EXISTS denorm_best`); err != nil {
+		return err
+	}
+	if _, err := c.ExecContext(ctx, `CREATE TEMP TABLE denorm_best (
+  edge_id     TEXT PRIMARY KEY,
+  dst_node_id TEXT NOT NULL)`); err != nil {
+		return err
+	}
+	ids := make([]string, 0, len(winners))
+	for edgeID := range winners {
+		ids = append(ids, edgeID)
+	}
+	sort.Strings(ids)
+	stmt, err := c.PrepareContext(ctx, `INSERT INTO denorm_best(edge_id, dst_node_id) VALUES (?,?)`)
+	if err != nil {
+		return err
+	}
+	for _, edgeID := range ids {
+		if _, err := stmt.ExecContext(ctx, edgeID, winners[edgeID].dstID); err != nil {
+			stmt.Close()
+			return err
+		}
+	}
+	stmt.Close()
+	if _, err := c.ExecContext(ctx, `
+UPDATE edges SET dst_node_id = (SELECT b.dst_node_id FROM denorm_best b WHERE b.edge_id = edges.id)
+ WHERE id IN (SELECT edge_id FROM denorm_best)`); err != nil {
+		return err
+	}
+	_, err = c.ExecContext(ctx, `DROP TABLE IF EXISTS denorm_best`)
 	return err
+}
+
+// denormWinner is a call edge's best candidate so far, with the locality keys
+// precomputed relative to that edge for the denormalize ordering.
+type denormWinner struct {
+	dstID             string
+	conf              float64
+	sameFile, sameDir bool
+	path              string
+	start             int64
+}
+
+// betterCandidate reports whether a outranks b under the denormalize order:
+// higher confidence, then same-file, then same-top-dir, then path / start_byte /
+// id ascending — the stable total order the SQL ORDER BY ... LIMIT 1 applied so a
+// re-index of unchanged code picks the same winner every time.
+func betterCandidate(a, b denormWinner) bool {
+	if a.conf != b.conf {
+		return a.conf > b.conf
+	}
+	if a.sameFile != b.sameFile {
+		return a.sameFile
+	}
+	if a.sameDir != b.sameDir {
+		return a.sameDir
+	}
+	if a.path != b.path {
+		return a.path < b.path
+	}
+	if a.start != b.start {
+		return a.start < b.start
+	}
+	return a.dstID < b.dstID
+}
+
+// topDir returns the leading path segment up to and including the first '/', or
+// "" for a root-level path — matching the SQL substr(path,1,instr(path,'/')) used
+// for the "same top-level directory" locality tiebreak (two root-level files both
+// yield "" and so compare equal, the intended same-directory semantics).
+func topDir(p string) string {
+	if i := strings.IndexByte(p, '/'); i >= 0 {
+		return p[:i+1]
+	}
+	return ""
+}
+
+// sameLangFamily reports whether two file languages resolve within the same
+// family: an exact match, or both within the web family {typescript,tsx,javascript}
+// — the same scoping the SQL strategies apply so a C# match never binds to a
+// React symbol of the same name.
+func sameLangFamily(a, b string) bool {
+	if a == b {
+		return true
+	}
+	return isWebLang(a) && isWebLang(b)
+}
+
+func isWebLang(l string) bool {
+	return l == "typescript" || l == "tsx" || l == "javascript"
 }
 
 // callStrategies are the canonical INSERT OR IGNORE passes into edge_candidates,
