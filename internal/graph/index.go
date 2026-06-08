@@ -25,6 +25,7 @@ func (e *Engine) IndexFile(ctx context.Context, worktree, path string, src []byt
 	if err != nil {
 		return err
 	}
+	g := buildFileGraph(src, res)
 	hash := sha256hex(src)
 	now := e.clk.Now().UnixMilli()
 	return e.st.WriteTx(ctx, func(c store.Conn) error {
@@ -33,7 +34,7 @@ func (e *Engine) IndexFile(ctx context.Context, worktree, path string, src []byt
 			return err
 		}
 		defer st.Close()
-		return e.writeFileGraph(ctx, c, st, worktree, path, lang, src, res, hash, mtime, size, now)
+		return e.writeFileGraph(ctx, c, st, worktree, path, lang, g, hash, mtime, size, now)
 	})
 }
 
@@ -111,8 +112,158 @@ func signatureOf(src []byte, start uint, max int) string {
 	return s
 }
 
+// fileGraph is a file's fully-built graph rows, ready for insertion. Every value
+// EXCEPT each row's file_id (assigned at write time from the files-row upsert) is
+// computed by buildFileGraph, so the expensive construction — qualified names,
+// FTS text, signatures, and the O(n) byte-span containment lookups — runs in the
+// parallel parse workers instead of on the single serial writer. Node ids and the
+// internal references between rows (edge src, contains parent/child) are
+// worker-generated and independent of file_id.
+type fileGraph struct {
+	nodes    []nodeRow
+	edges    []edgeRow
+	bindings []bindingRow
+	contains []containsRow
+}
+
+type nodeRow struct {
+	id, kind, name, qn, parentName, signature string
+	startByte, endByte, startLine, endLine    int64
+	ftsName, ftsQN, ftsTri                    string
+}
+
+type edgeRow struct {
+	id                  string
+	src                 any // node id, or nil for a file-scope reference
+	dstName, recv, kind string
+	line                int64
+}
+
+type bindingRow struct {
+	id, name, typeName   string
+	scopeStart, scopeEnd int64
+}
+
+type containsRow struct {
+	id, parentID, childID string
+	line                  int64
+}
+
+// buildFileGraph turns a parsed file into its insertable graph rows. It is pure
+// (no DB, no shared state beyond ids.New) so it can run concurrently across the
+// parse worker pool; the serial writer (writeFileGraph) then only binds and
+// inserts. The computation mirrors the former in-writer logic exactly, so the
+// stored graph is byte-identical modulo the (always-random) UUIDv7 ids.
+func buildFileGraph(src []byte, res parse.Result) fileGraph {
+	// Pass 1: assign ids and byte spans (in lockstep with res.Symbols) so a
+	// symbol's qualified name can be derived from the full structural context of
+	// the file before any row is built.
+	spans := make([]span, len(res.Symbols))
+	for i, s := range res.Symbols {
+		spans[i] = span{id: ids.New(), start: s.StartByte, end: s.EndByte}
+	}
+
+	// Precompute, once for the file, each node's innermost structural parent and
+	// the namespace nodes. qualifiedName and the contains edges both need these;
+	// deriving them per symbol meant rescanning every span per symbol — O(n^2) that
+	// pinned one worker for seconds on huge generated files (20k+ symbols).
+	parentIdx := make([]int, len(spans))
+	var nsIdx []int
+	for i := range spans {
+		parentIdx[i] = innermostContainerIdx(spans, i)
+		if res.Symbols[i].Kind == "namespace" {
+			nsIdx = append(nsIdx, i)
+		}
+	}
+
+	g := fileGraph{
+		nodes:    make([]nodeRow, 0, len(res.Symbols)),
+		edges:    make([]edgeRow, 0, len(res.Edges)),
+		bindings: make([]bindingRow, 0, len(res.Bindings)),
+		contains: make([]containsRow, 0, len(res.Symbols)),
+	}
+
+	// Pass 2: nodes with structural qualified names + FTS content.
+	for i, s := range res.Symbols {
+		qn := qualifiedName(spans, res.Symbols, parentIdx, nsIdx, i)
+		// Go methods are siblings of their type (not nested), so structural
+		// containment yields a bare name; prepend the captured receiver type.
+		if s.RecvType != "" && !strings.Contains(qn, ".") {
+			qn = s.RecvType + "." + s.Name
+		}
+		// Store identifier-split components alongside the raw name so a query for
+		// a single component word ("Renderer") matches a PascalCase symbol
+		// ("MessageRenderer"); the default unicode61 tokenizer cannot split
+		// camelCase on its own. The dotted qualified name also feeds the FTS so a
+		// namespace/class word ("Domain") surfaces its members.
+		// Primary exact index (unicode61) + the porter-stemmed broadener share the
+		// same identifier-split content; the trigram broadener stores the raw name +
+		// qualified name for substring matching.
+		ftsName, ftsQN := ftsText(s.Name), ftsText(qn)
+		g.nodes = append(g.nodes, nodeRow{
+			id: spans[i].id, kind: s.Kind, name: s.Name, qn: qn, parentName: parentSegment(qn),
+			signature: signatureOf(src, s.StartByte, 200),
+			startByte: int64(s.StartByte), endByte: int64(s.EndByte),
+			startLine: int64(s.StartLine), endLine: int64(s.EndLine),
+			ftsName: ftsName, ftsQN: ftsQN, ftsTri: s.Name + " " + qn,
+		})
+	}
+
+	// Edges, attributed to the innermost enclosing node.
+	for _, ed := range res.Edges {
+		g.edges = append(g.edges, edgeRow{
+			id: ids.New(), src: nullStr(enclosing(spans, ed.StartByte)),
+			dstName: ed.DstName, recv: ed.Recv, kind: ed.Kind, line: int64(ed.Line),
+		})
+	}
+
+	// Type bindings: scope each to its innermost enclosing definition's byte span
+	// (class body for fields, method body for params/locals/receiver vars). A
+	// binding at file scope (no enclosing def) covers up to the last node end.
+	var maxEnd uint
+	for _, sp := range spans {
+		if sp.end > maxEnd {
+			maxEnd = sp.end
+		}
+	}
+	for _, b := range res.Bindings {
+		scStart, scEnd := uint(0), maxEnd
+		if encID := enclosing(spans, b.StartByte); encID != "" {
+			for _, sp := range spans {
+				if sp.id == encID {
+					scStart, scEnd = sp.start, sp.end
+					break
+				}
+			}
+		}
+		g.bindings = append(g.bindings, bindingRow{
+			id: ids.New(), name: b.Name, typeName: b.TypeName,
+			scopeStart: int64(scStart), scopeEnd: int64(scEnd),
+		})
+	}
+
+	// Structural containment edges: each symbol nested inside another emits a
+	// `contains` edge (parent -> child). Both endpoints are nodes in this same
+	// file, so they are linked directly by id (no name resolution). spans is in
+	// lockstep with res.Symbols, so spans[i] corresponds to res.Symbols[i].
+	for i, child := range spans {
+		p := parentIdx[i]
+		if p < 0 {
+			continue
+		}
+		g.contains = append(g.contains, containsRow{
+			id: ids.New(), parentID: spans[p].id, childID: child.id, line: int64(res.Symbols[i].StartLine),
+		})
+	}
+	return g
+}
+
+// writeFileGraph upserts the files row and inserts the pre-built graph g for it.
+// It runs on the single serial writer and does only the upsert and the prepared
+// INSERTs — all per-row computation already happened in buildFileGraph — so the
+// writer is no longer the place the index spends CPU.
 func (e *Engine) writeFileGraph(ctx context.Context, c store.Conn, st *writeStmts, worktree, path, lang string,
-	src []byte, res parse.Result, hash string, mtime, size, now int64) error {
+	g fileGraph, hash string, mtime, size, now int64) error {
 	// Upsert the files row and obtain its id.
 	var fileID string
 	err := c.QueryRowContext(ctx,
@@ -158,93 +309,41 @@ func (e *Engine) writeFileGraph(ctx context.Context, c store.Conn, st *writeStmt
 		}
 	}
 
-	// Pass 1: assign ids and byte spans (in lockstep with res.Symbols) so a
-	// symbol's qualified name can be derived from the full structural context of
-	// the file before any row is written.
-	spans := make([]span, len(res.Symbols))
-	for i, s := range res.Symbols {
-		spans[i] = span{id: ids.New(), start: s.StartByte, end: s.EndByte}
-	}
-	// Pass 2: insert nodes with structural qualified names + FTS content.
-	for i, s := range res.Symbols {
-		qn := qualifiedName(spans, res.Symbols, i)
-		// Go methods are siblings of their type (not nested), so structural
-		// containment yields a bare name; prepend the captured receiver type.
-		if s.RecvType != "" && !strings.Contains(qn, ".") {
-			qn = s.RecvType + "." + s.Name
-		}
+	for i := range g.nodes {
+		n := &g.nodes[i]
 		if _, err := st.node.ExecContext(ctx,
-			spans[i].id, fileID, s.Kind, s.Name, qn, parentSegment(qn),
-			signatureOf(src, s.StartByte, 200),
-			int64(s.StartByte), int64(s.EndByte), int64(s.StartLine), int64(s.EndLine)); err != nil {
+			n.id, fileID, n.kind, n.name, n.qn, n.parentName, n.signature,
+			n.startByte, n.endByte, n.startLine, n.endLine); err != nil {
 			return err
 		}
-		// Store identifier-split components alongside the raw name so a query for
-		// a single component word ("Renderer") matches a PascalCase symbol
-		// ("MessageRenderer"); the default unicode61 tokenizer cannot split
-		// camelCase on its own. The dotted qualified name also feeds the FTS so a
-		// namespace/class word ("Domain") surfaces its members.
-		// Primary exact index (unicode61) + the porter-stemmed broadener share the
-		// same identifier-split content; the trigram broadener stores the raw name +
-		// qualified name for substring matching.
-		ftsName, ftsQN := ftsText(s.Name), ftsText(qn)
-		if _, err := st.fts.ExecContext(ctx, spans[i].id, ftsName, ftsQN); err != nil {
+		if _, err := st.fts.ExecContext(ctx, n.id, n.ftsName, n.ftsQN); err != nil {
 			return err
 		}
-		if _, err := st.ftsStem.ExecContext(ctx, spans[i].id, ftsName, ftsQN); err != nil {
+		if _, err := st.ftsStem.ExecContext(ctx, n.id, n.ftsName, n.ftsQN); err != nil {
 			return err
 		}
-		if _, err := st.ftsTri.ExecContext(ctx, spans[i].id, s.Name+" "+qn); err != nil {
+		if _, err := st.ftsTri.ExecContext(ctx, n.id, n.ftsTri); err != nil {
 			return err
 		}
 	}
-
-	// Insert edges, attributing each to the innermost enclosing node.
-	for _, ed := range res.Edges {
+	for i := range g.edges {
+		ed := &g.edges[i]
 		if _, err := st.edge.ExecContext(ctx,
-			ids.New(), nullStr(enclosing(spans, ed.StartByte)), nil, ed.DstName, ed.Recv, ed.Kind,
-			fileID, int64(ed.Line)); err != nil {
+			ed.id, ed.src, nil, ed.dstName, ed.recv, ed.kind, fileID, ed.line); err != nil {
 			return err
 		}
 	}
-
-	// Type bindings: scope each to its innermost enclosing definition's byte span
-	// (class body for fields, method body for params/locals/receiver vars). A
-	// binding at file scope (no enclosing def) covers up to the last node end.
-	var maxEnd uint
-	for _, sp := range spans {
-		if sp.end > maxEnd {
-			maxEnd = sp.end
-		}
-	}
-	for _, b := range res.Bindings {
-		scStart, scEnd := uint(0), maxEnd
-		if encID := enclosing(spans, b.StartByte); encID != "" {
-			for _, sp := range spans {
-				if sp.id == encID {
-					scStart, scEnd = sp.start, sp.end
-					break
-				}
-			}
-		}
+	for i := range g.bindings {
+		b := &g.bindings[i]
 		if _, err := st.binding.ExecContext(ctx,
-			ids.New(), fileID, b.Name, b.TypeName, int64(scStart), int64(scEnd)); err != nil {
+			b.id, fileID, b.name, b.typeName, b.scopeStart, b.scopeEnd); err != nil {
 			return err
 		}
 	}
-
-	// Structural containment edges: each symbol nested inside another emits a
-	// `contains` edge (parent -> child). Both endpoints are nodes in this same
-	// file, so they are linked directly by id (no name resolution). spans is in
-	// lockstep with res.Symbols, so spans[i] corresponds to res.Symbols[i].
-	for i, child := range spans {
-		pid := containingParent(spans, child)
-		if pid == "" {
-			continue
-		}
+	for i := range g.contains {
+		cn := &g.contains[i]
 		if _, err := st.contains.ExecContext(ctx,
-			ids.New(), pid, child.id, "", "contains",
-			fileID, int64(res.Symbols[i].StartLine)); err != nil {
+			cn.id, cn.parentID, cn.childID, "", "contains", fileID, cn.line); err != nil {
 			return err
 		}
 	}
@@ -257,7 +356,10 @@ func (e *Engine) writeFileGraph(ctx context.Context, c store.Conn, st *writeStmt
 // without enclosing them), then the chain of enclosing definitions (block
 // namespaces, classes) found by byte containment, then the symbol's own name.
 // spans is in lockstep with syms (spans[i] is syms[i]).
-func qualifiedName(spans []span, syms []parse.Symbol, i int) string {
+// parentIdx[k] is spans[k]'s innermost container index (or -1) and nsIdx lists the
+// namespace symbols' indices; both are precomputed once per file by buildFileGraph
+// so this stays O(namespaces + depth) per symbol instead of rescanning all spans.
+func qualifiedName(spans []span, syms []parse.Symbol, parentIdx, nsIdx []int, i int) string {
 	self := spans[i]
 	contains := func(outer, inner span) bool {
 		return outer.start <= inner.start && inner.end <= outer.end
@@ -270,8 +372,8 @@ func qualifiedName(spans []span, syms []parse.Symbol, i int) string {
 		name  string
 	}
 	var prefixes []pre
-	for j := range spans {
-		if j == i || syms[j].Kind != "namespace" {
+	for _, j := range nsIdx {
+		if j == i {
 			continue
 		}
 		if spans[j].start <= self.start && !contains(spans[j], self) {
@@ -279,23 +381,18 @@ func qualifiedName(spans []span, syms []parse.Symbol, i int) string {
 		}
 	}
 	sort.Slice(prefixes, func(a, b int) bool { return prefixes[a].start < prefixes[b].start })
-	// Enclosing definitions, innermost first via the containment tree.
+	// Enclosing definitions, innermost first via the precomputed containment tree.
 	var anc []string
-	cur := self
-	seen := map[string]bool{self.id: true}
+	cur := i
+	seen := map[int]bool{i: true}
 	for {
-		pid := containingParent(spans, cur)
-		if pid == "" || seen[pid] {
+		p := parentIdx[cur]
+		if p < 0 || seen[p] {
 			break
 		}
-		seen[pid] = true
-		for k := range spans {
-			if spans[k].id == pid {
-				anc = append(anc, syms[k].Name)
-				cur = spans[k]
-				break
-			}
-		}
+		seen[p] = true
+		anc = append(anc, syms[p].Name)
+		cur = p
 	}
 	parts := make([]string, 0, len(prefixes)+len(anc)+1)
 	for _, p := range prefixes {

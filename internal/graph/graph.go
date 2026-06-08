@@ -63,20 +63,25 @@ func enclosing(spans []span, b uint) string {
 	return best
 }
 
-// containingParent returns the id of the innermost span (other than child
-// itself) whose byte range fully contains child's range, or "". It gives child
-// its single direct structural parent: a method's parent is its class, the
-// class's parent its namespace, and so on — building a containment tree.
-func containingParent(spans []span, child span) string {
-	best := ""
+// innermostContainerIdx returns the index of the innermost span (other than
+// spans[i] itself) whose byte range fully contains spans[i]'s range, or -1. It
+// gives a node its single direct structural parent: a method's parent is its
+// class, the class's parent its namespace, and so on — building a containment
+// tree. Precomputing this once per file (rather than re-deriving it per symbol
+// inside qualifiedName) is what keeps the index near-linear on huge generated
+// files; the innermost/first-on-tie rule is unchanged.
+func innermostContainerIdx(spans []span, i int) int {
+	child := spans[i]
+	best := -1
 	var bestLen uint
-	for _, s := range spans {
-		if s.id == child.id {
+	for j := range spans {
+		if j == i {
 			continue
 		}
+		s := spans[j]
 		if s.start <= child.start && child.end <= s.end {
-			if l := s.end - s.start; best == "" || l < bestLen {
-				best, bestLen = s.id, l
+			if l := s.end - s.start; best == -1 || l < bestLen {
+				best, bestLen = j, l
 			}
 		}
 	}

@@ -22,14 +22,14 @@ const indexBatchSize = 128
 // it periodically keeps peak on-disk size in check.
 const checkpointEvery = 2000
 
-// parsedFile is a file whose graph has been extracted and is awaiting its batched
-// write. Content is retained (src) so the node-signature column can be populated
-// at write time, alongside the extracted result and the files-row metadata.
+// parsedFile is a file whose graph has been fully built (in a parse worker) and
+// is awaiting its batched write. The built rows (graph) carry everything the
+// writer needs, alongside the files-row metadata; the source bytes are not
+// retained past construction, keeping the in-flight queue light.
 type parsedFile struct {
 	path        string
 	lang        string
-	src         []byte
-	res         parse.Result
+	graph       fileGraph
 	hash        string
 	mtime, size int64
 }
@@ -216,8 +216,11 @@ func (e *Engine) indexWorklist(ctx context.Context, worktree string, src Source,
 		if err != nil {
 			return outcome{err: err}
 		}
+		// Build the full graph here, in the parse worker, so the serial writer only
+		// binds and inserts (graph construction is otherwise the writer's CPU floor).
 		return outcome{pf: parsedFile{
-			path: fe.Path, lang: lang, src: content, res: res, hash: hash, mtime: fe.Mtime, size: fe.Size,
+			path: fe.Path, lang: lang, graph: buildFileGraph(content, res),
+			hash: hash, mtime: fe.Mtime, size: fe.Size,
 		}}
 	}
 
@@ -232,7 +235,17 @@ func (e *Engine) indexWorklist(ctx context.Context, worktree string, src Source,
 	wctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	jobs := make(chan FileEntry)
-	results := make(chan outcome, nworkers)
+	// The writer drains results into a batch, then stops draining for the ~0.4s it
+	// holds the write lock flushing that batch. With only nworkers of buffer the
+	// pool fills it and stalls for the rest of every flush — on a large first index
+	// that idled the parse cores ~50% of wall. Buffer several batches so the workers
+	// keep parsing the next batches ahead while the writer flushes the current one;
+	// the pool then runs continuously and the serial writer becomes the sole floor.
+	resultsBuf := 4 * indexBatchSize
+	if resultsBuf > len(worklist) {
+		resultsBuf = len(worklist)
+	}
+	results := make(chan outcome, resultsBuf)
 	var wg sync.WaitGroup
 	for range nworkers {
 		wg.Add(1)
@@ -276,7 +289,7 @@ func (e *Engine) indexWorklist(ctx context.Context, worktree string, src Source,
 			defer st.Close()
 			for _, pf := range batch {
 				if err := e.writeFileGraph(ctx, c, st, worktree, pf.path, pf.lang,
-					pf.src, pf.res, pf.hash, pf.mtime, pf.size, now); err != nil {
+					pf.graph, pf.hash, pf.mtime, pf.size, now); err != nil {
 					return err
 				}
 			}
