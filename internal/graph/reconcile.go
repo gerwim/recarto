@@ -123,6 +123,19 @@ func (e *Engine) Reconcile(ctx context.Context, worktree string, src Source, opt
 	// writer; this keeps every core busy parsing while the lock is held only for
 	// inserts. mutated records whether the graph actually changed (so an unchanged
 	// worktree can skip the expensive Resolve pass).
+	// A fresh index of a large repo bulk-writes ~1M rows. Dropping the secondary
+	// indexes first and rebuilding them once over the finished tables (below, before
+	// Resolve) avoids per-row index maintenance across all those inserts — ~40%
+	// faster writes / ~12% faster first index on graphql-platform. Gated to a true
+	// first index (no rows yet) of a large repo, so incremental reindexes — which
+	// would pay a full rebuild to touch a few files — keep maintaining indexes inline.
+	bulkLoad := len(have) == 0 && len(worklist) > bulkLoadMinFiles
+	if bulkLoad {
+		if err := e.dropGraphSecondaryIndexes(ctx); err != nil {
+			return err
+		}
+	}
+
 	o.progress.Start(len(worklist))
 	mutated := false
 	if len(worklist) > 0 {
@@ -152,6 +165,14 @@ func (e *Engine) Reconcile(ctx context.Context, worktree string, src Source, opt
 	// nothing (e.g. the freshness token moved but no source file did), the existing
 	// resolution is still correct — skip the full-worktree re-resolve.
 	if mutated {
+		// Ensure the secondary indexes exist before resolving (Resolve keys on
+		// idx_nodes_name / idx_type_bindings_file_name / ...). After a bulk first
+		// index this rebuilds, in one pass each, the indexes dropped above; otherwise
+		// it is a cheap IF NOT EXISTS no-op that also self-heals a store left without
+		// them by a crash between the drop and this rebuild.
+		if err := e.createGraphSecondaryIndexes(ctx); err != nil {
+			return err
+		}
 		o.progress.Phase("resolving references")
 		// Incremental resolve is exact only while the worktree's interface/base
 		// structure is unchanged (ResolveIncremental); a dirty file that gained or
