@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"sort"
 	"strings"
 
 	"git.gerwim.nl/gerwim/recarto/internal/clock"
@@ -295,11 +296,19 @@ func (e *Engine) Record(ctx context.Context, nm NewMemory) (id string, reinforce
 	return id, reinforced, conflicts, nil
 }
 
+// midCandidate is an internal pairing of a ConflictCandidate with its Jaccard
+// score so we can sort before returning (highest similarity first).
+type midCandidate struct {
+	cc ConflictCandidate
+	j  float64
+}
+
 // findNearDup returns the id of an active same-kind memory whose body has
 // Jaccard >= dedupThreshold with set (the reinforce target), plus the
 // middle-band candidates (conflictJaccardFloor <= j < dedupThreshold) that are
 // about the same topic without being the same statement — the contradiction
-// suspects Record surfaces.
+// suspects Record surfaces. Middle-band candidates are returned sorted by
+// Jaccard descending so the highest-similarity suspects survive the cap in Record.
 func (e *Engine) findNearDup(ctx context.Context, c store.Conn, kind Kind,
 	bands [lshBands]uint64, set map[string]struct{}) (string, bool, []ConflictCandidate, error) {
 	seen := map[string]bool{}
@@ -331,7 +340,7 @@ func (e *Engine) findNearDup(ctx context.Context, c store.Conn, kind Kind,
 		}
 		rows.Close()
 	}
-	var mid []ConflictCandidate
+	var mid []midCandidate
 	for _, id := range candidates {
 		var title, body string
 		if err := c.QueryRowContext(ctx,
@@ -346,12 +355,19 @@ func (e *Engine) findNearDup(ctx context.Context, c store.Conn, kind Kind,
 			return id, true, nil, nil
 		}
 		if j >= conflictJaccardFloor {
-			mid = append(mid, ConflictCandidate{
-				ID: id, Title: title, Snippet: bodySnippet(body), Reason: "similar wording",
+			mid = append(mid, midCandidate{
+				cc: ConflictCandidate{ID: id, Title: title, Snippet: bodySnippet(body), Reason: "similar wording"},
+				j:  j,
 			})
 		}
 	}
-	return "", false, mid, nil
+	// Sort highest Jaccard first so the most-similar suspects survive the cap.
+	sort.SliceStable(mid, func(i, k int) bool { return mid[i].j > mid[k].j })
+	out := make([]ConflictCandidate, len(mid))
+	for i, m := range mid {
+		out[i] = m.cc
+	}
+	return "", false, out, nil
 }
 
 // refConflicts returns active same-kind memories (excluding selfID) anchored to
