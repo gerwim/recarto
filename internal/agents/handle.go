@@ -263,6 +263,11 @@ func handlePostEdit(ctx context.Context, a *app.App, ev Event) (Result, error) {
 	}
 	rel = filepath.ToSlash(rel)
 
+	if ev.SessionID != "" {
+		// Per-session edit counter; the Stop hook's capture nudge keys on it.
+		_ = a.Ledger.Incr(ctx, ev.SessionID, "edits", 1)
+	}
+
 	var res Result
 	// Surface any prior bug/guidance/todo tied to this file before re-indexing
 	// (best-effort). This matches stored refs by path and does not require the file
@@ -403,21 +408,55 @@ func tenthSessionStart(ctx context.Context, a *app.App) (int64, error) {
 	return at, nil
 }
 
-// handleStop finalizes the session row and returns an advisory reminder.
+// stopNudgeEditThreshold is the minimum number of post-edit events in a session
+// before an empty memory log warrants the block-once capture nudge.
+const stopNudgeEditThreshold = 3
+
+// handleStop closes the session row and, at most once per session, blocks the
+// stop with a capture nudge when the session edited code but recorded nothing.
+// The nudge must reach the MODEL, not the human — a systemMessage is only shown
+// to the user, so the only acting channel is a block-once with the reason fed
+// back as an instruction. ev.StopActive is the host's loop guard: when Claude
+// Code re-invokes Stop after our block, always pass through.
 func handleStop(ctx context.Context, a *app.App, ev Event) (Result, error) {
-	if ev.SessionID != "" {
-		now := a.Clock.Now().UnixMilli()
-		if err := a.Store.WriteTx(ctx, func(c store.Conn) error {
-			_, err := c.ExecContext(ctx,
-				`UPDATE sessions SET ended_at=? WHERE id=? AND ended_at IS NULL`,
-				now, ev.SessionID)
-			return err
-		}); err != nil {
-			return Result{}, err
-		}
+	if ev.SessionID == "" {
+		return Result{}, nil
+	}
+	now := a.Clock.Now().UnixMilli()
+	if err := a.Store.WriteTx(ctx, func(c store.Conn) error {
+		_, err := c.ExecContext(ctx,
+			`UPDATE sessions SET ended_at=? WHERE id=? AND ended_at IS NULL`,
+			now, ev.SessionID)
+		return err
+	}); err != nil {
+		return Result{}, err
 	}
 	// Turn boundary: the agent is idle, so a TRUNCATE checkpoint can actually
 	// win the WAL (mid-session it silently yields to concurrent readers).
 	_ = a.Store.Checkpoint(ctx)
-	return Result{SystemMessage: "recarto: before ending, record any new learnings (record_memory), bug fixes (record_bug), and preferences — e.g. if the user corrected your approach or stated a style/workflow choice. And if Recarto itself errored, ranked the wrong result first, confused you, or lacked a capability you needed this session, call report_recarto_issue so it can be fixed."}, nil
+	if ev.StopActive {
+		return Result{}, nil
+	}
+	edits, err := a.Ledger.Get(ctx, ev.SessionID, "edits")
+	if err != nil || edits < stopNudgeEditThreshold {
+		return Result{SystemMessage: "recarto: before ending, record any new learnings (record_memory), bug fixes (record_bug), and preferences — e.g. if the user corrected your approach or stated a style/workflow choice. And if Recarto itself errored, ranked the wrong result first, confused you, or lacked a capability you needed this session, call report_recarto_issue so it can be fixed."}, nil
+	}
+	if nudged, err := a.Ledger.Get(ctx, ev.SessionID, "stop_nudged"); err != nil || nudged > 0 {
+		return Result{}, nil
+	}
+	var startedAt int64
+	if err := a.Store.DB.QueryRowContext(ctx,
+		`SELECT started_at FROM sessions WHERE id = ?`, ev.SessionID).Scan(&startedAt); err != nil {
+		return Result{SystemMessage: "recarto: before ending, record any new learnings (record_memory), bug fixes (record_bug), and preferences — e.g. if the user corrected your approach or stated a style/workflow choice. And if Recarto itself errored, ranked the wrong result first, confused you, or lacked a capability you needed this session, call report_recarto_issue so it can be fixed."}, nil
+	}
+	var recorded int
+	if err := a.Store.DB.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM memories WHERE created_at >= ? AND (branch IS NULL OR branch = ?)`,
+		startedAt, a.Git.Branch).Scan(&recorded); err != nil || recorded > 0 {
+		return Result{SystemMessage: "recarto: before ending, record any new learnings (record_memory), bug fixes (record_bug), and preferences — e.g. if the user corrected your approach or stated a style/workflow choice. And if Recarto itself errored, ranked the wrong result first, confused you, or lacked a capability you needed this session, call report_recarto_issue so it can be fixed."}, nil
+	}
+	_ = a.Ledger.Incr(ctx, ev.SessionID, "stop_nudged", 1)
+	return Result{Block: true, Reason: fmt.Sprintf(
+		"recarto: you made %d edits this session and recorded nothing. Record learnings, preferences, or bug fixes now (record_memory / record_bug) — or finish if there's genuinely nothing to keep.",
+		edits)}, nil
 }

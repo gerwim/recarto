@@ -235,3 +235,30 @@ func TestAdapterDecodePostEditFilePath(t *testing.T) {
 		t.Errorf("decoded %+v", ev)
 	}
 }
+
+func TestStopEncodesBlockOnce(t *testing.T) {
+	ctx := context.Background()
+	a := newTestApp(t, "main")
+	var out bytes.Buffer
+	in := strings.NewReader(`{"session_id":"e1","hook_event_name":"SessionStart","source":"startup"}`)
+	if err := SessionStart(ctx, a, in, &out); err != nil {
+		t.Fatal(err)
+	}
+	for range 3 {
+		_ = a.Ledger.Incr(ctx, "e1", "edits", 1)
+	}
+	out.Reset()
+	if err := Stop(ctx, a, strings.NewReader(`{"session_id":"e1"}`), &out); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), `"decision":"block"`) || !strings.Contains(out.String(), "recorded nothing") {
+		t.Fatalf("first gated stop must emit decision:block, got %q", out.String())
+	}
+	out.Reset()
+	if err := Stop(ctx, a, strings.NewReader(`{"session_id":"e1","stop_hook_active":true}`), &out); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out.String(), "block") {
+		t.Fatalf("stop_hook_active follow-up must not block, got %q", out.String())
+	}
+}

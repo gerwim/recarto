@@ -47,10 +47,20 @@ func (Adapter) Decode(kind agents.EventKind, in io.Reader) (agents.Event, error)
 
 // Encode emits the Claude Code hook output shape: hookSpecificOutput.additionalContext
 // for context-injecting events (omitted when there is nothing to inject), and
-// systemMessage for Stop.
+// systemMessage for Stop (or decision:block when the nudge fires).
 func (Adapter) Encode(kind agents.EventKind, out io.Writer, res agents.Result) error {
 	if kind == agents.KindStop {
-		return json.NewEncoder(out).Encode(map[string]any{"systemMessage": res.SystemMessage})
+		if res.Block {
+			// decision:block makes Claude Code continue one turn with reason as the
+			// instruction — the only Stop output the model acts on.
+			return json.NewEncoder(out).Encode(map[string]any{
+				"decision": "block", "reason": res.Reason,
+			})
+		}
+		if res.SystemMessage != "" {
+			return json.NewEncoder(out).Encode(map[string]any{"systemMessage": res.SystemMessage})
+		}
+		return nil // nothing to say: emit nothing
 	}
 	if res.Context == "" {
 		return nil // nothing to inject

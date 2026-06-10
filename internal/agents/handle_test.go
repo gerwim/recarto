@@ -475,6 +475,77 @@ func TestFormatSessionContextDropsEntryUnderTinyBudget(t *testing.T) {
 	}
 }
 
+func TestStopNudgesOnceWhenEditsButNoMemories(t *testing.T) {
+	a := newTestApp(t, "main")
+	ctx := context.Background()
+	if _, err := Handle(ctx, a, Event{Kind: KindSessionStart, SessionID: "ns1", Agent: "claude-code"}); err != nil {
+		t.Fatal(err)
+	}
+	for range 3 {
+		_ = a.Ledger.Incr(ctx, "ns1", "edits", 1)
+	}
+	res, err := Handle(ctx, a, Event{Kind: KindStop, SessionID: "ns1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Block || !strings.Contains(res.Reason, "recorded nothing") {
+		t.Fatalf("3 edits + 0 memories must block-once with the nudge, got %+v", res)
+	}
+	// Second stop: never nudge twice.
+	res, err = Handle(ctx, a, Event{Kind: KindStop, SessionID: "ns1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Block || res.Reason != "" {
+		t.Fatalf("second stop must pass through, got %+v", res)
+	}
+}
+
+func TestStopDoesNotNudgeBelowThresholdOrWithMemories(t *testing.T) {
+	a := newTestApp(t, "main")
+	ctx := context.Background()
+
+	// Below threshold: 2 edits, no nudge.
+	if _, err := Handle(ctx, a, Event{Kind: KindSessionStart, SessionID: "ns2", Agent: "claude-code"}); err != nil {
+		t.Fatal(err)
+	}
+	_ = a.Ledger.Incr(ctx, "ns2", "edits", 2)
+	if res, _ := Handle(ctx, a, Event{Kind: KindStop, SessionID: "ns2"}); res.Block {
+		t.Fatalf("2 edits must not nudge, got %+v", res)
+	}
+
+	// At threshold but a memory was recorded: no nudge.
+	if _, err := Handle(ctx, a, Event{Kind: KindSessionStart, SessionID: "ns3", Agent: "claude-code"}); err != nil {
+		t.Fatal(err)
+	}
+	_ = a.Ledger.Incr(ctx, "ns3", "edits", 3)
+	if _, _, err := a.Engine.Record(ctx, memory.NewMemory{
+		Kind: memory.KindLearning, Body: "learned something", Branch: a.Git.Branch,
+		Worktree: a.Git.Worktree, Author: "test", Source: "cli",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if res, _ := Handle(ctx, a, Event{Kind: KindStop, SessionID: "ns3"}); res.Block {
+		t.Fatalf("a recorded memory must satisfy the nudge, got %+v", res)
+	}
+}
+
+func TestStopActiveLoopGuardPassesThrough(t *testing.T) {
+	a := newTestApp(t, "main")
+	ctx := context.Background()
+	if _, err := Handle(ctx, a, Event{Kind: KindSessionStart, SessionID: "ns4", Agent: "claude-code"}); err != nil {
+		t.Fatal(err)
+	}
+	_ = a.Ledger.Incr(ctx, "ns4", "edits", 5)
+	res, err := Handle(ctx, a, Event{Kind: KindStop, SessionID: "ns4", StopActive: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Block {
+		t.Fatal("stop_hook_active must always pass through (loop guard)")
+	}
+}
+
 func TestSessionStartShowsDeltaSinceLastWorkingSession(t *testing.T) {
 	a := newTestApp(t, "main")
 	ctx := context.Background()

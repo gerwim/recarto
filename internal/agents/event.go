@@ -37,10 +37,15 @@ type Event struct {
 }
 
 // Result is the agent-neutral hook output. Context is injected as the host's
-// "additional context"; SystemMessage is the Stop nudge. Either may be empty.
+// "additional context"; SystemMessage is shown to the human. Block asks the
+// host to refuse this Stop once and feed Reason back to the model as an
+// instruction — the only Stop channel an LLM acts on. Adapters without a block
+// channel ignore Block/Reason.
 type Result struct {
 	Context       string
 	SystemMessage string
+	Block         bool
+	Reason        string
 }
 
 // Adapter converts a host's hook payloads to and from the neutral types.
