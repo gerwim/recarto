@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"runtime/pprof"
 	"strings"
 
 	"github.com/mattn/go-isatty"
@@ -18,6 +19,16 @@ import (
 )
 
 func main() {
+	// RECARTO_CPUPROFILE is a debug knob: when set, the whole invocation is CPU
+	// profiled into the named file (pprof format). Only honored on the normal
+	// return path — error paths os.Exit and drop the profile, which is fine for
+	// its only purpose (profiling successful index/query runs).
+	if p := os.Getenv("RECARTO_CPUPROFILE"); p != "" {
+		if f, err := os.Create(p); err == nil {
+			_ = pprof.StartCPUProfile(f)
+			defer func() { pprof.StopCPUProfile(); _ = f.Close() }()
+		}
+	}
 	if len(os.Args) < 2 {
 		if err := cli.Run(nil, os.Stdout); err != nil {
 			fmt.Fprintln(os.Stderr, "recarto:", err)
