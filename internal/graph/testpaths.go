@@ -55,6 +55,11 @@ func isTestModuleName(name string) bool {
 	return false
 }
 
+// IsTestPath reports whether a repo-relative path looks like test code. Exported
+// for the MCP layer, which flags trace hops and references with it so an LLM can
+// tell test callers from production at a glance.
+func IsTestPath(p string) bool { return isTestPath(p) }
+
 // demoteTests stably partitions results so test symbols sink below product code,
 // each group keeping its incoming (fused) order. Like demoteGenerated it drops
 // nothing — tests stay findable, just lower — so a concept query surfaces the

@@ -118,3 +118,12 @@ func TestSearchAllTestsKeepsOrder(t *testing.T) {
 		t.Fatalf("all-test query returned nothing useful: %v", resultNames(got))
 	}
 }
+
+func TestIsTestPathExported(t *testing.T) {
+	if !IsTestPath("pkg/svc/handler_test.go") {
+		t.Error("IsTestPath(handler_test.go) = false, want true")
+	}
+	if IsTestPath("pkg/svc/handler.go") {
+		t.Error("IsTestPath(handler.go) = true, want false")
+	}
+}
