@@ -237,10 +237,11 @@ func handlePostEdit(ctx context.Context, a *app.App, ev Event) (Result, error) {
 	if err != nil {
 		return res, nil
 	}
-	if err := a.Graph.IndexFile(ctx, wt, rel, content, info.ModTime().UnixMilli(), info.Size()); err != nil {
-		return res, err
-	}
-	return res, a.Graph.Resolve(ctx, wt)
+	// Incremental: rewrite this file's graph and re-resolve only the edges the
+	// edit can affect (full resolve only on a structural `extends` change). The
+	// previous unconditional full Resolve cost ~14s per edit on a large repo —
+	// paid inside the agent's edit hook.
+	return res, a.Graph.ReindexFileIncremental(ctx, wt, rel, content, info.ModTime().UnixMilli(), info.Size())
 }
 
 // handleAugment runs a code-graph search matching the agent's Grep/Glob pattern and

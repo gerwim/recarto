@@ -38,10 +38,44 @@ func (e *Engine) IndexFile(ctx context.Context, worktree, path string, src []byt
 	})
 }
 
+// ReindexFileIncremental rewrites one file's graph and re-resolves only what
+// that edit can affect, with the same guards Reconcile applies: the names the
+// file held before and after scope the affected edge set, and a change to its
+// `extends` edges (which can redirect interface dispatch in OTHER files) falls
+// back to a full resolve. This is the post-edit hook path — a full Resolve per
+// keystroke cost ~14s on a large repo for a one-file change.
+func (e *Engine) ReindexFileIncremental(ctx context.Context, worktree, path string, src []byte, mtime, size int64) error {
+	dirty := []string{path}
+	oldNames, err := e.namesForPaths(ctx, worktree, dirty)
+	if err != nil {
+		return err
+	}
+	oldExtends, err := e.extendsSigForPaths(ctx, worktree, dirty)
+	if err != nil {
+		return err
+	}
+	if err := e.IndexFile(ctx, worktree, path, src, mtime, size); err != nil {
+		return err
+	}
+	newExtends, err := e.extendsSigForPaths(ctx, worktree, dirty)
+	if err != nil {
+		return err
+	}
+	if sameStringSet(oldExtends, newExtends) {
+		return e.ResolveIncremental(ctx, worktree, dirty, oldNames)
+	}
+	return e.Resolve(ctx, worktree)
+}
+
 // writeStmts holds the per-row INSERT statements of the file-graph write path,
 // prepared once per transaction so a batch of files reuses them (compiling each
 // statement once instead of once per row — a large saving with the pure-Go
 // SQLite driver). All statements are bound to the transaction's connection.
+//
+// Per-row prepared statements are the measured optimum here: a 200-row
+// multi-VALUES variant made the writer ~40% SLOWER on modernc (big bind arrays
+// + VALUES coroutine, with no per-call round trip to amortize in an embedded
+// driver) — don't reintroduce it.
 type writeStmts struct {
 	node     *sql.Stmt
 	fts      *sql.Stmt
