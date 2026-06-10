@@ -50,6 +50,19 @@ type Result struct {
 	Bindings []TypeBinding
 }
 
+// countNamedChildrenOfKind counts p's named children of one kind. Comments are
+// named nodes in the Go grammar, so a bare NamedChildCount over a grouped
+// `type ( … )` block would miscount; filtering by kind is exact.
+func countNamedChildrenOfKind(p *sitter.Node, kind string) int {
+	n := 0
+	for i := uint(0); i < p.NamedChildCount(); i++ {
+		if c := p.NamedChild(i); c != nil && c.Kind() == kind {
+			n++
+		}
+	}
+	return n
+}
+
 // edgeKind maps a reference.* capture suffix to a graph edge kind.
 func edgeKind(suffix string) string {
 	switch suffix {
@@ -101,6 +114,7 @@ func (r *Registry) ParseFile(lang, path string, src []byte) (Result, error) {
 		var sb, eb, sl, el uint
 		var nameByte, nameLine uint
 		var recvNameByte, bindByte uint
+		var defNode *sitter.Node
 		for _, c := range m.Captures {
 			cn := captureNames[c.Index]
 			switch {
@@ -122,6 +136,8 @@ func (r *Registry) ParseFile(lang, path string, src []byte) (Result, error) {
 				bindType = strings.TrimPrefix(c.Node.Utf8Text(src), "*")
 			case strings.HasPrefix(cn, "definition."):
 				defKind = strings.TrimPrefix(cn, "definition.")
+				n := c.Node
+				defNode = &n
 				sb, eb = c.Node.StartByte(), c.Node.EndByte()
 				sl, el = c.Node.StartPosition().Row+1, c.Node.EndPosition().Row+1
 			case strings.HasPrefix(cn, "reference."):
@@ -132,6 +148,18 @@ func (r *Registry) ParseFile(lang, path string, src []byte) (Result, error) {
 		}
 		switch {
 		case defKind != "" && name != "":
+			// A Go type capture is the type_spec, whose span starts at the identifier —
+			// the `type` keyword lives on the parent type_declaration. Widen single-spec
+			// declarations to the parent so the snippet is byte-exact source; grouped
+			// `type ( A …; B … )` blocks keep per-spec spans so each name stays a
+			// distinct location.
+			if lang == "go" && defKind == "type" && defNode != nil {
+				if p := defNode.Parent(); p != nil && p.Kind() == "type_declaration" &&
+					countNamedChildrenOfKind(p, "type_spec") == 1 {
+					sb, eb = p.StartByte(), p.EndByte()
+					sl, el = p.StartPosition().Row+1, p.EndPosition().Row+1
+				}
+			}
 			res.Symbols = append(res.Symbols, Symbol{
 				Kind: defKind, Name: name, QualifiedName: name, RecvType: recvType,
 				StartByte: sb, EndByte: eb, StartLine: sl, EndLine: el,

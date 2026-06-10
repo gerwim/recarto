@@ -298,6 +298,42 @@ func TestSnippetByNameMiss(t *testing.T) {
 	}
 }
 
+func TestGoTypeSnippetIncludesTypeKeyword(t *testing.T) {
+	e := newTestEngine(t)
+	ctx := context.Background()
+	wt := t.TempDir()
+	indexInto(t, e, wt, "t.go", "package p\n\n// Opts configures things.\ntype Opts struct {\n\tA int\n}\n")
+
+	r, err := e.Snippet(ctx, wt, "t.go", "Opts")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !r.Found {
+		t.Fatal("Opts not found")
+	}
+	if !strings.HasPrefix(r.Snippet, "type Opts struct") {
+		t.Errorf("snippet = %q, want it to start with `type Opts struct`", r.Snippet)
+	}
+}
+
+func TestGoGroupedTypeSpecsKeepPerSpecSpans(t *testing.T) {
+	e := newTestEngine(t)
+	ctx := context.Background()
+	wt := t.TempDir()
+	indexInto(t, e, wt, "t.go", "package p\n\ntype (\n\tA struct{ X int }\n\tB struct{ Y int }\n)\n")
+
+	r, err := e.Snippet(ctx, wt, "t.go", "A")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !r.Found {
+		t.Fatal("A not found")
+	}
+	if strings.Contains(r.Snippet, "B struct") {
+		t.Errorf("snippet = %q: grouped specs must stay per-spec, not widen to the whole block", r.Snippet)
+	}
+}
+
 func TestSnippetResultFoundAndMiss(t *testing.T) {
 	e := newTestEngine(t)
 	ctx := context.Background()
