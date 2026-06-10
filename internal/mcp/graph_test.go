@@ -703,3 +703,20 @@ func TestGetCodeSnippetNoSymbolErrors(t *testing.T) {
 		t.Fatal("empty input should error, not return an empty result")
 	}
 }
+
+func TestSearchContentHandlerOffset(t *testing.T) {
+	a := newTestApp(t, "main")
+	wt := t.TempDir()
+	a.Git.Worktree = wt
+	os.WriteFile(filepath.Join(wt, "a.go"), []byte("package p\n// needle one\n// needle two\nfunc F() {}\n"), 0o644)
+	if err := a.Graph.Reconcile(context.Background(), wt, graph.FSSource{Root: wt}); err != nil {
+		t.Fatal(err)
+	}
+	out, err := searchContent(context.Background(), a, SearchContentInput{Pattern: "needle", Limit: 1, Offset: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Count != 1 || out.Matches[0].Line != 3 {
+		t.Fatalf("got %+v, want exactly the second match (line 3)", out.Matches)
+	}
+}

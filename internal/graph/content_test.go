@@ -246,6 +246,40 @@ func TestSearchContentMetaReportsTruncation(t *testing.T) {
 	}
 }
 
+func TestSearchContentOffsetPaging(t *testing.T) {
+	e := newTestEngine(t)
+	ctx := context.Background()
+	wt := t.TempDir()
+	indexInto(t, e, wt, "t.go", "package p\n// needle one\n// needle two\n// needle three\nfunc F() {}\n")
+
+	page1, m1, err := e.SearchContentWithMeta(ctx, wt, "needle", ContentSearchOpts{Limit: 2, MaxPerFile: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page1) != 2 || !m1.Truncated || m1.Total != 3 {
+		t.Fatalf("page1: got %d matches, truncated=%v, total=%d; want 2/true/3", len(page1), m1.Truncated, m1.Total)
+	}
+
+	page2, m2, err := e.SearchContentWithMeta(ctx, wt, "needle", ContentSearchOpts{Limit: 2, MaxPerFile: 10, Offset: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page2) != 1 || page2[0].Line != 4 {
+		t.Fatalf("page2: got %+v, want exactly the third match (line 4)", page2)
+	}
+	if m2.Truncated {
+		t.Error("page2 truncated = true, want false (offset+shown covers total)")
+	}
+
+	empty, _, err := e.SearchContentWithMeta(ctx, wt, "needle", ContentSearchOpts{Limit: 2, MaxPerFile: 10, Offset: 50})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(empty) != 0 {
+		t.Fatalf("overshoot offset: got %+v, want empty (not an error)", empty)
+	}
+}
+
 // TestSearchContentMetaNoTruncation proves a complete result set is reported as
 // such — no false truncation warning when every match is shown.
 func TestSearchContentMetaNoTruncation(t *testing.T) {

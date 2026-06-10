@@ -37,6 +37,7 @@ type ContentSearchOpts struct {
 	Language   string // optional language filter (go, csharp, …)
 	Limit      int    // max matches returned (default 50)
 	MaxPerFile int    // max matches per file (default 5)
+	Offset     int    // skip the first N matches of the stable result order (paging)
 }
 
 // ContentMeta describes the completeness of a content search so a caller can tell
@@ -170,11 +171,21 @@ func (e *Engine) SearchContentWithMeta(ctx context.Context, worktree, pattern st
 	// the combined list is capped to the budget. Nothing hand-written is dropped
 	// before a generated hit.
 	out := append(hand, gen...)
+	// Offset pages through the post-cap ordering (hand-written before generated,
+	// path order) — the same stable order every call returns, so offset+limit
+	// walks it without overlap. Overshooting is an empty page, not an error.
+	if opts.Offset > 0 {
+		if opts.Offset >= len(out) {
+			out = out[:0]
+		} else {
+			out = out[opts.Offset:]
+		}
+	}
 	if len(out) > opts.Limit {
 		out = out[:opts.Limit]
 	}
 	meta.Shown = len(out)
-	meta.Truncated = meta.Total > meta.Shown
+	meta.Truncated = meta.Total > opts.Offset+meta.Shown
 	_ = e.led.Incr(ctx, "lifetime", "graph_queries", 1)
 	return out, meta, nil
 }

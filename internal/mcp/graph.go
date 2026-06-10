@@ -327,6 +327,7 @@ type SearchContentInput struct {
 	Language   string `json:"language,omitempty" jsonschema:"restrict to a language (go, csharp, typescript, tsx, javascript). NOTE: this scopes the search to indexed code of that language; omit it to also search config/docs/data files (.csproj, .json, .yaml, .md, …)."`
 	Limit      int    `json:"limit,omitempty" jsonschema:"max matches (default 50)"`
 	MaxPerFile int    `json:"max_per_file,omitempty" jsonschema:"max matches per file (default 5) so one file cannot dominate the page"`
+	Offset     int    `json:"offset,omitempty" jsonschema:"skip the first N matches of the stable result order — page through a truncated result with offset+limit instead of re-fetching with a bigger limit"`
 }
 type ContentMatch struct {
 	Path   string `json:"path"`
@@ -350,7 +351,7 @@ func searchContent(ctx context.Context, a *app.App, in SearchContentInput) (Sear
 	ensureFresh(ctx, a)
 	res, meta, err := a.Graph.SearchContentWithMeta(ctx, a.Git.Worktree, in.Pattern, graph.ContentSearchOpts{
 		Regex: in.Regex, IgnoreCase: in.IgnoreCase, PathGlob: in.PathGlob,
-		Language: in.Language, Limit: in.Limit, MaxPerFile: in.MaxPerFile,
+		Language: in.Language, Limit: in.Limit, MaxPerFile: in.MaxPerFile, Offset: in.Offset,
 	})
 	if err != nil {
 		return SearchContentOutput{}, err
