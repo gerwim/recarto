@@ -357,6 +357,7 @@ type SnippetCandidate struct {
 }
 type GetCodeSnippetOutput struct {
 	Found         bool   `json:"found"`
+	Path          string `json:"path,omitempty"` // repo-relative file of the returned definition
 	StartLine     int    `json:"start_line,omitempty"`
 	EndLine       int    `json:"end_line,omitempty"`
 	QualifiedName string `json:"qualified_name,omitempty"`
@@ -375,7 +376,7 @@ func getCodeSnippet(ctx context.Context, a *app.App, in GetCodeSnippetInput) (Ge
 			return GetCodeSnippetOutput{}, err
 		}
 		out := GetCodeSnippetOutput{
-			Found: r.Found, StartLine: r.StartLine, EndLine: r.EndLine,
+			Found: r.Found, Path: r.Path, StartLine: r.StartLine, EndLine: r.EndLine,
 			QualifiedName: r.QualifiedName, Snippet: r.Snippet,
 		}
 		for _, c := range cands {
@@ -390,7 +391,7 @@ func getCodeSnippet(ctx context.Context, a *app.App, in GetCodeSnippetInput) (Ge
 		return GetCodeSnippetOutput{}, err
 	}
 	return GetCodeSnippetOutput{
-		Found: r.Found, StartLine: r.StartLine, EndLine: r.EndLine,
+		Found: r.Found, Path: r.Path, StartLine: r.StartLine, EndLine: r.EndLine,
 		QualifiedName: r.QualifiedName, Snippet: r.Snippet,
 	}, nil
 }

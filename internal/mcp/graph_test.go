@@ -561,3 +561,20 @@ func TestTraceCallPathSuggestions(t *testing.T) {
 		t.Fatal("expected suggestions for a near-miss symbol")
 	}
 }
+
+func TestGetCodeSnippetHandlerReturnsPath(t *testing.T) {
+	a := newTestApp(t, "main")
+	wt := t.TempDir()
+	a.Git.Worktree = wt
+	os.WriteFile(filepath.Join(wt, "a.go"), []byte("package p\nfunc Target() {}\n"), 0o644)
+	if err := a.Graph.Reconcile(context.Background(), wt, graph.FSSource{Root: wt}); err != nil {
+		t.Fatal(err)
+	}
+	out, err := getCodeSnippet(context.Background(), a, GetCodeSnippetInput{Symbol: "Target"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !out.Found || out.Path != "a.go" {
+		t.Fatalf("got found=%v path=%q, want found=true path=a.go", out.Found, out.Path)
+	}
+}

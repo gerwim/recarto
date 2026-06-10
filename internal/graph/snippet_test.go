@@ -244,6 +244,42 @@ func TestSnippetByNameGenuinelyAmbiguousTypesStillBounce(t *testing.T) {
 	}
 }
 
+func TestSnippetCarriesPath(t *testing.T) {
+	e := newTestEngine(t)
+	ctx := context.Background()
+	wt := t.TempDir()
+	indexInto(t, e, wt, "a.go", "package p\nfunc Target() {}\n")
+
+	r, cands, err := e.SnippetByName(ctx, wt, "Target")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !r.Found || len(cands) != 0 {
+		t.Fatalf("want unique hit, got found=%v cands=%+v", r.Found, cands)
+	}
+	if r.Path != "a.go" {
+		t.Errorf("Path = %q, want a.go", r.Path)
+	}
+}
+
+func TestOverloadSnippetCarriesPath(t *testing.T) {
+	e := newTestEngine(t)
+	ctx := context.Background()
+	wt := t.TempDir()
+	indexInto(t, e, wt, "C.cs", "class C {\n  void Run(int a) {}\n  void Run(string b) {}\n}\n")
+
+	r, cands, err := e.SnippetByName(ctx, wt, "C.Run")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !r.Found || len(cands) != 0 {
+		t.Fatalf("want merged overload set, got found=%v cands=%+v", r.Found, cands)
+	}
+	if r.Path != "C.cs" {
+		t.Errorf("Path = %q, want C.cs", r.Path)
+	}
+}
+
 func TestSnippetByNameMiss(t *testing.T) {
 	e := newTestEngine(t)
 	ctx := context.Background()

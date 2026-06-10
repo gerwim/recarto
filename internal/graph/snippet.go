@@ -16,6 +16,7 @@ import (
 // an error); only genuine faults (stale byte range, vanished file) return an error.
 type SnippetResult struct {
 	Found         bool
+	Path          string // repo-relative file of the returned definition ("" on a miss)
 	StartLine     int
 	EndLine       int
 	QualifiedName string
@@ -172,7 +173,7 @@ func (e *Engine) overloadSnippet(ctx context.Context, worktree string, cands []S
 	}
 	_ = e.led.Incr(ctx, "lifetime", "graph_queries", 1)
 	return SnippetResult{
-		Found: true, StartLine: startLine, EndLine: endLine,
+		Found: true, Path: cands[0].Path, StartLine: startLine, EndLine: endLine,
 		QualifiedName: cands[0].QualifiedName, Snippet: b.String(),
 	}, nil, nil
 }
@@ -288,5 +289,5 @@ SELECT n.start_byte, n.end_byte, n.start_line, n.end_line, n.qualified_name
 		_ = e.led.Incr(ctx, "lifetime", "graph_tokens_saved", int64(saved))
 	}
 	_ = e.led.Incr(ctx, "lifetime", "graph_queries", 1)
-	return SnippetResult{Found: true, StartLine: sl, EndLine: el, QualifiedName: qn, Snippet: snippet}, nil
+	return SnippetResult{Found: true, Path: path, StartLine: sl, EndLine: el, QualifiedName: qn, Snippet: snippet}, nil
 }
