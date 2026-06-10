@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"time"
 
 	"git.gerwim.nl/gerwim/recarto/internal/app"
 	"git.gerwim.nl/gerwim/recarto/internal/graph"
@@ -40,11 +41,47 @@ func canonicalIdentifier(name, qualified string) (outName, outQualified string) 
 	return name, qualified
 }
 
-// ensureFresh lazily reconciles the worktree's graph so query results reflect the
-// current checkout (spec §11 query-time freshness). Best-effort: a reconcile
-// failure must not fail the query — stale results beat no results.
-func ensureFresh(ctx context.Context, a *app.App) {
-	_ = a.Graph.ReconcileIfStale(ctx, a.Git.Worktree, graph.NewSource(a.Git.Worktree), graph.WorktreeToken(a.Git.Worktree))
+// freshWait bounds how long a query waits for an in-flight graph refresh before
+// answering from the data it has. Small repos finish their refresh inside the
+// wait, keeping the old synchronous feel; a large first index keeps running in
+// the background while every tool call returns promptly — a hard requirement,
+// since MCP clients time out (and cancel) slow tool calls. A var so tests can
+// shrink it.
+var freshWait = 3 * time.Second
+
+// ensureFresh lazily refreshes the worktree's graph so query results reflect the
+// current checkout (spec §11 query-time freshness) — without ever blocking the
+// query on an unbounded reconcile. The refresh runs detached and singleflighted
+// (see graph.EnsureFresh); when results may be stale or absent, the returned
+// hint says so (empty when fresh). Best-effort: a refresh failure must not fail
+// the query — stale results beat no results.
+func ensureFresh(ctx context.Context, a *app.App) string {
+	f := a.Graph.EnsureFresh(ctx, a.Git.Worktree,
+		graph.NewSource(a.Git.Worktree), graph.WorktreeToken(a.Git.Worktree), freshWait)
+	return freshnessHint(f)
+}
+
+// freshnessHint renders an EnsureFresh status for the agent: what state the
+// results are in, what is happening, and what to do about it.
+func freshnessHint(f graph.Freshness) string {
+	switch f.State {
+	case graph.FirstIndex:
+		return fmt.Sprintf("The code graph for this worktree is still being built in the background (%s); results are empty or incomplete until it finishes — retry this tool shortly.", f.Detail)
+	case graph.Refreshing:
+		return fmt.Sprintf("A graph refresh is running in the background (%s); results reflect the last completed index and may be slightly stale.", f.Detail)
+	}
+	return ""
+}
+
+// joinHints concatenates two optional hint sentences.
+func joinHints(a, b string) string {
+	switch {
+	case a == "":
+		return b
+	case b == "":
+		return a
+	}
+	return a + " " + b
 }
 
 // --- search_graph ---
@@ -82,7 +119,7 @@ const weakResultHint = "No matches. Retry search_graph with candidate_symbols se
 func roundScore(s float64) float64 { return math.Round(s*1e4) / 1e4 }
 
 func searchGraph(ctx context.Context, a *app.App, in SearchGraphInput) (SearchGraphOutput, error) {
-	ensureFresh(ctx, a)
+	fresh := ensureFresh(ctx, a)
 	res, err := a.Graph.SearchGuided(ctx, a.Git.Worktree, in.Query, in.CandidateSymbols, in.Kind, in.Language, in.Limit)
 	if err != nil {
 		return SearchGraphOutput{}, err
@@ -108,6 +145,7 @@ func searchGraph(ctx context.Context, a *app.App, in SearchGraphInput) (SearchGr
 	if out.Count >= limit {
 		out.Hint = fmt.Sprintf("Showing the top %d by relevance; more may match. Narrow with candidate_symbols, a kind, a language, or more specific query terms.", limit)
 	}
+	out.Hint = joinHints(fresh, out.Hint)
 	return out, nil
 }
 
@@ -146,7 +184,7 @@ type TraceCallPathOutput struct {
 }
 
 func traceCallPath(ctx context.Context, a *app.App, in TraceCallPathInput) (TraceCallPathOutput, error) {
-	ensureFresh(ctx, a)
+	fresh := ensureFresh(ctx, a)
 	dir := in.Direction
 	if dir == "" {
 		dir = "callees"
@@ -200,6 +238,7 @@ func traceCallPath(ctx context.Context, a *app.App, in TraceCallPathInput) (Trac
 				root.Name, leafName(root.Name))
 		}
 	}
+	out.Hint = joinHints(fresh, out.Hint)
 	return out, nil
 }
 
@@ -225,6 +264,7 @@ type GetArchitectureOutput struct {
 	ModuleCount int          `json:"module_count"`        // total modules before the limit cap
 	DepCount    int          `json:"dep_count"`           // total dependency edges before the limit cap
 	Truncated   bool         `json:"truncated,omitempty"` // true when the cap dropped lower-signal entries
+	Hint        string       `json:"hint,omitempty"`      // freshness status while a refresh is in flight
 }
 
 // budgetArchitecture delegates to graph.BudgetArchitecture so the CLI (`graph
@@ -235,7 +275,7 @@ func budgetArchitecture(arch graph.Architecture, limit int) (mods []graph.Module
 }
 
 func getArchitecture(ctx context.Context, a *app.App, in GetArchitectureInput) (GetArchitectureOutput, error) {
-	ensureFresh(ctx, a)
+	fresh := ensureFresh(ctx, a)
 	arch, err := a.Graph.Architecture(ctx, a.Git.Worktree, in.Scope)
 	if err != nil {
 		return GetArchitectureOutput{}, err
@@ -244,6 +284,7 @@ func getArchitecture(ctx context.Context, a *app.App, in GetArchitectureInput) (
 	out := GetArchitectureOutput{
 		Modules:     make([]ArchModule, 0, len(mods)),
 		ModuleCount: totalMods, DepCount: totalDeps, Truncated: truncated,
+		Hint: fresh,
 	}
 	for _, m := range mods {
 		out.Modules = append(out.Modules, ArchModule{Name: m.Name, Files: m.Files, Symbols: m.Symbols})
@@ -268,10 +309,11 @@ type QueryGraphInput struct {
 type QueryGraphOutput struct {
 	Count int           `json:"count"`
 	Nodes []GraphSymbol `json:"nodes"`
+	Hint  string        `json:"hint,omitempty"` // freshness status while a refresh is in flight
 }
 
 func queryGraph(ctx context.Context, a *app.App, in QueryGraphInput) (QueryGraphOutput, error) {
-	ensureFresh(ctx, a)
+	fresh := ensureFresh(ctx, a)
 	spec := graph.QuerySpec{
 		Kind: in.Kind, NameLike: in.NameContains, Path: in.Path,
 		Language: in.Language, Limit: in.Limit,
@@ -283,7 +325,7 @@ func queryGraph(ctx context.Context, a *app.App, in QueryGraphInput) (QueryGraph
 	if err != nil {
 		return QueryGraphOutput{}, err
 	}
-	out := QueryGraphOutput{Count: len(nodes), Nodes: make([]GraphSymbol, 0, len(nodes))}
+	out := QueryGraphOutput{Count: len(nodes), Nodes: make([]GraphSymbol, 0, len(nodes)), Hint: fresh}
 	for _, n := range nodes {
 		name, qual := canonicalIdentifier(n.Name, n.QualifiedName)
 		out.Nodes = append(out.Nodes, GraphSymbol{
@@ -318,12 +360,13 @@ type SearchContentOutput struct {
 	// Truncated reports that the page is partial (Total > Count): the agent must
 	// not treat these matches as the complete set. PerFileCapped flags that the
 	// per-file cap (max_per_file) withheld matches in at least one file.
-	Truncated     bool `json:"truncated,omitempty"`
-	PerFileCapped bool `json:"per_file_capped,omitempty"`
+	Truncated     bool   `json:"truncated,omitempty"`
+	PerFileCapped bool   `json:"per_file_capped,omitempty"`
+	Hint          string `json:"hint,omitempty"` // freshness status while a refresh is in flight
 }
 
 func searchContent(ctx context.Context, a *app.App, in SearchContentInput) (SearchContentOutput, error) {
-	ensureFresh(ctx, a)
+	fresh := ensureFresh(ctx, a)
 	res, meta, err := a.Graph.SearchContentWithMeta(ctx, a.Git.Worktree, in.Pattern, graph.ContentSearchOpts{
 		Regex: in.Regex, IgnoreCase: in.IgnoreCase, PathGlob: in.PathGlob,
 		Language: in.Language, Limit: in.Limit, MaxPerFile: in.MaxPerFile,
@@ -333,7 +376,7 @@ func searchContent(ctx context.Context, a *app.App, in SearchContentInput) (Sear
 	}
 	out := SearchContentOutput{
 		Count: len(res), Total: meta.Total, Truncated: meta.Truncated, PerFileCapped: meta.PerFileCapped,
-		Matches: make([]ContentMatch, 0, len(res)),
+		Matches: make([]ContentMatch, 0, len(res)), Hint: fresh,
 	}
 	for _, m := range res {
 		out.Matches = append(out.Matches, ContentMatch{
@@ -365,10 +408,11 @@ type GetCodeSnippetOutput struct {
 	// several definitions: Found is false, and the agent should re-query with a
 	// qualified_name (usually unique) or by supplying the file.
 	Candidates []SnippetCandidate `json:"candidates,omitempty"`
+	Hint       string             `json:"hint,omitempty"` // freshness status while a refresh is in flight
 }
 
 func getCodeSnippet(ctx context.Context, a *app.App, in GetCodeSnippetInput) (GetCodeSnippetOutput, error) {
-	ensureFresh(ctx, a)
+	fresh := ensureFresh(ctx, a)
 	if in.File == "" {
 		r, cands, err := a.Graph.SnippetByName(ctx, a.Git.Worktree, in.Symbol)
 		if err != nil {
@@ -376,7 +420,7 @@ func getCodeSnippet(ctx context.Context, a *app.App, in GetCodeSnippetInput) (Ge
 		}
 		out := GetCodeSnippetOutput{
 			Found: r.Found, StartLine: r.StartLine, EndLine: r.EndLine,
-			QualifiedName: r.QualifiedName, Snippet: r.Snippet,
+			QualifiedName: r.QualifiedName, Snippet: r.Snippet, Hint: fresh,
 		}
 		for _, c := range cands {
 			out.Candidates = append(out.Candidates, SnippetCandidate{
@@ -391,7 +435,7 @@ func getCodeSnippet(ctx context.Context, a *app.App, in GetCodeSnippetInput) (Ge
 	}
 	return GetCodeSnippetOutput{
 		Found: r.Found, StartLine: r.StartLine, EndLine: r.EndLine,
-		QualifiedName: r.QualifiedName, Snippet: r.Snippet,
+		QualifiedName: r.QualifiedName, Snippet: r.Snippet, Hint: fresh,
 	}, nil
 }
 
@@ -421,7 +465,7 @@ type GetFileOutlineOutput struct {
 const outlineMissHint = "No symbols. The file may be unindexed, or `file` may not match the indexed repo-relative path (pass a path relative to the repo root, e.g. src/Foo/Bar.cs — not an absolute path)."
 
 func getFileOutline(ctx context.Context, a *app.App, in GetFileOutlineInput) (GetFileOutlineOutput, error) {
-	ensureFresh(ctx, a)
+	fresh := ensureFresh(ctx, a)
 	syms, err := a.Graph.Outline(ctx, a.Git.Worktree, in.File)
 	if err != nil {
 		return GetFileOutlineOutput{}, err
@@ -438,6 +482,7 @@ func getFileOutline(ctx context.Context, a *app.App, in GetFileOutlineInput) (Ge
 	if out.Count == 0 {
 		out.Hint = outlineMissHint
 	}
+	out.Hint = joinHints(fresh, out.Hint)
 	return out, nil
 }
 
@@ -459,10 +504,11 @@ type ImplSymbol struct {
 type FindImplementationsOutput struct {
 	Count   int          `json:"count"`
 	Results []ImplSymbol `json:"results"`
+	Hint    string       `json:"hint,omitempty"` // freshness status while a refresh is in flight
 }
 
 func findImplementations(ctx context.Context, a *app.App, in FindImplementationsInput) (FindImplementationsOutput, error) {
-	ensureFresh(ctx, a)
+	fresh := ensureFresh(ctx, a)
 	dir := in.Direction
 	if dir == "" {
 		dir = "down"
@@ -471,7 +517,7 @@ func findImplementations(ctx context.Context, a *app.App, in FindImplementations
 	if err != nil {
 		return FindImplementationsOutput{}, err
 	}
-	out := FindImplementationsOutput{Count: len(rels), Results: make([]ImplSymbol, 0, len(rels))}
+	out := FindImplementationsOutput{Count: len(rels), Results: make([]ImplSymbol, 0, len(rels)), Hint: fresh}
 	for _, r := range rels {
 		name, qual := canonicalIdentifier(r.Name, r.QualifiedName)
 		out.Results = append(out.Results, ImplSymbol{
@@ -499,15 +545,16 @@ type AnnotatedSym struct {
 type FindAnnotatedOutput struct {
 	Count   int            `json:"count"`
 	Results []AnnotatedSym `json:"results"`
+	Hint    string         `json:"hint,omitempty"` // freshness status while a refresh is in flight
 }
 
 func findAnnotated(ctx context.Context, a *app.App, in FindAnnotatedInput) (FindAnnotatedOutput, error) {
-	ensureFresh(ctx, a)
+	fresh := ensureFresh(ctx, a)
 	rels, err := a.Graph.Annotated(ctx, a.Git.Worktree, in.Attribute, in.Limit)
 	if err != nil {
 		return FindAnnotatedOutput{}, err
 	}
-	out := FindAnnotatedOutput{Count: len(rels), Results: make([]AnnotatedSym, 0, len(rels))}
+	out := FindAnnotatedOutput{Count: len(rels), Results: make([]AnnotatedSym, 0, len(rels)), Hint: fresh}
 	for _, r := range rels {
 		name, qual := canonicalIdentifier(r.Name, r.QualifiedName)
 		out.Results = append(out.Results, AnnotatedSym{

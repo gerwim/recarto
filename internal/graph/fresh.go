@@ -104,7 +104,9 @@ func (e *Engine) EnsureFresh(ctx context.Context, worktree string, src Source, t
 		}
 		// The refresh completed for the token it started with; the worktree may
 		// have moved again meanwhile, so report Fresh only if it still holds.
-		if e.graphFresh(ctx, worktree, token) {
+		// An empty token (worktree outside git) never matches anything, so there
+		// a completed refresh IS freshness.
+		if token == "" || e.graphFresh(ctx, worktree, token) {
 			return Freshness{State: Fresh}
 		}
 		return e.staleStatus(ctx, worktree, "worktree changed during refresh")

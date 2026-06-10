@@ -141,6 +141,19 @@ func TestEnsureFreshDetachedFromCallerContext(t *testing.T) {
 	}
 }
 
+// TestEnsureFreshEmptyTokenReportsFreshOnCompletion: a worktree outside git has
+// no freshness token (WorktreeToken returns ""), so there is nothing to compare
+// after the refresh lands — a successful refresh IS fresh, and must not be
+// misreported as "worktree changed".
+func TestEnsureFreshEmptyTokenReportsFreshOnCompletion(t *testing.T) {
+	e := newTestEngine(t)
+	src := crossFileCallSource()
+	f := e.EnsureFresh(context.Background(), "/wt", src, "", 10*time.Second)
+	if f.State != Fresh {
+		t.Fatalf("state = %v (detail %q), want Fresh after a completed refresh with no token", f.State, f.Detail)
+	}
+}
+
 // TestEnsureFreshFailureCooldown: a failing refresh must not be restarted by
 // every query — that would re-burn a full reconcile attempt per tool call.
 func TestEnsureFreshFailureCooldown(t *testing.T) {
