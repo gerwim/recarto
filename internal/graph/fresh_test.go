@@ -141,6 +141,31 @@ func TestEnsureFreshDetachedFromCallerContext(t *testing.T) {
 	}
 }
 
+// BenchmarkGraphFresh guards the per-query freshness fast path: every MCP graph
+// tool call pays this check when the token matches, so it must stay at
+// microsecond point-lookup cost (token + pending marker + index presence).
+func BenchmarkGraphFresh(b *testing.B) {
+	st, err := store.Open(filepath.Join(b.TempDir(), "store.db"))
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer st.Close()
+	e, err := New(st, ledger.New(st), clock.NewFake(time.UnixMilli(1_700_000_000_000)))
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer e.Close()
+	if err := e.ReconcileIfStale(context.Background(), "/wt", crossFileCallSource(), "tok-1"); err != nil {
+		b.Fatal(err)
+	}
+	b.ResetTimer()
+	for b.Loop() {
+		if !e.graphFresh(context.Background(), "/wt", "tok-1") {
+			b.Fatal("graph should be fresh")
+		}
+	}
+}
+
 // TestEnsureFreshEmptyTokenReportsFreshOnCompletion: a worktree outside git has
 // no freshness token (WorktreeToken returns ""), so there is nothing to compare
 // after the refresh lands — a successful refresh IS fresh, and must not be

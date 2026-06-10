@@ -3,6 +3,7 @@ package graph
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync/atomic"
 	"time"
 )
@@ -118,15 +119,30 @@ func (e *Engine) EnsureFresh(ctx context.Context, worktree string, src Source, t
 
 // graphFresh reports whether worktree's stored graph already matches token and
 // carries no interrupted-recovery debt (pending resolve marker, missing
-// secondary indexes). Shared by EnsureFresh and ReconcileIfStale.
+// secondary indexes). Shared by EnsureFresh and ReconcileIfStale. This runs on
+// every graph tool call, so all three checks share one round trip (~65µs on
+// the bench box); see BenchmarkGraphFresh.
 func (e *Engine) graphFresh(ctx context.Context, worktree, token string) bool {
 	if token == "" {
 		return false
 	}
+	args := make([]any, 0, len(graphSecondaryIndexes)+2)
+	args = append(args, graphTokenKey+worktree, resolvePendingKey(worktree))
+	ph := make([]string, len(graphSecondaryIndexes))
+	for i, ix := range graphSecondaryIndexes {
+		args = append(args, ix.name)
+		ph[i] = "?"
+	}
 	var stored string
-	_ = e.st.DB.QueryRowContext(ctx,
-		`SELECT value FROM meta WHERE key=?`, graphTokenKey+worktree).Scan(&stored)
-	return stored == token && !e.resolvePending(ctx, worktree) && !e.graphIndexesMissing(ctx)
+	var pending bool
+	var indexes int
+	err := e.st.DB.QueryRowContext(ctx,
+		`SELECT (SELECT COALESCE(value, '') FROM meta WHERE key=?1),
+		        EXISTS(SELECT 1 FROM meta WHERE key=?2),
+		        (SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name IN (`+
+			strings.Join(ph, ",")+`))`, args...).
+		Scan(&stored, &pending, &indexes)
+	return err == nil && stored == token && !pending && indexes == len(graphSecondaryIndexes)
 }
 
 // startOrJoinRefresh returns the worktree's in-flight background refresh,
