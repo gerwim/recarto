@@ -2,6 +2,8 @@ package graph
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"runtime"
 	"sync"
 
@@ -189,7 +191,20 @@ func (e *Engine) Reconcile(ctx context.Context, worktree string, src Source, opt
 		}
 	}
 
-	bulkLoad := len(have) == 0 && len(worklist) > bulkLoadMinFiles
+	// Bulk-load only when the WHOLE store is empty, not just this worktree: the
+	// secondary indexes are shared by every worktree in the per-repo store, so
+	// dropping them during the first index of an ADDITIONAL worktree would make
+	// every other worktree's queries full-scan for the entire run — and the
+	// rebuild would pay for all worktrees' rows, not just this one's. (The ~40%
+	// write win was measured on a truly empty store.)
+	storeEmpty := false
+	if len(have) == 0 {
+		var one int
+		storeEmpty = errors.Is(
+			e.st.DB.QueryRowContext(ctx, `SELECT 1 FROM files LIMIT 1`).Scan(&one),
+			sql.ErrNoRows)
+	}
+	bulkLoad := storeEmpty && len(worklist) > bulkLoadMinFiles
 	if bulkLoad {
 		if err := e.dropGraphSecondaryIndexes(ctx); err != nil {
 			return err

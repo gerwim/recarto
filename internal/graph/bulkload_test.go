@@ -2,8 +2,88 @@ package graph
 
 import (
 	"context"
+	"fmt"
+	"sync"
 	"testing"
 )
+
+// gateFirstRead wraps a Source, signaling and then blocking on the first Read
+// so a test can inspect mid-reconcile schema state — after the bulk-load
+// decision, before any row lands.
+type gateFirstRead struct {
+	inner   Source
+	started chan struct{} // closed when the first Read begins
+	release chan struct{} // reads proceed once this closes
+	once    sync.Once
+}
+
+func (g *gateFirstRead) List() ([]FileEntry, error) { return g.inner.List() }
+func (g *gateFirstRead) Read(p string) ([]byte, error) {
+	g.once.Do(func() {
+		close(g.started)
+		<-g.release
+	})
+	return g.inner.Read(p)
+}
+
+// bigWorktreeSource returns a source just over the bulk-load threshold.
+func bigWorktreeSource() *mutMemSource {
+	files := make(map[string]string, bulkLoadMinFiles+1)
+	for i := range bulkLoadMinFiles + 1 {
+		files[fmt.Sprintf("f%04d.go", i)] = fmt.Sprintf("package p\n\nfunc F%04d() {}\n", i)
+	}
+	return &mutMemSource{files: files}
+}
+
+// indexExistsMidBulk runs a large first index of worktree wt and reports
+// whether idx_nodes_name still existed at the point parsing began (i.e. after
+// the bulk-load path decided whether to drop the shared secondary indexes).
+func indexExistsMidBulk(t *testing.T, e *Engine, wt string) bool {
+	t.Helper()
+	src := &gateFirstRead{
+		inner:   bigWorktreeSource(),
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	done := make(chan error, 1)
+	go func() { done <- e.Reconcile(context.Background(), wt, src) }()
+	<-src.started
+	var n int
+	err := e.st.DB.QueryRow(
+		`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_nodes_name'`).Scan(&n)
+	close(src.release)
+	if rerr := <-done; rerr != nil {
+		t.Fatal(rerr)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return n == 1
+}
+
+// TestBulkFirstIndexKeepsIndexesOnPopulatedStore: the secondary indexes are
+// shared by every worktree in the per-repo store. A first index of an ADDED
+// worktree must not drop them — other worktrees' queries would full-scan for
+// the entire duration, and the rebuild would pay for all worktrees' rows.
+func TestBulkFirstIndexKeepsIndexesOnPopulatedStore(t *testing.T) {
+	e := newTestEngine(t)
+	if err := e.Reconcile(context.Background(), "/wtA", crossFileCallSource()); err != nil {
+		t.Fatal(err)
+	}
+	if !indexExistsMidBulk(t, e, "/wtB") {
+		t.Fatal("first index of a second worktree dropped the store's shared secondary indexes")
+	}
+}
+
+// TestBulkFirstIndexDropsIndexesOnEmptyStore guards the optimization itself: on
+// a truly empty store the bulk path must still drop the indexes up front (the
+// measured ~40% write win on a large first index).
+func TestBulkFirstIndexDropsIndexesOnEmptyStore(t *testing.T) {
+	e := newTestEngine(t)
+	if indexExistsMidBulk(t, e, "/wt") {
+		t.Fatal("large first index on an empty store did not take the bulk path")
+	}
+}
 
 // secondaryIndexesOnGraphTables returns the names of the user-created (idx_*)
 // indexes currently on the bulk-written graph tables.
