@@ -648,3 +648,58 @@ func TestFindReferencesHandler(t *testing.T) {
 		t.Errorf("Count = %d, want %d", out.Count, len(out.References))
 	}
 }
+
+func TestGetCodeSnippetBatch(t *testing.T) {
+	a := newTestApp(t, "main")
+	wt := t.TempDir()
+	a.Git.Worktree = wt
+	os.WriteFile(filepath.Join(wt, "a.go"), []byte("package p\nfunc Alpha() {}\nfunc Beta() {}\n"), 0o644)
+	if err := a.Graph.Reconcile(context.Background(), wt, graph.FSSource{Root: wt}); err != nil {
+		t.Fatal(err)
+	}
+	out, err := getCodeSnippet(context.Background(), a, GetCodeSnippetInput{Symbols: []string{"Alpha", "Beta", "NoSuch"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Snippets) != 3 {
+		t.Fatalf("got %d batch entries, want 3: %+v", len(out.Snippets), out.Snippets)
+	}
+	if out.Snippets[0].Symbol != "Alpha" || !out.Snippets[0].Found || out.Snippets[0].Path != "a.go" {
+		t.Errorf("entry 0 = %+v, want found Alpha in a.go", out.Snippets[0])
+	}
+	if !strings.Contains(out.Snippets[1].Snippet, "func Beta()") {
+		t.Errorf("entry 1 snippet = %q, want Beta's source", out.Snippets[1].Snippet)
+	}
+	if out.Snippets[2].Found {
+		t.Errorf("entry 2 (NoSuch) reported found")
+	}
+}
+
+func TestGetCodeSnippetBatchCapReportsSkipped(t *testing.T) {
+	a := newTestApp(t, "main")
+	wt := t.TempDir()
+	a.Git.Worktree = wt
+	os.WriteFile(filepath.Join(wt, "a.go"), []byte("package p\nfunc Alpha() {}\n"), 0o644)
+	if err := a.Graph.Reconcile(context.Background(), wt, graph.FSSource{Root: wt}); err != nil {
+		t.Fatal(err)
+	}
+	syms := make([]string, 12)
+	for i := range syms {
+		syms[i] = "Alpha"
+	}
+	out, err := getCodeSnippet(context.Background(), a, GetCodeSnippetInput{Symbols: syms})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Snippets) != 10 || len(out.Skipped) != 2 {
+		t.Fatalf("got %d snippets / %d skipped, want 10 / 2 (no silent caps)", len(out.Snippets), len(out.Skipped))
+	}
+}
+
+func TestGetCodeSnippetNoSymbolErrors(t *testing.T) {
+	a := newTestApp(t, "main")
+	a.Git.Worktree = t.TempDir()
+	if _, err := getCodeSnippet(context.Background(), a, GetCodeSnippetInput{}); err == nil {
+		t.Fatal("empty input should error, not return an empty result")
+	}
+}

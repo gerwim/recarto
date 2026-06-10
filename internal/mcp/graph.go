@@ -370,8 +370,9 @@ func searchContent(ctx context.Context, a *app.App, in SearchContentInput) (Sear
 // --- get_code_snippet ---
 
 type GetCodeSnippetInput struct {
-	File   string `json:"file,omitempty" jsonschema:"repo-relative file path. Optional: omit it to resolve the symbol by name across the repo — the common case right after a search returns a name."`
-	Symbol string `json:"symbol" jsonschema:"symbol name or qualified name"`
+	File    string   `json:"file,omitempty" jsonschema:"repo-relative file path. Optional: omit it to resolve the symbol by name across the repo — the common case right after a search returns a name."`
+	Symbol  string   `json:"symbol,omitempty" jsonschema:"symbol name or qualified name"`
+	Symbols []string `json:"symbols,omitempty" jsonschema:"up to 10 symbols to fetch in one call — the batch form of symbol, resolved identically and returned in order under snippets. Use after a search returns several relevant names instead of one call per symbol."`
 }
 type SnippetCandidate struct {
 	Path          string `json:"path"`
@@ -390,12 +391,33 @@ type GetCodeSnippetOutput struct {
 	// several definitions: Found is false, and the agent should re-query with a
 	// qualified_name (usually unique) or by supplying the file.
 	Candidates []SnippetCandidate `json:"candidates,omitempty"`
+	// Snippets holds the per-symbol results of a batch (`symbols`) call, in input
+	// order; the top-level fields above stay zero. Skipped lists symbols beyond
+	// the batch cap that were NOT fetched — re-call with them rather than
+	// assuming coverage.
+	Snippets []BatchSnippet `json:"snippets,omitempty"`
+	Skipped  []string       `json:"skipped,omitempty"`
+}
+type BatchSnippet struct {
+	Symbol        string             `json:"symbol"` // as requested
+	Found         bool               `json:"found"`
+	Path          string             `json:"path,omitempty"`
+	StartLine     int                `json:"start_line,omitempty"`
+	EndLine       int                `json:"end_line,omitempty"`
+	QualifiedName string             `json:"qualified_name,omitempty"`
+	Snippet       string             `json:"snippet,omitempty"`
+	Candidates    []SnippetCandidate `json:"candidates,omitempty"`
 }
 
-func getCodeSnippet(ctx context.Context, a *app.App, in GetCodeSnippetInput) (GetCodeSnippetOutput, error) {
-	ensureFresh(ctx, a)
-	if in.File == "" {
-		r, cands, err := a.Graph.SnippetByName(ctx, a.Git.Worktree, in.Symbol)
+// maxBatchSnippets caps one batch call so a pathological symbol list cannot blow
+// the token budget; overflow is reported in Skipped, never silently dropped.
+const maxBatchSnippets = 10
+
+// snippetForSymbol is the single-symbol body shared by the scalar and batch
+// forms of getCodeSnippet.
+func snippetForSymbol(ctx context.Context, a *app.App, file, symbol string) (GetCodeSnippetOutput, error) {
+	if file == "" {
+		r, cands, err := a.Graph.SnippetByName(ctx, a.Git.Worktree, symbol)
 		if err != nil {
 			return GetCodeSnippetOutput{}, err
 		}
@@ -410,7 +432,7 @@ func getCodeSnippet(ctx context.Context, a *app.App, in GetCodeSnippetInput) (Ge
 		}
 		return out, nil
 	}
-	r, err := a.Graph.Snippet(ctx, a.Git.Worktree, in.File, in.Symbol)
+	r, err := a.Graph.Snippet(ctx, a.Git.Worktree, file, symbol)
 	if err != nil {
 		return GetCodeSnippetOutput{}, err
 	}
@@ -418,6 +440,35 @@ func getCodeSnippet(ctx context.Context, a *app.App, in GetCodeSnippetInput) (Ge
 		Found: r.Found, Path: r.Path, StartLine: r.StartLine, EndLine: r.EndLine,
 		QualifiedName: r.QualifiedName, Snippet: r.Snippet,
 	}, nil
+}
+
+func getCodeSnippet(ctx context.Context, a *app.App, in GetCodeSnippetInput) (GetCodeSnippetOutput, error) {
+	ensureFresh(ctx, a)
+	if len(in.Symbols) > 0 {
+		var out GetCodeSnippetOutput
+		batch := in.Symbols
+		if len(batch) > maxBatchSnippets {
+			out.Skipped = batch[maxBatchSnippets:]
+			batch = batch[:maxBatchSnippets]
+		}
+		for _, sym := range batch {
+			one, err := snippetForSymbol(ctx, a, in.File, sym)
+			if err != nil {
+				return GetCodeSnippetOutput{}, err
+			}
+			out.Snippets = append(out.Snippets, BatchSnippet{
+				Symbol: sym, Found: one.Found, Path: one.Path,
+				StartLine: one.StartLine, EndLine: one.EndLine,
+				QualifiedName: one.QualifiedName, Snippet: one.Snippet,
+				Candidates: one.Candidates,
+			})
+		}
+		return out, nil
+	}
+	if in.Symbol == "" {
+		return GetCodeSnippetOutput{}, fmt.Errorf("pass symbol (one) or symbols (batch)")
+	}
+	return snippetForSymbol(ctx, a, in.File, in.Symbol)
 }
 
 // --- get_file_outline ---
