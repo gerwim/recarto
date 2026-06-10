@@ -2,10 +2,13 @@ package graph
 
 import (
 	"context"
+	"encoding/json"
 	"io/fs"
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"git.gerwim.nl/gerwim/recarto/internal/store"
 )
 
 // Module is a project-level grouping (the nearest ancestor directory holding a
@@ -323,32 +326,116 @@ func moduleOf(roots []string, names map[string]string, path string) string {
 	return "."
 }
 
+// archCacheVersion stamps the cached architecture payload so a binary with a
+// different computation never serves a predecessor's cache.
+const archCacheVersion = 1
+
+// archCachePayload is the meta-table cache entry: the full architecture, valid
+// exactly while the worktree's graph token equals Token.
+type archCachePayload struct {
+	Version int          `json:"version"`
+	Token   string       `json:"token"`
+	Arch    Architecture `json:"arch"`
+}
+
 // Architecture summarizes the worktree's modules: file and symbol counts per
 // top-level directory. scope, if non-empty, restricts to paths under that prefix.
+//
+// The unscoped form is cached in the meta table keyed by the worktree's graph
+// token — the same freshness signal ReconcileIfStale maintains — so repeat calls
+// (every session start renders the orientation map; agents re-orient often) skip
+// the filesystem walk and full edge aggregation while the graph is unchanged. A
+// non-git worktree never stores a token and so never caches.
 func (e *Engine) Architecture(ctx context.Context, worktree, scope string) (Architecture, error) {
+	if scope != "" {
+		return e.architectureUncached(ctx, worktree, scope)
+	}
+	var token string
+	_ = e.st.DB.QueryRowContext(ctx,
+		`SELECT value FROM meta WHERE key=?`, "graph_token:"+worktree).Scan(&token)
+	cacheKey := "arch_cache:" + worktree
+	if token != "" {
+		var raw string
+		if err := e.st.DB.QueryRowContext(ctx,
+			`SELECT value FROM meta WHERE key=?`, cacheKey).Scan(&raw); err == nil {
+			var p archCachePayload
+			if json.Unmarshal([]byte(raw), &p) == nil && p.Version == archCacheVersion && p.Token == token {
+				_ = e.led.Incr(ctx, "lifetime", "graph_queries", 1)
+				return p.Arch, nil
+			}
+		}
+	}
+	arch, err := e.architectureUncached(ctx, worktree, scope)
+	if err != nil {
+		return arch, err
+	}
+	if token != "" {
+		// Best-effort: a busy store just means the next call recomputes. The payload
+		// is keyed by the token read BEFORE computing, so a reconcile racing this
+		// write leaves a cache entry whose token no longer matches — never served.
+		if raw, jerr := json.Marshal(archCachePayload{Version: archCacheVersion, Token: token, Arch: arch}); jerr == nil {
+			_ = e.st.WriteTx(ctx, func(c store.Conn) error {
+				_, werr := c.ExecContext(ctx, `INSERT INTO meta(key,value) VALUES (?,?)
+				 ON CONFLICT(key) DO UPDATE SET value=excluded.value`, cacheKey, string(raw))
+				return werr
+			})
+		}
+	}
+	return arch, nil
+}
+
+// architectureUncached computes the architecture from the store. The dependency
+// aggregation streams the edges table once and joins via in-memory maps —
+// the SQL join form (edges×nodes×files×nodes×files with a path-pair GROUP BY)
+// did an index seek per edge and dominated the 2s arch latency on large repos.
+func (e *Engine) architectureUncached(ctx context.Context, worktree, scope string) (Architecture, error) {
 	roots := projectRoots(worktree)
 	modNames := moduleNames(roots)
-	q := `SELECT f.path, (SELECT COUNT(*) FROM nodes n WHERE n.file_id = f.id)
-	        FROM files f WHERE f.worktree = ?`
-	args := []any{worktree}
-	if scope != "" {
-		q += " AND f.path LIKE ?"
-		args = append(args, scope+"%")
+	// moduleOf is O(roots) prefix matching and the same paths recur across the
+	// per-file and per-edge loops; memoize it (and the generated-path test, which
+	// runs per edge below).
+	modMemo := map[string]string{}
+	modOf := func(p string) string {
+		if m, ok := modMemo[p]; ok {
+			return m
+		}
+		m := moduleOf(roots, modNames, p)
+		modMemo[p] = m
+		return m
 	}
-	rows, err := e.st.DB.QueryContext(ctx, q, args...)
+	genMemo := map[string]bool{}
+	genOf := func(p string) bool {
+		if g, ok := genMemo[p]; ok {
+			return g
+		}
+		g := isGeneratedPath(p)
+		genMemo[p] = g
+		return g
+	}
+
+	// Worktree files with their per-file symbol counts; filePath additionally
+	// feeds the dep aggregation below (which is worktree-wide regardless of scope).
+	filePath := map[string]string{}
+	type agg struct{ files, syms int }
+	byMod := map[string]*agg{}
+	rows, err := e.st.DB.QueryContext(ctx,
+		`SELECT f.id, f.path, (SELECT COUNT(*) FROM nodes n WHERE n.file_id = f.id)
+		   FROM files f WHERE f.worktree = ?`, worktree)
 	if err != nil {
 		return Architecture{}, err
 	}
-	defer rows.Close()
-	type agg struct{ files, syms int }
-	byMod := map[string]*agg{}
 	for rows.Next() {
-		var path string
+		var id, path string
 		var syms int
-		if err := rows.Scan(&path, &syms); err != nil {
+		if err := rows.Scan(&id, &path, &syms); err != nil {
+			rows.Close()
 			return Architecture{}, err
 		}
-		m := moduleOf(roots, modNames, path)
+		filePath[id] = path
+		if scope != "" && !strings.HasPrefix(path, scope) {
+			continue
+		}
+		m := modOf(path)
 		if byMod[m] == nil {
 			byMod[m] = &agg{}
 		}
@@ -356,54 +443,82 @@ func (e *Engine) Architecture(ctx context.Context, worktree, scope string) (Arch
 		byMod[m].syms += syms
 	}
 	if err := rows.Err(); err != nil {
+		rows.Close()
 		return Architecture{}, err
 	}
+	rows.Close()
 	var arch Architecture
 	for name, a := range byMod {
 		arch.Modules = append(arch.Modules, Module{Name: name, Files: a.files, Symbols: a.syms})
 	}
 	sort.Slice(arch.Modules, func(i, j int) bool { return arch.Modules[i].Name < arch.Modules[j].Name })
 
+	// node id -> file id, for resolving an edge's target file without per-edge seeks.
+	nodeFile := make(map[string]string, 1<<17)
+	rows, err = e.st.DB.QueryContext(ctx, `SELECT id, file_id FROM nodes`)
+	if err != nil {
+		return Architecture{}, err
+	}
+	for rows.Next() {
+		var id, fid string
+		if err := rows.Scan(&id, &fid); err != nil {
+			rows.Close()
+			return Architecture{}, err
+		}
+		nodeFile[id] = fid
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return Architecture{}, err
+	}
+	rows.Close()
+
 	// Deps: inter-module dependency edges derived from resolved cross-module
 	// references. Deps are computed worktree-wide (scope only applies to Modules
 	// above). This is intentional: module boundaries are top-level directories
 	// and scope filtering of Deps would silently drop edges that cross the scope
-	// boundary — easier to reason about with the full picture.
-	depRows, err := e.st.DB.QueryContext(ctx, `
-SELECT srcf.path, dstf.path, COUNT(*)
-  FROM edges ed
-  JOIN nodes sn   ON sn.id = ed.src_node_id
-  JOIN files srcf ON srcf.id = sn.file_id
-  JOIN nodes dn   ON dn.id = ed.dst_node_id
-  JOIN files dstf ON dstf.id = dn.file_id
- WHERE srcf.worktree = ? AND dstf.worktree = ?
- GROUP BY srcf.path, dstf.path`, worktree, worktree)
+	// boundary — easier to reason about with the full picture. The worktree
+	// membership test for both endpoints is the filePath map (built unscoped
+	// above), mirroring the old SQL's srcf.worktree/dstf.worktree filters.
+	// src_node_id IS NOT NULL mirrors the old form's inner join on the source
+	// node: a file-scope reference (an import, or a call outside any symbol) has
+	// no source symbol and never counted as a module dependency.
+	depCount := map[[2]string]int{}
+	depGen := map[[2]string]int{} // refs whose source file is generated, per edge
+	rows, err = e.st.DB.QueryContext(ctx,
+		`SELECT file_id, dst_node_id FROM edges
+		  WHERE dst_node_id IS NOT NULL AND src_node_id IS NOT NULL`)
 	if err != nil {
 		return Architecture{}, err
 	}
-	depCount := map[[2]string]int{}
-	depGen := map[[2]string]int{} // refs whose source file is generated, per edge
-	for depRows.Next() {
-		var sp, dp string
-		var c int
-		if err := depRows.Scan(&sp, &dp, &c); err != nil {
-			depRows.Close()
+	for rows.Next() {
+		var srcFile, dstNode string
+		if err := rows.Scan(&srcFile, &dstNode); err != nil {
+			rows.Close()
 			return Architecture{}, err
 		}
-		sm, dm := moduleOf(roots, modNames, sp), moduleOf(roots, modNames, dp)
+		sp, ok := filePath[srcFile]
+		if !ok {
+			continue // edge from another worktree
+		}
+		dp, ok := filePath[nodeFile[dstNode]]
+		if !ok {
+			continue // target outside this worktree
+		}
+		sm, dm := modOf(sp), modOf(dp)
 		if sm != dm {
 			key := [2]string{sm, dm}
-			depCount[key] += c
-			if isGeneratedPath(sp) {
-				depGen[key] += c
+			depCount[key]++
+			if genOf(sp) {
+				depGen[key]++
 			}
 		}
 	}
-	if err := depRows.Err(); err != nil {
-		depRows.Close()
+	if err := rows.Err(); err != nil {
+		rows.Close()
 		return Architecture{}, err
 	}
-	depRows.Close()
+	rows.Close()
 	for k, c := range depCount {
 		arch.Deps = append(arch.Deps, ModuleEdge{From: k[0], To: k[1], Count: c, GeneratedFrom: depGen[k]})
 	}
