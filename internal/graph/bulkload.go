@@ -2,6 +2,7 @@ package graph
 
 import (
 	"context"
+	"strings"
 
 	"git.gerwim.nl/gerwim/recarto/internal/store"
 )
@@ -63,4 +64,24 @@ func (e *Engine) createGraphSecondaryIndexes(ctx context.Context) error {
 		}
 		return nil
 	})
+}
+
+// graphIndexesMissing reports whether any graph secondary index is absent from
+// the schema — physical evidence of a reconcile that died between dropping and
+// rebuilding them, possibly under a binary that predates the resolve-pending
+// marker, so it is checked alongside the marker. One point query over the tiny
+// sqlite_master table (microseconds); on a query error it reports false so a
+// transient failure here cannot trigger spurious full resolves — a genuine
+// store problem will surface from the reconcile itself.
+func (e *Engine) graphIndexesMissing(ctx context.Context) bool {
+	args := make([]any, len(graphSecondaryIndexes))
+	ph := make([]string, len(graphSecondaryIndexes))
+	for i, ix := range graphSecondaryIndexes {
+		args[i], ph[i] = ix.name, "?"
+	}
+	var n int
+	err := e.st.DB.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name IN (`+
+			strings.Join(ph, ",")+`)`, args...).Scan(&n)
+	return err == nil && n != len(graphSecondaryIndexes)
 }
