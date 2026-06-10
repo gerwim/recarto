@@ -87,6 +87,15 @@ func handleSessionStart(ctx context.Context, a *app.App, ev Event) (Result, erro
 	warmed := make(chan struct{})
 	go func() {
 		_ = a.Graph.ReconcileIfStale(sctx, a.Git.Worktree, newGraphSource(a.Git.Worktree), graph.WorktreeToken(a.Git.Worktree))
+		// Opportunistic worktree GC, inside the same hard budget: a deleted git
+		// worktree leaves its entire graph copy in the shared store until swept.
+		// Batched deletes commit progress, so abandonment at the budget is safe.
+		if dead, err := a.DeadWorktrees(sctx); err == nil && len(dead) > 0 {
+			for _, wt := range dead {
+				_ = a.Graph.PruneWorktree(sctx, wt)
+			}
+			_ = a.Store.Checkpoint(sctx)
+		}
 		close(warmed)
 	}()
 	select {

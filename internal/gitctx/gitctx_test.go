@@ -129,3 +129,36 @@ func mergeMap(a, b map[string]string) map[string]string {
 	}
 	return out
 }
+
+// fakeWorktreeRunner answers `git worktree list --porcelain` with a canned
+// porcelain block.
+type fakeWorktreeRunner struct{ out string }
+
+func (f fakeWorktreeRunner) Run(args ...string) (string, error) {
+	if args[0] == "worktree" {
+		return f.out, nil
+	}
+	return "", nil
+}
+
+// TestLiveWorktrees parses `git worktree list --porcelain`: one block per
+// worktree, the path on the "worktree " line; other lines (HEAD, branch,
+// detached, bare) are ignored.
+func TestLiveWorktrees(t *testing.T) {
+	out := "worktree /home/u/repo\nHEAD abc123\nbranch refs/heads/master\n\n" +
+		"worktree /home/u/repo-wt2\nHEAD def456\ndetached\n\n" +
+		"worktree /home/u/repo wt3\nbare\n"
+	got, err := LiveWorktrees(fakeWorktreeRunner{out: out})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"/home/u/repo", "/home/u/repo-wt2", "/home/u/repo wt3"}
+	if len(got) != len(want) {
+		t.Fatalf("LiveWorktrees = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("LiveWorktrees[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
