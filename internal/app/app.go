@@ -30,6 +30,7 @@ type Config struct {
 // App is the resolved per-process runtime shared by every surface.
 type App struct {
 	Git    gitctx.Context
+	Runner gitctx.Runner // the git runner identity was resolved with (worktree GC reuses it)
 	Store  *store.Store
 	Ledger *ledger.Ledger
 	Engine *memory.Engine
@@ -80,7 +81,7 @@ func Open(cfg Config) (*App, error) {
 	}
 	eng.SetRefResolver(graphRefResolver{st: st})
 
-	a := &App{Git: gc, Store: st, Ledger: led, Engine: eng, Graph: gr, Clock: clk}
+	a := &App{Git: gc, Runner: runner, Store: st, Ledger: led, Engine: eng, Graph: gr, Clock: clk}
 	if err := a.writeMeta(context.Background()); err != nil {
 		_ = st.Close()
 		return nil, err

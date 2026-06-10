@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"strings"
+	"sync"
 
 	"git.gerwim.nl/gerwim/recarto/internal/clock"
 	"git.gerwim.nl/gerwim/recarto/internal/ledger"
@@ -22,6 +23,11 @@ type Engine struct {
 	clk clock.Clock
 	reg *parse.Registry
 	emb Embedder // optional semantic tier; nil => lexical-only search
+
+	// Background-refresh singleflight (see EnsureFresh): at most one in-flight
+	// reconcile per worktree in this process; failed runs linger for a cooldown.
+	freshMu   sync.Mutex
+	refreshes map[string]*refreshRun
 }
 
 // New builds an Engine, compiling the parse registry (which links tree-sitter).

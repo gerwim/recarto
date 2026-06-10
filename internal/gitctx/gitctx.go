@@ -36,6 +36,24 @@ func (r Real) Run(args ...string) (string, error) {
 	return strings.TrimSpace(string(out)), err
 }
 
+// LiveWorktrees returns the absolute paths of this repo's git worktrees, from
+// `git worktree list --porcelain` (one block per worktree; the path is on the
+// "worktree " line). Callers use it as the authoritative live set when pruning
+// stored graph data for deleted worktrees.
+func LiveWorktrees(r Runner) ([]string, error) {
+	out, err := r.Run("worktree", "list", "--porcelain")
+	if err != nil {
+		return nil, err
+	}
+	var paths []string
+	for line := range strings.SplitSeq(out, "\n") {
+		if p, ok := strings.CutPrefix(line, "worktree "); ok && p != "" {
+			paths = append(paths, p)
+		}
+	}
+	return paths, nil
+}
+
 func repoIDFromCommonDir(commonDir string) string {
 	sum := sha256.Sum256([]byte(filepath.Clean(commonDir)))
 	return hex.EncodeToString(sum[:])[:16]

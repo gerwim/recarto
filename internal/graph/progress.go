@@ -22,7 +22,10 @@ func (noopProgress) Phase(string) {}
 func (noopProgress) Done()        {}
 
 // reconcileOptions collects optional Reconcile behavior.
-type reconcileOptions struct{ progress Progress }
+type reconcileOptions struct {
+	progress Progress
+	force    bool
+}
 
 // ReconcileOption configures Reconcile / ReconcileIfStale.
 type ReconcileOption func(*reconcileOptions)
@@ -30,6 +33,14 @@ type ReconcileOption func(*reconcileOptions)
 // WithProgress reports per-file indexing progress to p.
 func WithProgress(p Progress) ReconcileOption {
 	return func(o *reconcileOptions) { o.progress = p }
+}
+
+// WithForce makes ReconcileIfStale ignore the freshness token and Reconcile
+// rebuild the secondary indexes and re-run a full resolve even when no file
+// changed — the explicit heal lever for a store damaged outside Recarto's view
+// (e.g. an aborted bulk load under an older binary).
+func WithForce() ReconcileOption {
+	return func(o *reconcileOptions) { o.force = true }
 }
 
 // resolve applies opts and fills in defaults.

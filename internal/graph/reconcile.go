@@ -2,6 +2,8 @@ package graph
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"runtime"
 	"sync"
 
@@ -37,9 +39,52 @@ type parsedFile struct {
 // Reconcile makes the worktree's graph match src: it (re)indexes new and changed
 // files (mtime/size pre-check, then content-hash confirm), deletes removed files,
 // and resolves name references. Unchanged files are skipped cheaply.
+// graphTokenKey prefixes the meta key holding a worktree's freshness token.
+const graphTokenKey = "graph_token:"
+
+// resolvePendingKey is the meta key marking that worktree has committed graph
+// writes (or dropped indexes) whose resolution has not completed. It is set
+// durably before the first destructive step of a mutating reconcile and cleared
+// only after resolution succeeds, so a reconcile killed at ANY point — client
+// cancellation, crash, power loss — leaves evidence the next reconcile acts on.
+// Without it, an abort after the last file write produces an empty worklist next
+// run, which would otherwise be indistinguishable from "nothing to do".
+func resolvePendingKey(worktree string) string { return "graph_resolve_pending:" + worktree }
+
+// resolvePending reports whether worktree has an interrupted reconcile to finish.
+func (e *Engine) resolvePending(ctx context.Context, worktree string) bool {
+	var v string
+	_ = e.st.DB.QueryRowContext(ctx,
+		`SELECT value FROM meta WHERE key=?`, resolvePendingKey(worktree)).Scan(&v)
+	return v != ""
+}
+
+func (e *Engine) setResolvePending(ctx context.Context, worktree string) error {
+	return e.st.WriteTx(ctx, func(c store.Conn) error {
+		_, err := c.ExecContext(ctx,
+			`INSERT INTO meta(key, value) VALUES (?, '1')
+			 ON CONFLICT(key) DO UPDATE SET value = '1'`, resolvePendingKey(worktree))
+		return err
+	})
+}
+
+func (e *Engine) clearResolvePending(ctx context.Context, worktree string) error {
+	return e.st.WriteTx(ctx, func(c store.Conn) error {
+		_, err := c.ExecContext(ctx,
+			`DELETE FROM meta WHERE key=?`, resolvePendingKey(worktree))
+		return err
+	})
+}
+
 func (e *Engine) Reconcile(ctx context.Context, worktree string, src Source, opts ...ReconcileOption) error {
 	var o reconcileOptions
 	o.resolve(opts)
+
+	// An interrupted previous reconcile (durable marker), a store whose secondary
+	// indexes are physically missing (aborted bulk load, possibly under an older
+	// binary that wrote no marker), or an explicit WithForce all force the
+	// rebuild-indexes + full-resolve path below even when no file changed.
+	pending := o.force || e.resolvePending(ctx, worktree) || e.graphIndexesMissing(ctx)
 
 	entries, err := src.List()
 	if err != nil {
@@ -95,12 +140,17 @@ func (e *Engine) Reconcile(ctx context.Context, worktree string, src Source, opt
 	for _, fe := range worklist {
 		dirtyPaths = append(dirtyPaths, fe.Path)
 	}
+	deletions := 0
 	for p := range have {
 		if !seen[p] {
 			dirtyPaths = append(dirtyPaths, p)
+			deletions++
 		}
 	}
-	incremental := len(have) > 0 && len(dirtyPaths) > 0 && len(dirtyPaths) <= maxIncrementalDirty
+	// Incremental resolve trusts the store's existing resolution as its baseline;
+	// a pending recovery means that baseline is incomplete (Resolve nulls call
+	// edges before rebuilding them), so recovery always takes the full path.
+	incremental := !pending && len(have) > 0 && len(dirtyPaths) > 0 && len(dirtyPaths) <= maxIncrementalDirty
 	// Pre-edit signals, captured BEFORE the rewrite deletes the old rows: the names
 	// a dirty file held (so a removed/renamed symbol still re-resolves the edges
 	// that pointed at it) and its `extends` edges (so a structural change falls back
@@ -129,7 +179,32 @@ func (e *Engine) Reconcile(ctx context.Context, worktree string, src Source, opt
 	// faster writes / ~12% faster first index on graphql-platform. Gated to a true
 	// first index (no rows yet) of a large repo, so incremental reindexes — which
 	// would pay a full rebuild to touch a few files — keep maintaining indexes inline.
-	bulkLoad := len(have) == 0 && len(worklist) > bulkLoadMinFiles
+	// Set the pending marker durably BEFORE the first destructive step (the bulk
+	// index drop, or the first batch write inside indexWorklist), so an abort at
+	// any later point is detectable next run. A worklist of only-touched files
+	// that all skip on content hash still pays the marker (it is cleared, without
+	// a resolve, at the end); actual mutation cannot be known before parsing.
+	willMutate := len(worklist) > 0 || deletions > 0
+	if willMutate && !pending {
+		if err := e.setResolvePending(ctx, worktree); err != nil {
+			return err
+		}
+	}
+
+	// Bulk-load only when the WHOLE store is empty, not just this worktree: the
+	// secondary indexes are shared by every worktree in the per-repo store, so
+	// dropping them during the first index of an ADDITIONAL worktree would make
+	// every other worktree's queries full-scan for the entire run — and the
+	// rebuild would pay for all worktrees' rows, not just this one's. (The ~40%
+	// write win was measured on a truly empty store.)
+	storeEmpty := false
+	if len(have) == 0 {
+		var one int
+		storeEmpty = errors.Is(
+			e.st.DB.QueryRowContext(ctx, `SELECT 1 FROM files LIMIT 1`).Scan(&one),
+			sql.ErrNoRows)
+	}
+	bulkLoad := storeEmpty && len(worklist) > bulkLoadMinFiles
 	if bulkLoad {
 		if err := e.dropGraphSecondaryIndexes(ctx); err != nil {
 			return err
@@ -163,8 +238,10 @@ func (e *Engine) Reconcile(ctx context.Context, worktree string, src Source, opt
 	}
 	// Resolution depends only on the stored nodes/edges. If this reconcile changed
 	// nothing (e.g. the freshness token moved but no source file did), the existing
-	// resolution is still correct — skip the full-worktree re-resolve.
-	if mutated {
+	// resolution is still correct — skip the full-worktree re-resolve. A pending
+	// recovery (or WithForce) overrides that: the store's resolution is suspect, so
+	// resolve even with an empty worklist.
+	if mutated || pending {
 		// Ensure the secondary indexes exist before resolving (Resolve keys on
 		// idx_nodes_name / idx_type_bindings_file_name / ...). After a bulk first
 		// index this rebuilds, in one pass each, the indexes dropped above; otherwise
@@ -194,11 +271,27 @@ func (e *Engine) Reconcile(ctx context.Context, worktree string, src Source, opt
 			return err
 		}
 	}
+	// Every committed write is now resolved (or nothing was written at all):
+	// drop the pending marker. Clearing any earlier would reopen the crash
+	// window the marker exists to close.
+	if willMutate || pending {
+		if err := e.clearResolvePending(ctx, worktree); err != nil {
+			return err
+		}
+	}
 	// Semantic tier (no-op unless an embedder is set): bring the vector index up
 	// to date. Best-effort — a model error must not fail reconciliation, since
 	// the lexical graph is already written and fully usable on its own.
 	if e.emb != nil {
 		_ = e.embedWorktree(ctx, worktree)
+	}
+	// Flush the WAL once per mutating reconcile. The resolve phase writes the
+	// most bytes of the whole run (edge updates, candidates, index rebuilds) and
+	// lands AFTER the last in-loop checkpoint; without this, every completed
+	// index leaves all of that in the WAL. Best-effort: TRUNCATE yields to
+	// concurrent readers, and the Stop hook retries at the next idle boundary.
+	if mutated || pending {
+		_ = e.st.Checkpoint(ctx)
 	}
 	o.progress.Done()
 	return nil
@@ -374,26 +467,34 @@ func (e *Engine) indexWorklist(ctx context.Context, worktree string, src Source,
 // leaves both mtime and size byte-for-byte identical, which a real write does not
 // produce.
 func (e *Engine) ReconcileIfStale(ctx context.Context, worktree string, src Source, token string, opts ...ReconcileOption) error {
-	const keyPrefix = "graph_token:"
-	if token != "" {
-		var stored string
-		_ = e.st.DB.QueryRowContext(ctx,
-			`SELECT value FROM meta WHERE key=?`, keyPrefix+worktree).Scan(&stored)
-		if stored == token {
-			return nil
-		}
+	var o reconcileOptions
+	for _, opt := range opts {
+		opt(&o)
+	}
+	// A matching token alone is not proof of health: a reconcile that died
+	// mid-recovery leaves the pending marker (or physically missing indexes)
+	// behind a token an earlier run stamped, so graphFresh checks all three.
+	// Each is a microsecond point lookup, keeping the per-query check cheap.
+	if !o.force && e.graphFresh(ctx, worktree, token) {
+		return nil
 	}
 	if err := e.Reconcile(ctx, worktree, src, opts...); err != nil {
 		return err
 	}
 	if token != "" {
-		return e.st.WriteTx(ctx, func(c store.Conn) error {
+		if err := e.st.WriteTx(ctx, func(c store.Conn) error {
 			_, err := c.ExecContext(ctx,
 				`INSERT INTO meta(key, value) VALUES (?, ?)
 				 ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
-				keyPrefix+worktree, token)
+				graphTokenKey+worktree, token)
 			return err
-		})
+		}); err != nil {
+			return err
+		}
+		// The stamp itself appended a WAL frame after Reconcile's flush; clear it
+		// so a completed reconcile leaves the WAL empty (best-effort, like all
+		// checkpoints: it yields to concurrent readers).
+		_ = e.st.Checkpoint(ctx)
 	}
 	return nil
 }

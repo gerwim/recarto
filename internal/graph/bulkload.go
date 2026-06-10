@@ -2,6 +2,7 @@ package graph
 
 import (
 	"context"
+	"strings"
 
 	"git.gerwim.nl/gerwim/recarto/internal/store"
 )
@@ -52,15 +53,51 @@ func (e *Engine) dropGraphSecondaryIndexes(ctx context.Context) error {
 	})
 }
 
+// createIndexHook, when non-nil, observes each secondary index build as it
+// completes — a test seam to prove an interruption between builds preserves
+// the finished ones. Nil in production.
+var createIndexHook func(name string)
+
 // createGraphSecondaryIndexes rebuilds the secondary indexes in one bulk pass each
 // over the finished tables. Must run after the bulk write and before Resolve.
+// Each index commits in its own transaction: on a large store every build takes
+// real time, and a single shared transaction would let one interruption (client
+// cancellation, crash) roll back every completed build — repeated under a
+// per-call timeout, the rebuild would never get past zero while bloating the
+// WAL with rolled-back pages each attempt. IF NOT EXISTS makes re-runs resume
+// from wherever the last attempt stopped.
 func (e *Engine) createGraphSecondaryIndexes(ctx context.Context) error {
-	return e.st.WriteTx(ctx, func(c store.Conn) error {
-		for _, ix := range graphSecondaryIndexes {
-			if _, err := c.ExecContext(ctx, ix.create); err != nil {
-				return err
-			}
+	for _, ix := range graphSecondaryIndexes {
+		err := e.st.WriteTx(ctx, func(c store.Conn) error {
+			_, err := c.ExecContext(ctx, ix.create)
+			return err
+		})
+		if err != nil {
+			return err
 		}
-		return nil
-	})
+		if createIndexHook != nil {
+			createIndexHook(ix.name)
+		}
+	}
+	return nil
+}
+
+// graphIndexesMissing reports whether any graph secondary index is absent from
+// the schema — physical evidence of a reconcile that died between dropping and
+// rebuilding them, possibly under a binary that predates the resolve-pending
+// marker, so it is checked alongside the marker. One point query over the tiny
+// sqlite_master table (microseconds); on a query error it reports false so a
+// transient failure here cannot trigger spurious full resolves — a genuine
+// store problem will surface from the reconcile itself.
+func (e *Engine) graphIndexesMissing(ctx context.Context) bool {
+	args := make([]any, len(graphSecondaryIndexes))
+	ph := make([]string, len(graphSecondaryIndexes))
+	for i, ix := range graphSecondaryIndexes {
+		args[i], ph[i] = ix.name, "?"
+	}
+	var n int
+	err := e.st.DB.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name IN (`+
+			strings.Join(ph, ",")+`)`, args...).Scan(&n)
+	return err == nil && n != len(graphSecondaryIndexes)
 }

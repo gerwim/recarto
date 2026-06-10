@@ -132,12 +132,21 @@ func (s *Store) writeTxOnce(ctx context.Context, fn func(c Conn) error) error {
 	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
 		return err // no transaction open yet; nothing to roll back
 	}
+	// The rollback must run even when — especially when — ctx is already
+	// cancelled, which is the usual reason we are rolling back. Issued with the
+	// caller's ctx it would be skipped by the ctx check in database/sql, and the
+	// connection would return to the pool with the transaction still open:
+	// uncommitted writes visible to later readers on that connection, and every
+	// later writer failing with "cannot start a transaction within a transaction".
+	rollback := func() {
+		_, _ = conn.ExecContext(context.WithoutCancel(ctx), "ROLLBACK")
+	}
 	if err := fn(conn); err != nil {
-		_, _ = conn.ExecContext(ctx, "ROLLBACK")
+		rollback()
 		return err
 	}
 	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
-		_, _ = conn.ExecContext(ctx, "ROLLBACK")
+		rollback()
 		return err
 	}
 	return nil
