@@ -112,15 +112,14 @@ func Graph(ctx context.Context, a *app.App, w io.Writer, args []string) error {
 			fmt.Fprintf(w, "(no %s found for %s)\n", dir, sym)
 			switch {
 			case graph.IsTypeKind(root.Kind):
-				fmt.Fprintf(w, "%s is a type (%s); call traces follow methods, not the declaration. Try: `graph impls %s` (implementers), `graph grep -r '\\b%s\\b'` (references), or `graph callers %s.<Method>`\n",
+				fmt.Fprintf(w, "%s is a type (%s); call traces follow methods, not the declaration. Try: `graph impls %s` (implementers), `graph refs %s` (references), or `graph callers %s.<Method>`\n",
 					sym, root.Kind, sym, sym, sym)
 			case dir == "callers":
 				// A method that resolved but has no callers in the graph: it may be an
 				// entrypoint (a public API, test, or DI-invoked handler), or its call
 				// sites bind dynamically/through an interface and weren't statically
-				// resolved. Steer to a reference search that is still inside recarto
-				// (`graph grep`) so the agent doesn't reach for shell grep.
-				fmt.Fprintf(w, "it may be an entrypoint, or callers bind dynamically and weren't statically resolved; `graph grep -r '\\b%s\\b'` finds textual references.\n", leafName(sym))
+				// resolved. Steer to a reference search that is still inside recarto.
+				fmt.Fprintf(w, "it may be an entrypoint, or callers bind dynamically and weren't statically resolved; `graph refs %s` finds the references the call edges miss.\n", leafName(sym))
 			}
 			return nil
 		}
@@ -140,9 +139,20 @@ func Graph(ctx context.Context, a *app.App, w io.Writer, args []string) error {
 		// definition node — they render identically, so N copies cost N× the tokens
 		// for zero added signal. We keep first-seen order and annotate the collapsed
 		// count with (×N) so the ambiguity is reported, not silently dropped.
+		anyCaller, allTest := false, true
 		lines := make([]string, 0, len(chains))
 		counts := map[string]int{}
 		for _, ch := range chains {
+			if dir == "callers" && len(ch) >= 2 {
+				anyCaller = true
+				// ch is engine order: queried symbol first, callers after — every hop
+				// past the root is a caller.
+				for _, n := range ch[1:] {
+					if !graph.IsTestPath(n.Path) {
+						allTest = false
+					}
+				}
+			}
 			parts := make([]string, len(ch))
 			for i, n := range ch {
 				label := n.Name
@@ -151,6 +161,9 @@ func Graph(ctx context.Context, a *app.App, w io.Writer, args []string) error {
 				}
 				if n.Receiver != "" {
 					label += " recv:" + n.Receiver
+				}
+				if graph.IsTestPath(n.Path) {
+					label += " [test]"
 				}
 				parts[i] = label
 			}
@@ -172,6 +185,9 @@ func Graph(ctx context.Context, a *app.App, w io.Writer, args []string) error {
 				line += fmt.Sprintf("  (×%d)", n)
 			}
 			fmt.Fprintln(w, line)
+		}
+		if dir == "callers" && anyCaller && allTest {
+			fmt.Fprintf(w, "note: every caller shown is test code — production may reach %s through a wrapper or sibling API; try `graph refs %s` for non-test references.\n", leafName(sym), leafName(sym))
 		}
 		return nil
 	case "arch":
@@ -384,6 +400,8 @@ func Graph(ctx context.Context, a *app.App, w io.Writer, args []string) error {
 				opts.Limit, _ = strconv.Atoi(strings.TrimPrefix(tok, "--limit="))
 			case strings.HasPrefix(tok, "--max-per-file="):
 				opts.MaxPerFile, _ = strconv.Atoi(strings.TrimPrefix(tok, "--max-per-file="))
+			case strings.HasPrefix(tok, "--offset="):
+				opts.Offset, _ = strconv.Atoi(strings.TrimPrefix(tok, "--offset="))
 			default:
 				pat = append(pat, tok)
 			}
@@ -409,7 +427,7 @@ func Graph(ctx context.Context, a *app.App, w io.Writer, args []string) error {
 			if meta.PerFileCapped {
 				note += " (some files capped — raise --max-per-file=)"
 			}
-			note += "; raise --limit= or narrow with --glob=/--lang="
+			note += "; page with --offset=/--limit= or narrow with --glob=/--lang="
 			fmt.Fprintln(w, note)
 		}
 		return nil
@@ -463,6 +481,7 @@ func Graph(ctx context.Context, a *app.App, w io.Writer, args []string) error {
 				return err
 			}
 			if res.Found {
+				fmt.Fprintf(w, "// %s:%d-%d\n", res.Path, res.StartLine, res.EndLine)
 				fmt.Fprintln(w, res.Snippet)
 				return nil
 			}
@@ -485,6 +504,7 @@ func Graph(ctx context.Context, a *app.App, w io.Writer, args []string) error {
 			if !res.Found {
 				return fmt.Errorf("graph snippet: symbol %q not found in %s", rest[1], rest[0])
 			}
+			fmt.Fprintf(w, "// %s:%d-%d\n", res.Path, res.StartLine, res.EndLine)
 			fmt.Fprintln(w, res.Snippet)
 			return nil
 		}
@@ -574,6 +594,7 @@ const graphUsage = `recarto graph <sub> — query the code graph
       --lang=<lang>                 restrict to a language (go, csharp, typescript, …)
       --limit=<n>                   max matches (default 50)
       --max-per-file=<n>            max matches per file (default 5)
+      --offset=<n>                  skip the first n matches (stable order; page with --offset/--limit)
   refs <symbol> [--limit=<n>]       every place a symbol is used: call sites, type usages,
                                     imports (graph edges) + a word-boundary text sweep;
                                     [test] marks hits in test code
@@ -590,7 +611,7 @@ const graphUsage = `recarto graph <sub> — query the code graph
       --edge=<kind> --edge-dir=in|out  keep only nodes with such an edge (calls, imports, …)
   snippet <symbol> | <file> <symbol>  exact source for a symbol (file optional)
                                     symbol = bare name, qualified name, or Type.Method suffix
-                                    overloads (one name, one file) print together
+                                    prints a // path:start-end header; overloads (one name, one file) print together
 
 Flags accept either form: --kind=class or --kind class.
 

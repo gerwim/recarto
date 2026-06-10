@@ -561,7 +561,7 @@ func TestGraphGrepReportsTruncation(t *testing.T) {
 }
 
 // TestGraphCallersTypeHint proves tracing a type (no call edges) steers the agent
-// to impls/grep instead of emitting a bare, misleading single line.
+// to impls/refs instead of emitting a bare, misleading single line.
 func TestGraphCallersTypeHint(t *testing.T) {
 	a := newTestApp(t, "main")
 	wt := t.TempDir()
@@ -577,8 +577,8 @@ func TestGraphCallersTypeHint(t *testing.T) {
 	if err := Graph(context.Background(), a, &out, []string{"callers", "IFoo"}); err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Contains(out.Bytes(), []byte("impls")) || !bytes.Contains(out.Bytes(), []byte("grep")) {
-		t.Errorf("callers of a type did not steer to impls/grep; output = %q", out.String())
+	if !bytes.Contains(out.Bytes(), []byte("impls")) || !bytes.Contains(out.Bytes(), []byte("refs")) {
+		t.Errorf("callers of a type did not steer to impls/refs; output = %q", out.String())
 	}
 }
 
@@ -642,5 +642,65 @@ func TestGraphRefsUnknownSymbol(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "did not resolve") {
 		t.Errorf("unknown symbol must say it did not resolve to a graph node:\n%s", buf.String())
+	}
+}
+
+func TestGraphGrepOffset(t *testing.T) {
+	a := newTestApp(t, "main")
+	wt := t.TempDir()
+	a.Git.Worktree = wt
+	writeRepoFile(t, wt, "t.go", "package p\n// needle one\n// needle two\nfunc F() {}\n")
+	if err := a.Graph.Reconcile(context.Background(), wt, graph.FSSource{Root: wt}); err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	if err := Graph(context.Background(), a, &buf, []string{"grep", "needle", "--offset=1", "--limit=1"}); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "t.go:3") || strings.Contains(out, "t.go:2") {
+		t.Errorf("offset=1 must return only the second match (t.go:3):\n%s", out)
+	}
+}
+
+func TestGraphSnippetPrintsPathHeader(t *testing.T) {
+	a := newTestApp(t, "main")
+	wt := t.TempDir()
+	a.Git.Worktree = wt
+	writeRepoFile(t, wt, "a.go", "package p\nfunc Target() {}\n")
+	if err := a.Graph.Reconcile(context.Background(), wt, graph.FSSource{Root: wt}); err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	if err := Graph(context.Background(), a, &buf, []string{"snippet", "Target"}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(buf.String(), "// a.go:2-2\n") {
+		t.Errorf("snippet must lead with its // path:start-end header:\n%s", buf.String())
+	}
+}
+
+func TestGraphCallersMarksTestCallers(t *testing.T) {
+	a := newTestApp(t, "main")
+	wt := t.TempDir()
+	a.Git.Worktree = wt
+	writeRepoFile(t, wt, "a.go", "package p\nfunc Target() {}\n")
+	writeRepoFile(t, wt, "a_test.go", "package p\nfunc helperT() { Target() }\n")
+	if err := a.Graph.Reconcile(context.Background(), wt, graph.FSSource{Root: wt}); err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	if err := Graph(context.Background(), a, &buf, []string{"callers", "Target"}); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "helperT [test]") && !strings.Contains(out, "helperT [test·") {
+		// label order: name, then [test], then [resolution·confidence] — assert leniently on "helperT" + "[test]"
+		if !(strings.Contains(out, "helperT") && strings.Contains(out, "[test]")) {
+			t.Errorf("test caller must carry a [test] marker:\n%s", out)
+		}
+	}
+	if !strings.Contains(out, "every caller shown is test code") {
+		t.Errorf("all-test callers must print the steer note:\n%s", out)
 	}
 }
