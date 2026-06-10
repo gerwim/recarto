@@ -327,7 +327,7 @@ type SearchContentInput struct {
 	Language   string `json:"language,omitempty" jsonschema:"restrict to a language (go, csharp, typescript, tsx, javascript). NOTE: this scopes the search to indexed code of that language; omit it to also search config/docs/data files (.csproj, .json, .yaml, .md, …)."`
 	Limit      int    `json:"limit,omitempty" jsonschema:"max matches (default 50)"`
 	MaxPerFile int    `json:"max_per_file,omitempty" jsonschema:"max matches per file (default 5) so one file cannot dominate the page"`
-	Offset     int    `json:"offset,omitempty" jsonschema:"skip the first N matches of the stable result order — page through a truncated result with offset+limit instead of re-fetching with a bigger limit"`
+	Offset     int    `json:"offset,omitempty" jsonschema:"skip the first N matches of the stable result order — page with offset+limit instead of re-fetching with a bigger limit. Pages the returned (per-file-capped) order: when per_file_capped is true, the withheld same-file matches are reached by raising max_per_file, not by paging deeper"`
 }
 type ContentMatch struct {
 	Path   string `json:"path"`

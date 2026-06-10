@@ -171,9 +171,12 @@ func (e *Engine) SearchContentWithMeta(ctx context.Context, worktree, pattern st
 	// the combined list is capped to the budget. Nothing hand-written is dropped
 	// before a generated hit.
 	out := append(hand, gen...)
-	// Offset pages through the post-cap ordering (hand-written before generated,
-	// path order) — the same stable order every call returns, so offset+limit
-	// walks it without overlap. Overshooting is an empty page, not an error.
+	// Offset pages through the MATERIALIZED ordering (hand-written before
+	// generated, path order, after the per-file cap) — the same stable order
+	// every call returns, so offset+limit walks it without overlap. Matches
+	// withheld by MaxPerFile are never in this list: when per_file_capped is
+	// set, paging deeper cannot reach them — raise MaxPerFile instead.
+	// Overshooting is an empty page, not an error.
 	if opts.Offset > 0 {
 		if opts.Offset >= len(out) {
 			out = out[:0]

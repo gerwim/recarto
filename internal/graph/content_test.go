@@ -280,6 +280,25 @@ func TestSearchContentOffsetPaging(t *testing.T) {
 	}
 }
 
+func TestSearchContentOffsetCannotReachPerFileCapped(t *testing.T) {
+	e := newTestEngine(t)
+	ctx := context.Background()
+	wt := t.TempDir()
+	indexInto(t, e, wt, "t.go", "package p\n// needle 1\n// needle 2\n// needle 3\n// needle 4\n// needle 5\n// needle 6\nfunc F() {}\n")
+
+	res, m, err := e.SearchContentWithMeta(ctx, wt, "needle", ContentSearchOpts{Limit: 10, MaxPerFile: 3, Offset: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Only 3 matches are materialized (per-file cap); offset 3 overshoots them.
+	// truncated stays true (total > offset+shown) and per_file_capped tells the
+	// caller to raise max_per_file — paging deeper will never surface the rest.
+	if len(res) != 0 || !m.Truncated || !m.PerFileCapped || m.Total != 6 {
+		t.Fatalf("got %d matches, truncated=%v, per_file_capped=%v, total=%d; want 0/true/true/6",
+			len(res), m.Truncated, m.PerFileCapped, m.Total)
+	}
+}
+
 // TestSearchContentMetaNoTruncation proves a complete result set is reported as
 // such — no false truncation warning when every match is shown.
 func TestSearchContentMetaNoTruncation(t *testing.T) {
