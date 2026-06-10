@@ -225,6 +225,9 @@ func TestTraceCallPathCallersReadInCallsDirection(t *testing.T) {
 	if multi[len(multi)-1].Symbol != "Target" {
 		t.Errorf("queried symbol must be the last hop (calls direction); chain = %+v", multi)
 	}
+	if strings.Contains(out.Hint, "test code") {
+		t.Errorf("hint = %q, want no all-test-callers hint for production callers", out.Hint)
+	}
 }
 
 func contains(ss []string, want string) bool {

@@ -58,6 +58,10 @@ per-repo SQLite cache outside the working tree.
   ` + "`candidates`" + ` (path/line/qualified_name); re-query with a qualified name (usually
   unique) or add the file. Overloads of one method (same qualified name, same file)
   come back together in a single snippet — no disambiguation needed.
+  Every snippet carries its ` + "`path`" + ` and line range — cite it as ` + "`path:line`" + ` and
+  edit without a second lookup. Need several symbols after one search? Pass
+  ` + "`symbols`" + ` (≤10) and get them all in one call; anything beyond the cap is
+  listed in ` + "`skipped`" + `, never silently dropped.
 - **Orient first** in unfamiliar code with ` + "`get_architecture`" + ` (module/file/symbol
   map), then ` + "`search_graph`" + ` (ranked concept/identifier search) or ` + "`query_graph`" + `
   (exact structured filters — kind/name/path/language/edge, at least one required;
