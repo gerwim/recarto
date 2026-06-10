@@ -110,6 +110,9 @@ UPDATE edges SET dst_node_id = NULL
 		if err := resolveNameFallback(ctx, c, worktree); err != nil {
 			return err
 		}
+		if _, err := c.ExecContext(ctx, stratImplicitCtor, worktree, worktree); err != nil {
+			return err
+		}
 
 		// Denormalize: edges.dst_node_id = best candidate per call edge — highest
 		// confidence, then locality (same-file, then same-top-level-directory),
@@ -746,7 +749,31 @@ var callStrategies = []string{
 	stratStatic,
 	stratInterface,
 	stratNameFallback,
+	stratImplicitCtor,
 }
+
+// stratImplicitCtor (S6, runs last): a constructor invocation of a type with no
+// explicit constructor — C# `new GeoPoint(...)` on a positional record or a
+// default-constructed class. The creation site emits a calls edge named after
+// the type, but every earlier strategy binds only to CALLABLE nodes, so without
+// an explicit constructor the edge stayed unresolved and the type reported "no
+// callers" even though an LSP counts the `new` among its usages. Bind such
+// still-unresolved edges to the same-language type declaration itself (the type
+// stands in for its implicit constructor). The NOT EXISTS keeps this strictly a
+// fallback: any callable binding from S1–S5 suppresses it, so ordinary method
+// calls are untouched. SQLite materializes the SELECT before inserting (the
+// target table is read by the subquery), so the pass is deterministic.
+const stratImplicitCtor = `
+INSERT OR IGNORE INTO edge_candidates(edge_id, dst_node_id, confidence, method)
+SELECT ed.id, m.id, 0.45, 'ctor'
+  FROM files ef
+  CROSS JOIN edges ed ON ed.file_id = ef.id
+       AND ed.kind = 'calls' AND ed.dst_name <> ''
+  CROSS JOIN nodes m ON m.kind IN ('class','record','struct') AND m.name = ed.dst_name
+  JOIN files mf ON mf.id = m.file_id
+ WHERE ef.worktree = ? AND mf.worktree = ?
+   AND ef.language = mf.language
+   AND NOT EXISTS (SELECT 1 FROM edge_candidates ec0 WHERE ec0.edge_id = ed.id)`
 
 // stratInterface (S4, C#): the receiver's bound type T is an interface or base
 // class; expand to <method> on each implementing/deriving type, found via the

@@ -15,8 +15,14 @@ type Symbol struct {
 	RecvType      string // method receiver type, "" unless a Go method (e.g. "Saga")
 	StartByte     uint
 	EndByte       uint
-	StartLine     uint // 1-based
+	StartLine     uint // 1-based, first line of the full span (attributes/decorators included)
 	EndLine       uint // 1-based
+	// NameByte/NameLine locate the declared identifier itself. A C# attribute or
+	// TS decorator is part of the declaration node, so StartLine points at the
+	// attribute line — but "where is this symbol" questions (outline, query,
+	// search) want the line that names it.
+	NameByte uint
+	NameLine uint // 1-based
 }
 
 // Edge is a reference (call/import/extends/implements) anchored at a byte offset
@@ -93,12 +99,15 @@ func (r *Registry) ParseFile(lang, path string, src []byte) (Result, error) {
 		var name, recv, recvType, recvName, bindName, bindType string
 		var defKind, refKind string
 		var sb, eb, sl, el uint
+		var nameByte, nameLine uint
 		var recvNameByte, bindByte uint
 		for _, c := range m.Captures {
 			cn := captureNames[c.Index]
 			switch {
 			case cn == "name":
 				name = strings.Trim(c.Node.Utf8Text(src), `"`)
+				nameByte = c.Node.StartByte()
+				nameLine = c.Node.StartPosition().Row + 1
 			case cn == "recv":
 				recv = c.Node.Utf8Text(src)
 			case cn == "recv.type":
@@ -126,6 +135,7 @@ func (r *Registry) ParseFile(lang, path string, src []byte) (Result, error) {
 			res.Symbols = append(res.Symbols, Symbol{
 				Kind: defKind, Name: name, QualifiedName: name, RecvType: recvType,
 				StartByte: sb, EndByte: eb, StartLine: sl, EndLine: el,
+				NameByte: nameByte, NameLine: nameLine,
 			})
 			if recvType != "" && recvName != "" {
 				res.Bindings = append(res.Bindings,

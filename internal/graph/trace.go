@@ -117,49 +117,71 @@ func (e *Engine) TraceCallPathFiltered(ctx context.Context, worktree, symbol, di
 	var chains [][]CallNode
 	emitted := 0
 	truncated := false
-	// curIDs is the frontier: a single node for ordinary hops, or every
-	// same-named definition for an aggregated ambiguous root.
-	var walk func(curIDs []string, path []CallNode, visited map[string]bool, d int)
-	walk = func(curIDs []string, path []CallNode, visited map[string]bool, d int) {
-		if truncated {
-			return
-		}
-		if d == 0 {
-			chains = append(chains, path)
-			return // depth limit reached; don't issue a needless neighbor query
-		}
-		next, err := e.callNeighbors(ctx, worktree, curIDs, direction, minConf)
-		if err != nil || len(next) == 0 {
-			chains = append(chains, path)
-			return
-		}
-		for _, nb := range next {
-			if visited[nb.NodeID] {
-				continue
-			}
-			if emitted >= traceNodeBudget {
-				truncated = true
-				chains = append(chains, append(append([]CallNode{}, path...),
-					CallNode{Name: "… (node budget reached; narrow the symbol or lower depth)"}))
-				return
-			}
-			emitted++
-			childPath := append(append([]CallNode{}, path...), nb)
-			// Uncertainty is terminal: a low-confidence hop is reported as a leaf,
-			// never expanded into a speculative cross-product.
-			if nb.Confidence == "low" {
-				chains = append(chains, childPath)
-				continue
-			}
-			v2 := make(map[string]bool, len(visited)+1)
-			for k := range visited {
-				v2[k] = true
-			}
-			v2[nb.NodeID] = true
-			walk([]string{nb.NodeID}, childPath, v2, d-1)
-		}
+	// Breadth-first within the node budget: every hop at depth d is emitted
+	// before any hop at depth d+1 spends budget. Depth-first traversal let one
+	// dense sibling's subtree exhaust the budget and silently drop the ROOT's
+	// remaining direct callers/callees — the primary answer to the query —
+	// while showing great-grandchildren of the first branch. An item's ids are
+	// a single node for ordinary hops, or every same-named definition for an
+	// aggregated ambiguous root.
+	type workItem struct {
+		ids     []string
+		path    []CallNode
+		visited map[string]bool
 	}
-	walk(rootIDs, []CallNode{rootLabel}, visited, depth)
+	frontier := []workItem{{ids: rootIDs, path: []CallNode{rootLabel}, visited: visited}}
+	for d := depth; d > 0 && len(frontier) > 0 && !truncated; d-- {
+		var deeper []workItem
+		for _, it := range frontier {
+			if truncated {
+				// Budget closed mid-level: surviving frontier paths are already
+				// budgeted hops — keep them as chains rather than losing them.
+				chains = append(chains, it.path)
+				continue
+			}
+			next, err := e.callNeighbors(ctx, worktree, it.ids, direction, minConf)
+			if err != nil || len(next) == 0 {
+				chains = append(chains, it.path)
+				continue
+			}
+			progressed := false
+			for _, nb := range next {
+				if it.visited[nb.NodeID] {
+					continue
+				}
+				if emitted >= traceNodeBudget {
+					truncated = true
+					chains = append(chains, append(append([]CallNode{}, it.path...),
+						CallNode{Name: "… (node budget reached; narrow the symbol or lower depth)"}))
+					break
+				}
+				emitted++
+				progressed = true
+				childPath := append(append([]CallNode{}, it.path...), nb)
+				// Uncertainty is terminal: a low-confidence hop is reported as a leaf,
+				// never expanded into a speculative cross-product.
+				if nb.Confidence == "low" {
+					chains = append(chains, childPath)
+					continue
+				}
+				v2 := make(map[string]bool, len(it.visited)+1)
+				for k := range it.visited {
+					v2[k] = true
+				}
+				v2[nb.NodeID] = true
+				deeper = append(deeper, workItem{ids: []string{nb.NodeID}, path: childPath, visited: v2})
+			}
+			if !progressed && !truncated {
+				chains = append(chains, it.path)
+			}
+		}
+		frontier = deeper
+	}
+	// Depth exhausted (or budget closed): every path still on the frontier is a
+	// real, already-budgeted chain.
+	for _, it := range frontier {
+		chains = append(chains, it.path)
+	}
 	// Resolved-but-no-new-chains: the symbol matched real definitions, but every
 	// neighbor was already on the start frontier (a self-recursive method, or
 	// sibling overloads that only call one another). The walk appended nothing, so

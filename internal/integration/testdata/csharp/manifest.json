@@ -1,0 +1,12 @@
+{
+  "language": "csharp",
+  "comment": "//",
+  "source_exts": [".cs"],
+  "exclude_dirs": ["bin", "obj"],
+  "lsp_command": ["csharp-ls"],
+  "lsp_known_misses": {
+    "IsLarge": {
+      "Fixture.App/Program.cs:41": "csharp-ls 0.24 misses extension-method references whose receiver needs an implicit conversion (Circle -> IShape); Rider counts this usage and recarto's grep finds it"
+    }
+  }
+}

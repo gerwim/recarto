@@ -1,0 +1,6 @@
+# Building the fixture solution (done ad hoc to validate it compiles) must
+# never commit artifacts: obj/ contains GENERATED .cs files that would change
+# the suite's expected symbol census. The harness also excludes these dirs at
+# runtime via manifest.json exclude_dirs.
+src/**/bin/
+src/**/obj/

@@ -3,6 +3,9 @@
 (type_spec name: (type_identifier) @name) @definition.type
 (call_expression function: (identifier) @name) @reference.call
 (call_expression function: (selector_expression operand: (_) @recv field: (field_identifier) @name)) @reference.call
+; parenthesized callees — `(f)(x)`, `(obj.m)()` — per upstream tags.scm
+(call_expression function: (parenthesized_expression (identifier) @name)) @reference.call
+(call_expression function: (parenthesized_expression (selector_expression operand: (_) @recv field: (field_identifier) @name))) @reference.call
 (import_spec path: (interpreted_string_literal) @name) @reference.import
 
 ; type bindings: parameter (incl. method receiver) / typed var / := composite literal / := &composite

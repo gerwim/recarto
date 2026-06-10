@@ -127,6 +127,17 @@ func (s *writeStmts) Close() {
 	}
 }
 
+// lineStart returns the byte offset of the start of the line containing pos.
+func lineStart(src []byte, pos uint) uint {
+	if int(pos) > len(src) {
+		pos = uint(len(src))
+	}
+	if i := bytes.LastIndexByte(src[:pos], '\n'); i >= 0 {
+		return uint(i + 1)
+	}
+	return 0
+}
+
 // signatureOf returns the symbol's first source line (trimmed, capped), used as a
 // cheap one-line signature surfaced in search results.
 func signatureOf(src []byte, start uint, max int) string {
@@ -234,11 +245,22 @@ func buildFileGraph(src []byte, res parse.Result) fileGraph {
 		// same identifier-split content; the trigram broadener stores the raw name +
 		// qualified name for substring matching.
 		ftsName, ftsQN := ftsText(s.Name), ftsText(qn)
+		// The reported line and one-line signature anchor on the line declaring
+		// the symbol's NAME, not the span start: a C# attribute (or TS decorator)
+		// is part of the declaration node, so the span starts at the attribute and
+		// would misreport both the line and the signature ("[Obsolete(...)]"
+		// instead of the method header). The byte span stays attribute-inclusive —
+		// snippets should show the attribute.
+		declLine, sigFrom := s.StartLine, s.StartByte
+		if s.NameLine > 0 {
+			declLine = s.NameLine
+			sigFrom = lineStart(src, s.NameByte)
+		}
 		g.nodes = append(g.nodes, nodeRow{
 			id: spans[i].id, kind: s.Kind, name: s.Name, qn: qn, parentName: parentSegment(qn),
-			signature: signatureOf(src, s.StartByte, 200),
+			signature: signatureOf(src, sigFrom, 200),
 			startByte: int64(s.StartByte), endByte: int64(s.EndByte),
-			startLine: int64(s.StartLine), endLine: int64(s.EndLine),
+			startLine: int64(declLine), endLine: int64(s.EndLine),
 			ftsName: ftsName, ftsQN: ftsQN, ftsTri: s.Name + " " + qn,
 		})
 	}
