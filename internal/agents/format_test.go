@@ -1,6 +1,7 @@
 package agents
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -103,6 +104,29 @@ func TestFormatSessionContextPinnedDNRIncludesCaveat(t *testing.T) {
 	out, _ := formatSessionContext(results, graph.Architecture{}, nil, nil, 0, 0, 1500)
 	if !strings.Contains(out, "not present in this worktree") {
 		t.Fatalf("expected caveat in pinned do_not_repeat output, got:\n%s", out)
+	}
+}
+
+func TestFormatDeltaTierDegradesUnderBudgetWithLongNames(t *testing.T) {
+	// Use unqualified names (no dot) so leafName returns the full name without
+	// stripping, ensuring the symbol-names line is long enough to exceed the budget
+	// before degradation. 3 names of 160 chars each in one module pushes the output
+	// to ~157 tokens (> 150 budget), triggering the degradation path.
+	long := strings.Repeat("A", 160)
+	deltas := []graph.Delta{
+		{Path: "internal/the/module/f0.go", QualifiedName: fmt.Sprintf("%s0", long), Kind: "method", Change: "added"},
+		{Path: "internal/the/module/f1.go", QualifiedName: fmt.Sprintf("%s1", long), Kind: "method", Change: "added"},
+		{Path: "internal/the/module/f2.go", QualifiedName: fmt.Sprintf("%s2", long), Kind: "method", Change: "added"},
+	}
+	out := formatDeltaTier(deltas, 3, 1749340800000)
+	if got := ledger.EstimateTokens(out); got > deltaTierBudget {
+		t.Errorf("degraded tier costs %d tokens, budget %d:\n%s", got, deltaTierBudget, out)
+	}
+	if !strings.Contains(out, "(Jun") {
+		t.Errorf("degradation must never strip the baseline date from the header:\n%s", out)
+	}
+	if !strings.Contains(out, "get_graph_delta") {
+		t.Errorf("drill-down pointer must survive degradation:\n%s", out)
 	}
 }
 

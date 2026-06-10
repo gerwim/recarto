@@ -232,6 +232,12 @@ func nullable(s string) any {
 // path segment, matching how the code map names top-level modules), symbol
 // names for the heaviest module only, and the drill-down pointer. Empty input
 // renders nothing — a no-op session must not produce an empty list.
+//
+// Budget degradation drops names first, then trims module lines (5→3→1), then
+// falls back to a header-only pointer. The header date is never stripped.
+// Every stage is re-measured so the invariant "output ≤ deltaTierBudget" is
+// guaranteed by construction, not by a post-hoc truncation that can corrupt the
+// header (the old approach hit the date's " (" before the names list).
 func formatDeltaTier(deltas []graph.Delta, total int, baselineMs int64) string {
 	if len(deltas) == 0 {
 		return ""
@@ -275,47 +281,65 @@ func formatDeltaTier(deltas []graph.Delta, total int, baselineMs int64) string {
 		return ai.added+ai.changed+ai.removed > aj.added+aj.changed+aj.removed
 	})
 
-	var b strings.Builder
-	fmt.Fprintf(&b, "\nChanged since your last working session here (%s):\n",
-		time.UnixMilli(baselineMs).Format("Jan 2"))
 	const maxModLines = 5
-	for i, m := range order {
-		if i >= maxModLines {
-			fmt.Fprintf(&b, "- … %d more modules\n", len(order)-maxModLines)
-			break
-		}
-		a := mods[m]
-		line := "- " + m + ":"
-		if a.added > 0 {
-			line += fmt.Sprintf(" +%d", a.added)
-		}
-		if a.changed > 0 {
-			line += fmt.Sprintf(" ~%d", a.changed)
-		}
-		if a.removed > 0 {
-			line += fmt.Sprintf(" -%d", a.removed)
-		}
-		if i == 0 && len(a.names) > 0 {
-			n := a.names
-			if len(n) > 3 {
-				n = n[:3]
+	date := time.UnixMilli(baselineMs).Format("Jan 2")
+
+	// compose builds the output string with the given configuration. withNames
+	// controls whether symbol names are appended to the top module's line.
+	// modCap limits how many module lines are emitted.
+	compose := func(withNames bool, modCap int) string {
+		var b strings.Builder
+		fmt.Fprintf(&b, "\nChanged since your last working session here (%s):\n", date)
+		for i, m := range order {
+			if i >= modCap {
+				fmt.Fprintf(&b, "- … %d more modules\n", len(order)-modCap)
+				break
 			}
-			line += " (" + strings.Join(n, ", ") + ", …)"
-			if len(a.names) <= 3 {
-				line = strings.Replace(line, ", …)", ")", 1)
+			a := mods[m]
+			line := "- " + m + ":"
+			if a.added > 0 {
+				line += fmt.Sprintf(" +%d", a.added)
 			}
+			if a.changed > 0 {
+				line += fmt.Sprintf(" ~%d", a.changed)
+			}
+			if a.removed > 0 {
+				line += fmt.Sprintf(" -%d", a.removed)
+			}
+			if withNames && i == 0 && len(a.names) > 0 {
+				n := a.names
+				if len(n) > 3 {
+					n = n[:3]
+				}
+				line += " (" + strings.Join(n, ", ") + ", …)"
+				if len(a.names) <= 3 {
+					line = strings.Replace(line, ", …)", ")", 1)
+				}
+			}
+			b.WriteString(line + "\n")
 		}
-		b.WriteString(line + "\n")
+		fmt.Fprintf(&b, "(get_graph_delta lists all %d)\n", total)
+		return b.String()
 	}
-	fmt.Fprintf(&b, "(get_graph_delta lists all %d)\n", total)
-	out := b.String()
-	// Degrade under budget: drop the symbol names first, then the module tail.
-	if ledger.EstimateTokens(out) > deltaTierBudget {
-		if i := strings.Index(out, " ("); i >= 0 {
-			if j := strings.Index(out[i:], ")"); j >= 0 {
-				out = out[:i] + out[i+j+1:]
-			}
+
+	// Attempt each degradation stage in order. Names are dropped first, then
+	// module-line count is trimmed (5→3→1). Every stage is re-measured so the
+	// budget invariant is enforced by construction — we never slice into the
+	// already-rendered string (which would corrupt the header date).
+	out := compose(true, maxModLines)
+	for _, fb := range []struct {
+		names bool
+		lines int
+	}{{false, maxModLines}, {false, 3}, {false, 1}} {
+		if ledger.EstimateTokens(out) <= deltaTierBudget {
+			return out
 		}
+		out = compose(fb.names, fb.lines)
+	}
+	if ledger.EstimateTokens(out) > deltaTierBudget {
+		// Last resort: orientation header + drill-down pointer only.
+		out = fmt.Sprintf("\nChanged since your last working session here (%s): %d symbols.\n(get_graph_delta lists them)\n",
+			date, total)
 	}
 	return out
 }

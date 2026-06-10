@@ -518,13 +518,27 @@ func TestSessionStartShowsDeltaSinceLastWorkingSession(t *testing.T) {
 	// Advance clock to a new instant for session 3.
 	clk.Advance(time.Second)
 
-	// Session 3 must still show session 1's changes (baseline skips the no-op).
-	res, err := Handle(ctx, a, Event{Kind: KindSessionStart, SessionID: "s3", Agent: "claude-code"})
+	// Session 3 is also a no-op: still no deltas in its window.
+	// This is the genuine /clear-skip stress case: s2 is now a candidate for
+	// "last prior session with started_at < s3.started_at", but only the EXISTS
+	// clause (no deltas) correctly skips it and walks back to s1.
+	if _, err := Handle(ctx, a, Event{Kind: KindSessionStart, SessionID: "s3", Agent: "claude-code"}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Advance clock to a new instant for session 4.
+	clk.Advance(time.Second)
+
+	// Session 4 must still show session 1's changes even with two consecutive no-ops
+	// between it and the last working session. The EXISTS clause is what makes this
+	// work — without it, s3 (started_at < s4, no deltas) would be picked as the
+	// baseline, yielding an empty delta tier.
+	res, err := Handle(ctx, a, Event{Kind: KindSessionStart, SessionID: "s4", Agent: "claude-code"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(res.Context, "Changed since your last working session") ||
-		!strings.Contains(res.Context, "Extra") && !strings.Contains(res.Context, "~") {
-		t.Errorf("session 3 context missing the delta tier:\n%s", res.Context)
+		(!strings.Contains(res.Context, "Extra") && !strings.Contains(res.Context, "~")) {
+		t.Errorf("session 4 context missing the delta tier (EXISTS clause must skip both no-op sessions):\n%s", res.Context)
 	}
 }
