@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 
+	"git.gerwim.nl/gerwim/recarto/internal/ids"
 	"git.gerwim.nl/gerwim/recarto/internal/store"
 )
 
@@ -957,6 +958,37 @@ SELECT edge_id, dst_node_id, CASE WHEN cnt = 1 THEN 0.45 ELSE 0.2 END, 'name' FR
 // cascade via FK; nodes_fts rows are dropped manually (FTS5 is unlinked).
 func (e *Engine) deleteFile(ctx context.Context, worktree, path string) error {
 	return e.st.WriteTx(ctx, func(c store.Conn) error {
+		// A vanished file's symbols journal as removed (same identity rules as
+		// writeFileGraph; the file's id row still exists at this point).
+		{
+			now := e.clk.Now().UnixMilli()
+			rows, err := c.QueryContext(ctx, `
+SELECT n.qualified_name, n.kind FROM nodes n JOIN files f ON f.id = n.file_id
+ WHERE f.worktree = ? AND f.path = ?`, worktree, path)
+			if err != nil {
+				return err
+			}
+			var syms [][2]string
+			for rows.Next() {
+				var qn, kind string
+				if err := rows.Scan(&qn, &kind); err != nil {
+					rows.Close()
+					return err
+				}
+				syms = append(syms, [2]string{qn, kind})
+			}
+			rows.Close()
+			if err := rows.Err(); err != nil {
+				return err
+			}
+			for _, s := range syms {
+				if _, err := c.ExecContext(ctx,
+					`INSERT INTO graph_deltas(id, worktree, path, qualified_name, kind, change, at)
+					 VALUES (?,?,?,?,?,?,?)`, ids.New(), worktree, path, s[0], s[1], "removed", now); err != nil {
+					return err
+				}
+			}
+		}
 		if _, err := c.ExecContext(ctx, `
 DELETE FROM nodes_fts WHERE node_id IN (
   SELECT n.id FROM nodes n JOIN files f ON f.id = n.file_id

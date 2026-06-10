@@ -336,6 +336,12 @@ func (e *Engine) writeFileGraph(ctx context.Context, c store.Conn, st *writeStmt
 	case err != nil:
 		return err
 	default:
+		// Journal symbol-level deltas before the old rows are replaced — this is
+		// the only moment both node sets exist. New files (ErrNoRows above) are
+		// first-index and journal nothing.
+		if err := journalFileDeltas(ctx, c, worktree, path, fileID, g.nodes, now); err != nil {
+			return err
+		}
 		// Drop the file's FTS rows before deleting nodes (FTS5 is not linked).
 		if _, err := c.ExecContext(ctx,
 			`DELETE FROM nodes_fts WHERE node_id IN (SELECT id FROM nodes WHERE file_id=?)`,
