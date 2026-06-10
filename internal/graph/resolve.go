@@ -126,6 +126,19 @@ UPDATE edges SET dst_node_id = NULL
 			`CREATE INDEX IF NOT EXISTS idx_edge_candidates_dst ON edge_candidates(dst_node_id)`); err != nil {
 			return err
 		}
+		// Refresh planner statistics over the rewritten graph. The store never ran
+		// ANALYZE before, so every query was costed from guesses — which is one bad
+		// estimate away from a table scan (the read paths that matter are CROSS
+		// JOIN-pinned, but ad-hoc shapes like query_graph filters are not).
+		// analysis_limit bounds the per-index scan so this stays sub-second even on
+		// a multi-hundred-MB store (SQLite's recommended production setting).
+		// Incremental resolve skips this: stats from the last full pass stay valid.
+		if _, err := c.ExecContext(ctx, `PRAGMA analysis_limit=1000`); err != nil {
+			return err
+		}
+		if _, err := c.ExecContext(ctx, `ANALYZE`); err != nil {
+			return err
+		}
 		// Drop the shared prefix temp table so it does not linger on this pooled
 		// connection after the transaction commits.
 		_, err := c.ExecContext(ctx, `DROP TABLE IF EXISTS recv_types`)

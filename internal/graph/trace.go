@@ -234,6 +234,36 @@ SELECT n.id, n.name, n.kind, f.path, n.start_line, (n.qualified_name = ?) AS exa
 	return out, rows.Err()
 }
 
+// callNeighborsQuery builds the neighbor-expansion SQL for one direction with n
+// IN-list placeholders. The join order is FORCED with CROSS JOIN (SQLite honors
+// it as an ordering directive): the driver must be the IN-constrained table —
+// edge_candidates by dst for callers, edges by src for callees. Left to cost
+// estimates, a stat-less store let the planner drive the callers query from
+// `files` instead, enumerating every call edge in the worktree per hop; on an
+// aggregated 128-definition root (`callers ExecuteAsync` on graphql-platform)
+// that inverted plan took ~21s where the forced one takes milliseconds.
+func callNeighborsQuery(direction string, n int) string {
+	ph := strings.TrimSuffix(strings.Repeat("?,", n), ",")
+	if direction == "callers" {
+		return `
+SELECT ed.id, n.id, n.name, f.path, n.start_line, ec.confidence, ec.method, ed.dst_recv
+  FROM edge_candidates ec
+  CROSS JOIN edges ed ON ed.id = ec.edge_id
+  CROSS JOIN nodes n  ON n.id = ed.src_node_id
+  CROSS JOIN files f  ON f.id = n.file_id
+ WHERE ed.kind='calls' AND ec.dst_node_id IN (` + ph + `) AND f.worktree = ?
+ ORDER BY ed.id, ec.confidence DESC, n.id`
+	}
+	return `
+SELECT ed.id, n.id, n.name, f.path, n.start_line, ec.confidence, ec.method, ed.dst_recv
+  FROM edges ed
+  CROSS JOIN edge_candidates ec ON ec.edge_id = ed.id
+  CROSS JOIN nodes n ON n.id = ec.dst_node_id
+  CROSS JOIN files f ON f.id = n.file_id
+ WHERE ed.kind='calls' AND ed.src_node_id IN (` + ph + `) AND f.worktree = ?
+ ORDER BY ed.id, ec.confidence DESC, n.id`
+}
+
 // callNeighbors returns next-hop nodes for cur in the given direction, reading
 // the candidate set. Per call site (edge): if it has any candidate at/above the
 // medium band keep those, else keep its low candidates (capped) — so a confident
@@ -245,27 +275,7 @@ func (e *Engine) callNeighbors(ctx context.Context, worktree string, curIDs []st
 	if len(curIDs) == 0 {
 		return nil, nil
 	}
-	ph := strings.TrimSuffix(strings.Repeat("?,", len(curIDs)), ",")
-	var q string
-	if direction == "callers" {
-		q = `
-SELECT ed.id, n.id, n.name, f.path, n.start_line, ec.confidence, ec.method, ed.dst_recv
-  FROM edge_candidates ec
-  JOIN edges ed ON ed.id = ec.edge_id
-  JOIN nodes n  ON n.id = ed.src_node_id
-  JOIN files f  ON f.id = n.file_id
- WHERE ed.kind='calls' AND ec.dst_node_id IN (` + ph + `) AND f.worktree = ?
- ORDER BY ed.id, ec.confidence DESC, n.id`
-	} else {
-		q = `
-SELECT ed.id, n.id, n.name, f.path, n.start_line, ec.confidence, ec.method, ed.dst_recv
-  FROM edges ed
-  JOIN edge_candidates ec ON ec.edge_id = ed.id
-  JOIN nodes n ON n.id = ec.dst_node_id
-  JOIN files f ON f.id = n.file_id
- WHERE ed.kind='calls' AND ed.src_node_id IN (` + ph + `) AND f.worktree = ?
- ORDER BY ed.id, ec.confidence DESC, n.id`
-	}
+	q := callNeighborsQuery(direction, len(curIDs))
 	args := make([]any, 0, len(curIDs)+1)
 	for _, id := range curIDs {
 		args = append(args, id)
