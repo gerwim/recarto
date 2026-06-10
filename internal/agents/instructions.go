@@ -80,8 +80,8 @@ per-repo SQLite cache outside the working tree.
   shell ` + "`grep`" + `; raise ` + "`limit`" + ` /
   ` + "`max_per_file`" + ` (or narrow with ` + "`path_glob`/`language`" + `) when it says it truncated.
   It does full regex too: set ` + "`regex=true`" + ` (` + "`ignore_case`" + ` for case-folding). For
-  precise *references* to a type/symbol, prefer a word-boundary regex (` + "`\\bName\\b`" + `)
-  over a bare substring, which also matches ` + "`NameFactory`, `GetName`" + `, etc.
+  *references* to a type/symbol, use ` + "`find_references`" + ` instead of a hand-rolled
+  regex — it is the structural answer with a text sweep built in.
 - **Trace** with ` + "`trace_call_path`" + `: every chain reads in the calls direction —
   entry *n* calls entry *n+1* (` + "`A → B`" + ` always means A calls B), in both ` + "`callers`" + `
   and ` + "`callees`" + ` mode. So callees put your symbol first and its callees after it;
@@ -98,6 +98,11 @@ per-repo SQLite cache outside the working tree.
   (direction ` + "`down`" + ` for subtypes/implementers, ` + "`up`" + ` for supertypes) instead of
   grepping for ` + "`: TypeName`" + ` — implementers don't share the interface's name, so
   ` + "`search_graph`" + ` can't surface them.
+- **Find references** to a symbol with ` + "`find_references`" + ` — call sites, type
+  usages, imports and annotations from the graph's edges, plus a word-boundary
+  text sweep for what the graph cannot see, deduplicated by path:line. Each hit
+  carries its referencing symbol, an edge kind (or ` + "`text`" + ` for grep-only hits),
+  and ` + "`is_test`" + `. Prefer it over a ` + "`\\bName\\b`" + ` regex in ` + "`search_content`" + `.
 - **Find annotated symbols** (classes/methods carrying an attribute or decorator)
   with ` + "`find_annotated`" + ` — e.g. every ` + "`[ExtendObjectType]`" + ` class or ` + "`@Component`" + `.
   Prefer it over grepping for ` + "`[Attr`" + `: the decorated symbol shares no name with

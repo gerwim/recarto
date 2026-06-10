@@ -578,3 +578,37 @@ func TestGetCodeSnippetHandlerReturnsPath(t *testing.T) {
 		t.Fatalf("got found=%v path=%q, want found=true path=a.go", out.Found, out.Path)
 	}
 }
+
+func TestFindReferencesHandler(t *testing.T) {
+	a := newTestApp(t, "main")
+	wt := t.TempDir()
+	a.Git.Worktree = wt
+	os.WriteFile(filepath.Join(wt, "a.go"), []byte("package p\nfunc Target() {}\n"), 0o644)
+	os.WriteFile(filepath.Join(wt, "b.go"), []byte("package p\nfunc Caller() { Target() }\n"), 0o644)
+	os.WriteFile(filepath.Join(wt, "README.md"), []byte("Target is documented here.\n"), 0o644)
+	if err := a.Graph.Reconcile(context.Background(), wt, graph.FSSource{Root: wt}); err != nil {
+		t.Fatal(err)
+	}
+	out, err := findReferences(context.Background(), a, FindReferencesInput{Symbol: "Target"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !out.Resolved {
+		t.Error("Resolved = false, want true")
+	}
+	var call, text bool
+	for _, r := range out.References {
+		if r.Path == "b.go" && r.Kind == "calls" {
+			call = true
+		}
+		if r.Path == "README.md" && r.Kind == "text" {
+			text = true
+		}
+	}
+	if !call || !text {
+		t.Fatalf("want a calls ref from b.go and a text ref from README.md, got %+v", out.References)
+	}
+	if out.Count != len(out.References) {
+		t.Errorf("Count = %d, want %d", out.Count, len(out.References))
+	}
+}

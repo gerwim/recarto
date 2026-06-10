@@ -67,6 +67,9 @@ func NewServer(a *app.App) *sdk.Server {
 	addTool(s, a, "find_annotated",
 		"Find every symbol decorated with a given attribute/annotation/decorator — e.g. all `[ExtendObjectType]` classes in C#, every `@Component` in TS. This is the structural answer to the attribute grep that search_graph cannot give (the decorated class shares no name with the attribute) and that plain text grep pollutes (it also matches the attribute's own definition, doc comments, and string literals). Each result is the decorated symbol itself (class/method/property) with its kind and location. Matching is C# `Attribute`-suffix tolerant. Pass `attribute` as the name written at the use site. Prefer this over grepping for `[Attr` so codebase navigation stays in recarto.",
 		findAnnotated)
+	addTool(s, a, "find_references",
+		"Find every place a symbol is used — call sites, type usages, imports, annotations — from the graph's edges, plus a word-boundary text sweep for references the graph cannot see (comments, config, unparsed files, dynamically-bound sites), deduplicated by path:line. Each hit carries its file/line, the referencing symbol (`from`), an edge kind (`calls`, `extends`, … or `text` for grep-only hits), and `is_test` so test usages are tell-apart-able at a glance. `resolved` reports whether the symbol matched a graph node at all — false means hits are text-only. Prefer this over hand-rolling a `\\bName\\b` regex in search_content: one call, structurally ranked, already deduplicated.",
+		findReferences)
 	addToolSchema(s, a, "report_recarto_issue",
 		"Report a problem with Recarto ITSELF (not the user's code) so the maintainer can fix it: a tool that errored, ranked/returned the wrong thing, was confusing to use, or lacked a capability you needed. Routes to a global cross-repo queue. Describe the Recarto interaction and a minimal repro — not proprietary source from this repo.",
 		reportRecartoIssueSchema(), reportRecartoIssue)

@@ -518,3 +518,46 @@ func findAnnotated(ctx context.Context, a *app.App, in FindAnnotatedInput) (Find
 	}
 	return out, nil
 }
+
+// --- find_references ---
+
+type FindReferencesInput struct {
+	Symbol string `json:"symbol" jsonschema:"the symbol whose references to find (bare, qualified, or Type.Method form)"`
+	Limit  int    `json:"limit,omitempty" jsonschema:"max references (default 50)"`
+}
+type ReferenceOut struct {
+	Path   string `json:"path"`
+	Line   int    `json:"line"`
+	Kind   string `json:"kind"`              // calls|imports|extends|implements|annotates|references|text
+	From   string `json:"from,omitempty"`    // enclosing/referencing symbol, "" at file scope
+	Text   string `json:"text,omitempty"`    // matching line (text refs only)
+	IsTest bool   `json:"is_test,omitempty"` // reference lives in test code
+}
+type FindReferencesOutput struct {
+	// Resolved reports whether the symbol matched a graph node; false means every
+	// hit below is text-only (the symbol may be misspelled, or live outside the
+	// indexed languages).
+	Resolved   bool           `json:"resolved"`
+	Count      int            `json:"count"`
+	Truncated  bool           `json:"truncated,omitempty"`
+	References []ReferenceOut `json:"references"`
+}
+
+func findReferences(ctx context.Context, a *app.App, in FindReferencesInput) (FindReferencesOutput, error) {
+	ensureFresh(ctx, a)
+	refs, meta, err := a.Graph.References(ctx, a.Git.Worktree, in.Symbol, in.Limit)
+	if err != nil {
+		return FindReferencesOutput{}, err
+	}
+	out := FindReferencesOutput{
+		Resolved: meta.Resolved, Count: len(refs), Truncated: meta.Truncated,
+		References: make([]ReferenceOut, 0, len(refs)),
+	}
+	for _, r := range refs {
+		out.References = append(out.References, ReferenceOut{
+			Path: r.Path, Line: r.Line, Kind: r.Kind,
+			From: r.From, Text: r.Text, IsTest: r.IsTest,
+		})
+	}
+	return out, nil
+}
