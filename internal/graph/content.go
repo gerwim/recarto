@@ -9,8 +9,11 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"regexp/syntax"
+	"runtime"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/bmatcuk/doublestar/v4"
 )
@@ -122,53 +125,44 @@ func (e *Engine) SearchContentWithMeta(ctx context.Context, worktree, pattern st
 		paths = kept
 	}
 
-	var hand, gen []ContentMatch
-	for _, p := range paths {
+	// Scan files in parallel: reading + matching is embarrassingly parallel and
+	// dominated by bytes throughput (a serial pass over a multi-hundred-MB
+	// worktree was the whole latency). Workers fill results[i] for paths[i]; the
+	// merge below runs sequentially in path order, so output order, caps, and
+	// meta are byte-identical to the serial form.
+	//
+	// requiredLiteral is the second lever: a literal that provably occurs in
+	// every match lets the common no-match file be rejected with one
+	// bytes.Contains pass instead of a full regex scan.
+	prefilter := requiredLiteral(re.String())
+	results := make([]*fileScan, len(paths))
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, runtime.NumCPU())
+	for i, p := range paths {
 		if hasBinaryExt(p) {
 			continue // image/archive/compiled blob: never grep-able text
 		}
-		content, rerr := os.ReadFile(filepath.Join(worktree, filepath.FromSlash(p)))
-		if rerr != nil {
-			continue // file vanished since index; skip
-		}
-		if looksBinary(content) {
-			continue // NUL byte in the head ⇒ binary; lines would be garbage tokens
-		}
-		// Whole-file pre-filter: the large majority of files contain no match, so
-		// one scan here avoids splitting them into lines and the per-line regex.
-		if !re.Match(content) {
-			continue
-		}
-		spans, serr := e.fileSpans(ctx, worktree, p)
-		if serr != nil {
-			return nil, meta, serr
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(i int, p string) {
+			defer func() { <-sem; wg.Done() }()
+			results[i] = e.scanFile(ctx, worktree, p, re, prefilter, opts.MaxPerFile)
+		}(i, p)
+	}
+	wg.Wait()
+
+	var hand, gen []ContentMatch
+	for _, r := range results {
+		if r == nil || r.err != nil {
+			continue // unreadable/binary/no-match files contribute nothing
 		}
 		bucket := &hand
-		if isGeneratedPath(p) {
+		if isGeneratedPath(r.path) {
 			bucket = &gen
 		}
-		// fileMatches counts every matching line in this file; only the first
-		// MaxPerFile are attributed and kept. Counting past the cap is what lets
-		// meta.Total report the true match count instead of the capped page.
-		fileMatches := 0
-		var off int64
-		for _, line := range strings.SplitAfter(string(content), "\n") {
-			if loc := re.FindStringIndex(line); loc != nil {
-				fileMatches++
-				if fileMatches <= opts.MaxPerFile {
-					*bucket = append(*bucket, ContentMatch{
-						Path:   p,
-						Line:   lineNumberAt(content, off),
-						Text:   capLine(strings.TrimSpace(strings.TrimRight(line, "\n"))),
-						Symbol: spans.symbolAt(off + int64(loc[0])),
-						Kind:   spans.kindAt(off + int64(loc[0])),
-					})
-				}
-			}
-			off += int64(len(line))
-		}
-		meta.Total += fileMatches
-		if fileMatches > opts.MaxPerFile {
+		*bucket = append(*bucket, r.matches...)
+		meta.Total += r.total
+		if r.total > opts.MaxPerFile {
 			meta.PerFileCapped = true
 		}
 	}
@@ -183,6 +177,142 @@ func (e *Engine) SearchContentWithMeta(ctx context.Context, worktree, pattern st
 	meta.Truncated = meta.Total > meta.Shown
 	_ = e.led.Incr(ctx, "lifetime", "graph_queries", 1)
 	return out, meta, nil
+}
+
+// fileScan is one file's scan result: its kept (capped) matches and the true
+// per-line match count, produced by a parallel worker and merged in path order.
+type fileScan struct {
+	path    string
+	matches []ContentMatch
+	total   int
+	err     error
+}
+
+// scanFile greps one file. It returns nil when the file contributes nothing (a
+// vanished/binary file, or simply no match) so the merge can skip it without
+// distinguishing the cases. The per-LINE regex semantics are preserved exactly:
+// each line is matched on its own, so ^ anchors to the line and a cross-line
+// pattern never matches — identical to the original SplitAfter loop, but
+// without materializing the file as strings.
+func (e *Engine) scanFile(ctx context.Context, worktree, p string, re *regexp.Regexp, prefilter string, maxPerFile int) *fileScan {
+	content, err := os.ReadFile(filepath.Join(worktree, filepath.FromSlash(p)))
+	if err != nil {
+		return nil // file vanished since listing; skip
+	}
+	if looksBinary(content) {
+		return nil // NUL byte in the head ⇒ binary; lines would be garbage tokens
+	}
+	// Whole-file pre-filter: the large majority of files contain no match. When a
+	// required literal is known, one sub-string pass rejects them; otherwise an
+	// unanchored pattern is gated by one whole-file regex pass. An ^/$-anchored
+	// pattern means something different against the whole file than against each
+	// line (the loop below matches per line), so the regex gate is unsound for it
+	// — the old form silently made `^foo` match nothing — and is skipped.
+	switch {
+	case prefilter != "":
+		if !bytes.Contains(content, []byte(prefilter)) {
+			return nil
+		}
+	case !hasLineAnchors(re.String()):
+		if !re.Match(content) {
+			return nil
+		}
+	}
+	spans, serr := e.fileSpans(ctx, worktree, p)
+	if serr != nil {
+		return &fileScan{path: p, err: serr}
+	}
+	fs := &fileScan{path: p}
+	var off int64
+	lineNo := 1
+	for rest := content; len(rest) > 0; lineNo++ {
+		line := rest
+		if i := bytes.IndexByte(rest, '\n'); i >= 0 {
+			line = rest[:i+1]
+		}
+		rest = rest[len(line):]
+		if loc := re.FindIndex(line); loc != nil {
+			fs.total++
+			if fs.total <= maxPerFile {
+				fs.matches = append(fs.matches, ContentMatch{
+					Path:   p,
+					Line:   lineNo,
+					Text:   capLine(strings.TrimSpace(strings.TrimRight(string(line), "\n"))),
+					Symbol: spans.symbolAt(off + int64(loc[0])),
+					Kind:   spans.kindAt(off + int64(loc[0])),
+				})
+			}
+		}
+		off += int64(len(line))
+	}
+	if fs.total == 0 {
+		return nil
+	}
+	return fs
+}
+
+// requiredLiteral returns a literal substring that EVERY match of the pattern
+// must contain, or "" when none can be proven. It is deliberately conservative:
+// alternations and case-folded literals yield "" (scan everything) rather than
+// risk skipping a matching file. Zero-width assertions (\b, ^, $) are skipped
+// without invalidating their siblings, so the common `\bIdentifier\b` reference
+// search gets its identifier as the filter.
+func requiredLiteral(expr string) string {
+	re, err := syntax.Parse(expr, syntax.Perl)
+	if err != nil {
+		return ""
+	}
+	return reqLit(re.Simplify())
+}
+
+func reqLit(re *syntax.Regexp) string {
+	switch re.Op {
+	case syntax.OpLiteral:
+		if re.Flags&syntax.FoldCase != 0 {
+			return "" // (?i) literal: bytes.Contains would miss folded variants
+		}
+		return string(re.Rune)
+	case syntax.OpConcat:
+		best := ""
+		for _, s := range re.Sub {
+			if l := reqLit(s); len(l) > len(best) {
+				best = l
+			}
+		}
+		return best
+	case syntax.OpCapture:
+		return reqLit(re.Sub[0])
+	case syntax.OpPlus:
+		return reqLit(re.Sub[0]) // one occurrence is guaranteed
+	case syntax.OpRepeat:
+		if re.Min >= 1 {
+			return reqLit(re.Sub[0])
+		}
+	}
+	return "" // alternation, star, quest, classes, …: nothing provably required
+}
+
+// hasLineAnchors reports whether the pattern uses ^/$ (or \A/\z) assertions,
+// which match differently against a whole file than against a single line.
+func hasLineAnchors(expr string) bool {
+	re, err := syntax.Parse(expr, syntax.Perl)
+	if err != nil {
+		return true // unparseable here ⇒ be conservative, skip the gate
+	}
+	var walk func(*syntax.Regexp) bool
+	walk = func(re *syntax.Regexp) bool {
+		switch re.Op {
+		case syntax.OpBeginText, syntax.OpEndText, syntax.OpBeginLine, syntax.OpEndLine:
+			return true
+		}
+		for _, s := range re.Sub {
+			if walk(s) {
+				return true
+			}
+		}
+		return false
+	}
+	return walk(re)
 }
 
 // maxLineLen caps a returned match line so one pathological minified/generated
@@ -294,14 +424,6 @@ func globMatch(glob, p string) bool {
 	}
 	ok, _ := doublestar.Match(glob, p)
 	return ok
-}
-
-// lineNumberAt returns the 1-based line number of byte offset b in content.
-func lineNumberAt(content []byte, b int64) int {
-	if b > int64(len(content)) {
-		b = int64(len(content))
-	}
-	return 1 + strings.Count(string(content[:b]), "\n")
 }
 
 // fileSpans loads the byte ranges of every definition node in a file, for
