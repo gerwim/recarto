@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"path/filepath"
@@ -331,12 +332,12 @@ func TestLatestCheckMigrationPreservesMemoriesAndColumns(t *testing.T) {
 		VALUES('t2','todo','done',1,1)`)
 }
 
-func TestSchemaVersionIs18(t *testing.T) {
-	if schemaVersion != 18 {
-		t.Fatalf("schemaVersion = %d, want 18", schemaVersion)
+func TestSchemaVersionIs19(t *testing.T) {
+	if schemaVersion != 19 {
+		t.Fatalf("schemaVersion = %d, want 19", schemaVersion)
 	}
-	if len(migrations) != 18 {
-		t.Fatalf("len(migrations) = %d, want 18", len(migrations))
+	if len(migrations) != 19 {
+		t.Fatalf("len(migrations) = %d, want 19", len(migrations))
 	}
 	st, err := Open(filepath.Join(t.TempDir(), "store.db"))
 	if err != nil {
@@ -347,8 +348,8 @@ func TestSchemaVersionIs18(t *testing.T) {
 	if err := st.DB.QueryRow("PRAGMA user_version").Scan(&v); err != nil {
 		t.Fatal(err)
 	}
-	if v != 18 {
-		t.Fatalf("user_version = %d, want 18", v)
+	if v != 19 {
+		t.Fatalf("user_version = %d, want 19", v)
 	}
 }
 
@@ -371,5 +372,24 @@ func TestMigrateV17AllowsFeedbackAndResolved(t *testing.T) {
 	}
 	if _, err := st.DB.Exec(`UPDATE memories SET status='bogus' WHERE id='f1'`); err == nil {
 		t.Fatal("expected CHECK to still reject an invalid status")
+	}
+}
+
+func TestV19CreatesGraphDeltas(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "store.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	ctx := context.Background()
+	if _, err := st.DB.ExecContext(ctx,
+		`INSERT INTO graph_deltas(id, worktree, path, qualified_name, kind, change, at)
+		 VALUES ('d1', '/wt', 'a.go', 'Target', 'function', 'added', 1)`); err != nil {
+		t.Fatalf("graph_deltas not usable after migration: %v", err)
+	}
+	if _, err := st.DB.ExecContext(ctx,
+		`INSERT INTO graph_deltas(id, worktree, path, qualified_name, kind, change, at)
+		 VALUES ('d2', '/wt', 'a.go', 'Target', 'function', 'renamed', 1)`); err == nil {
+		t.Fatal("CHECK constraint must reject unknown change values")
 	}
 }

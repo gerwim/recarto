@@ -8,7 +8,7 @@ import (
 )
 
 // schemaVersion is the number of applied migrations.
-const schemaVersion = 18
+const schemaVersion = 19
 
 // migrations are applied in order; index+1 becomes user_version.
 var migrations = []string{
@@ -471,6 +471,26 @@ DELETE FROM edges;
 DELETE FROM nodes;
 DELETE FROM files;
 DELETE FROM meta WHERE key LIKE 'graph_token:%';
+`,
+	// v19: graph_deltas journals symbol-level index changes (added/removed/changed
+	// per file) so a session can show "what changed since you were last here"
+	// without snapshots or re-parsing. Rows are written by writeFileGraph/deleteFile
+	// at reindex time and pruned by session age; the table starts empty and is NOT
+	// derived state worth wiping elsewhere. Memories are untouched. See the v5
+	// comment for the standing convention.
+	// CREATE TABLE … IF NOT EXISTS keeps this migration idempotent when the store
+	// is rolled back (user_version reset) and reopened (e.g. in migration tests).
+	`
+CREATE TABLE IF NOT EXISTS graph_deltas (
+  id             TEXT PRIMARY KEY,
+  worktree       TEXT NOT NULL,
+  path           TEXT NOT NULL,
+  qualified_name TEXT NOT NULL,
+  kind           TEXT NOT NULL,
+  change         TEXT NOT NULL CHECK (change IN ('added','removed','changed')),
+  at             INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_graph_deltas_wt_at ON graph_deltas(worktree, at);
 `,
 }
 
