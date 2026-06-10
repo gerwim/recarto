@@ -185,8 +185,8 @@ func TestTraceCallPathMethodCallersDeadEnd(t *testing.T) {
 	if len(out.Suggestions) != 0 {
 		t.Errorf("resolved method must not emit did-you-mean suggestions, got %v", out.Suggestions)
 	}
-	if out.Hint == "" || !strings.Contains(out.Hint, "search_content") {
-		t.Fatalf("method-callers dead-end = %+v, want a hint steering to search_content", out)
+	if out.Hint == "" || !strings.Contains(out.Hint, "find_references") {
+		t.Fatalf("method-callers dead-end = %+v, want a hint steering to find_references", out)
 	}
 }
 

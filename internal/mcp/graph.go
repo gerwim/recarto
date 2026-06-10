@@ -142,7 +142,7 @@ type TraceCallPathOutput struct {
 	Legend string `json:"legend,omitempty"`
 	// Hint steers the agent when a trace dead-ends on a type: call edges target a
 	// type's methods, not its declaration, so "who uses this type" is answered by
-	// find_implementations / search_content, not trace_call_path.
+	// find_implementations / find_references, not trace_call_path.
 	Hint string `json:"hint,omitempty"`
 }
 
@@ -198,7 +198,7 @@ func traceCallPath(ctx context.Context, a *app.App, in TraceCallPathInput) (Trac
 		case dir == "callers":
 			// Resolved method with no callers: an entrypoint, or call sites bind
 			// dynamically/through an interface and weren't statically resolved.
-			out.Hint = fmt.Sprintf("%s resolved but has no callers in the graph — it may be an entrypoint, or callers bind dynamically and weren't statically resolved. Use search_content(%q) to find textual references.",
+			out.Hint = fmt.Sprintf("%s resolved but has no callers in the graph — it may be an entrypoint, or callers bind dynamically and weren't statically resolved. Use find_references(%q) to find the references the call edges miss.",
 				root.Name, leafName(root.Name))
 		}
 	}

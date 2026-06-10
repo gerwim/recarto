@@ -4,7 +4,7 @@
 
 **Goal:** Fix the tool-output gaps an LLM user hit in real use (snippet missing `path`, trimmed Go type spans, undifferentiated test callers) and add the four capabilities it missed most (first-class `find_references`, batch snippets, `offset` paging, all-test-callers hint).
 
-**Architecture:** All changes live in the graph query surface: engine capabilities in `internal/graph` (SDK-free, unit-tested), thin MCP mappings in `internal/mcp` (handlers are transport-agnostic functions tested directly), one parser-level span fix in `internal/parse`, and agent-guidance updates in `internal/agents/instructions.go`. No schema migration is needed — every feature reads existing tables (`nodes`, `edges`, `files`).
+**Architecture:** All changes live in the graph query surface: engine capabilities in `internal/graph` (SDK-free, unit-tested), thin MCP mappings in `internal/mcp` (handlers are transport-agnostic functions tested directly), one parser-level span fix in `internal/parse`, and agent-guidance updates in `internal/agents/instructions.go`. No schema migration is needed — every feature reads existing tables (`nodes`, `edges`, `files`). *(Amended during execution: this assumption was wrong — the Task 3 span change is baked in at index time, so existing stores kept serving old spans until the v18 graph-wipe migration forced a reindex. Found by the live smoke test in Task 8.)*
 
 **Tech Stack:** Go, tree-sitter (`github.com/tree-sitter/go-tree-sitter`), SQLite (modernc), MCP go-sdk (confined to `internal/mcp/server.go`).
 
