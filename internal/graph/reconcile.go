@@ -270,6 +270,14 @@ func (e *Engine) Reconcile(ctx context.Context, worktree string, src Source, opt
 	if e.emb != nil {
 		_ = e.embedWorktree(ctx, worktree)
 	}
+	// Flush the WAL once per mutating reconcile. The resolve phase writes the
+	// most bytes of the whole run (edge updates, candidates, index rebuilds) and
+	// lands AFTER the last in-loop checkpoint; without this, every completed
+	// index leaves all of that in the WAL. Best-effort: TRUNCATE yields to
+	// concurrent readers, and the Stop hook retries at the next idle boundary.
+	if mutated || pending {
+		_ = e.st.Checkpoint(ctx)
+	}
 	o.progress.Done()
 	return nil
 }
@@ -459,13 +467,19 @@ func (e *Engine) ReconcileIfStale(ctx context.Context, worktree string, src Sour
 		return err
 	}
 	if token != "" {
-		return e.st.WriteTx(ctx, func(c store.Conn) error {
+		if err := e.st.WriteTx(ctx, func(c store.Conn) error {
 			_, err := c.ExecContext(ctx,
 				`INSERT INTO meta(key, value) VALUES (?, ?)
 				 ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
 				graphTokenKey+worktree, token)
 			return err
-		})
+		}); err != nil {
+			return err
+		}
+		// The stamp itself appended a WAL frame after Reconcile's flush; clear it
+		// so a completed reconcile leaves the WAL empty (best-effort, like all
+		// checkpoints: it yields to concurrent readers).
+		_ = e.st.Checkpoint(ctx)
 	}
 	return nil
 }

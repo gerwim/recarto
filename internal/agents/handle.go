@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"git.gerwim.nl/gerwim/recarto/internal/app"
 	"git.gerwim.nl/gerwim/recarto/internal/graph"
@@ -33,6 +34,16 @@ func Handle(ctx context.Context, a *app.App, ev Event) (Result, error) {
 	}
 	return Result{}, nil
 }
+
+// sessionStartIndexBudget bounds the synchronous graph warm-up inside the
+// session-start hook. Most repos index (or no-op) well inside it; a huge first
+// index makes bounded progress each session instead of blocking the host. A
+// var so tests can shrink it.
+var sessionStartIndexBudget = 15 * time.Second
+
+// newGraphSource builds the file source for the session-start warm-up; a var so
+// tests can substitute a controllable source.
+var newGraphSource = graph.NewSource
 
 // agentOrDefault stamps an unknown/empty agent as the legacy Claude Code value so
 // the sessions.agent column always carries a host name.
@@ -62,8 +73,26 @@ func handleSessionStart(ctx context.Context, a *app.App, ev Event) (Result, erro
 	}
 	_ = a.Ledger.Incr(ctx, "lifetime", "sessions", 1)
 
-	// Warm the code graph for this worktree (best-effort, non-blocking).
-	_ = a.Graph.ReconcileIfStale(ctx, a.Git.Worktree, graph.NewSource(a.Git.Worktree), graph.WorktreeToken(a.Git.Worktree))
+	// Warm the code graph for this worktree — best-effort and budget-bounded: a
+	// first index of a large repo would otherwise block the host's hook (and the
+	// user's first message) for minutes. The budget is HARD: the reconcile runs
+	// in a goroutine and is abandoned at the deadline, because parts of it
+	// (git ls-files, filesystem walks, a wedged mount) are not context-aware.
+	// Abandoning is safe — the hook is a one-shot process, committed batches
+	// survive, the crash-safe pending marker records an unfinished resolve, and
+	// a later reconcile (next session, or an MCP query's background refresh)
+	// finishes the job.
+	sctx, cancel := context.WithTimeout(ctx, sessionStartIndexBudget)
+	defer cancel()
+	warmed := make(chan struct{})
+	go func() {
+		_ = a.Graph.ReconcileIfStale(sctx, a.Git.Worktree, newGraphSource(a.Git.Worktree), graph.WorktreeToken(a.Git.Worktree))
+		close(warmed)
+	}()
+	select {
+	case <-warmed:
+	case <-sctx.Done():
+	}
 
 	// Absorb a teammate's committed memory snapshot when it changed (best-effort).
 	_, _ = snapshot.SyncOnSessionStart(ctx, a.Engine, a.Store, a.Git.Worktree)
@@ -347,5 +376,8 @@ func handleStop(ctx context.Context, a *app.App, ev Event) (Result, error) {
 			return Result{}, err
 		}
 	}
+	// Turn boundary: the agent is idle, so a TRUNCATE checkpoint can actually
+	// win the WAL (mid-session it silently yields to concurrent readers).
+	_ = a.Store.Checkpoint(ctx)
 	return Result{SystemMessage: "recarto: before ending, record any new learnings (record_memory), bug fixes (record_bug), and preferences — e.g. if the user corrected your approach or stated a style/workflow choice. And if Recarto itself errored, ranked the wrong result first, confused you, or lacked a capability you needed this session, call report_recarto_issue so it can be fixed."}, nil
 }

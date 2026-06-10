@@ -198,6 +198,23 @@ func TestReconcileIfStaleForce(t *testing.T) {
 	}
 }
 
+// TestReconcileTruncatesWALAfterMutation: a mutating reconcile must leave the
+// WAL truncated. The resolve phase writes the most bytes of the whole run
+// (edge updates, candidates, index rebuilds) and lands AFTER the last in-loop
+// checkpoint, so without a final checkpoint every completed index leaves all
+// of that sitting in the WAL (821MB observed in production).
+func TestReconcileTruncatesWALAfterMutation(t *testing.T) {
+	e := newTestEngine(t)
+	src := crossFileCallSource()
+	if err := e.ReconcileIfStale(context.Background(), "/wt", src, "tok-1"); err != nil {
+		t.Fatal(err)
+	}
+	wal := e.st.Path() + "-wal"
+	if info, err := os.Stat(wal); err == nil && info.Size() != 0 {
+		t.Fatalf("WAL is %d bytes after reconcile, want 0 (truncated)", info.Size())
+	}
+}
+
 // TestMtimeOnlySweepDoesNotResolve is the performance guard for the pending
 // marker: a sweep that touches every mtime but changes no content must remain a
 // cheap no-op — it must NOT set the pending marker in a way that triggers a full
