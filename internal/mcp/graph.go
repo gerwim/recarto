@@ -129,6 +129,7 @@ type TraceHop struct {
 	Resolution string `json:"resolution,omitempty"` // self|typed|static|iface|name
 	Confidence string `json:"confidence,omitempty"` // high|medium|low
 	Receiver   string `json:"receiver,omitempty"`   // receiver expr for an ambiguous hop
+	IsTest     bool   `json:"is_test,omitempty"`    // hop lives in test code
 }
 type TraceCallPathOutput struct {
 	Chains      [][]TraceHop `json:"chains"`
@@ -171,6 +172,7 @@ func traceCallPath(ctx context.Context, a *app.App, in TraceCallPathInput) (Trac
 			hops[i] = TraceHop{
 				Symbol: n.Name, Path: n.Path, Line: n.Line,
 				Resolution: n.Resolution, Confidence: n.Confidence, Receiver: n.Receiver,
+				IsTest: graph.IsTestPath(n.Path),
 			}
 		}
 		// Reverse callers chains so the structured order matches the legend's "calls"
@@ -191,13 +193,35 @@ func traceCallPath(ctx context.Context, a *app.App, in TraceCallPathInput) (Trac
 		switch {
 		case graph.IsTypeKind(root.Kind):
 			// Calls target a type's methods, not its declaration.
-			out.Hint = fmt.Sprintf("%s is a type (%s); call traces follow methods, not the declaration. Use find_implementations(%q) for implementers, search_content(%q) for references, or trace_call_path on a specific %s.<Method>.",
+			out.Hint = fmt.Sprintf("%s is a type (%s); call traces follow methods, not the declaration. Use find_implementations(%q) for implementers, find_references(%q) for references, or trace_call_path on a specific %s.<Method>.",
 				root.Name, root.Kind, root.Name, root.Name, root.Name)
 		case dir == "callers":
 			// Resolved method with no callers: an entrypoint, or call sites bind
 			// dynamically/through an interface and weren't statically resolved.
 			out.Hint = fmt.Sprintf("%s resolved but has no callers in the graph — it may be an entrypoint, or callers bind dynamically and weren't statically resolved. Use search_content(%q) to find textual references.",
 				root.Name, leafName(root.Name))
+		}
+	}
+	// All callers are tests: without a marker this reads as "dead production
+	// code", when the truth is usually a wrapper or sibling API the trace can't
+	// see (e.g. SearchContent vs SearchContentWithMeta). Say so and steer to
+	// find_references, which sees edges and text.
+	if dir == "callers" && out.Hint == "" {
+		anyCaller, allTest := false, true
+		for _, hops := range out.Chains {
+			if len(hops) < 2 {
+				continue
+			}
+			anyCaller = true
+			for _, h := range hops[:len(hops)-1] {
+				if !h.IsTest {
+					allTest = false
+				}
+			}
+		}
+		if anyCaller && allTest {
+			leaf := leafName(in.Symbol)
+			out.Hint = fmt.Sprintf("every caller found is test code — production may reach %s through a wrapper or sibling API the trace can't see. Use find_references(%q) for non-test references.", leaf, leaf)
 		}
 	}
 	return out, nil

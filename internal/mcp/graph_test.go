@@ -579,6 +579,42 @@ func TestGetCodeSnippetHandlerReturnsPath(t *testing.T) {
 	}
 }
 
+func TestTraceCallersFlagTestsAndHintWhenAllTest(t *testing.T) {
+	a := newTestApp(t, "main")
+	wt := t.TempDir()
+	a.Git.Worktree = wt
+	os.WriteFile(filepath.Join(wt, "a.go"), []byte("package p\nfunc Target() {}\n"), 0o644)
+	os.WriteFile(filepath.Join(wt, "a_test.go"), []byte("package p\nfunc helperTest() { Target() }\n"), 0o644)
+	if err := a.Graph.Reconcile(context.Background(), wt, graph.FSSource{Root: wt}); err != nil {
+		t.Fatal(err)
+	}
+	out, err := traceCallPath(context.Background(), a, TraceCallPathInput{Symbol: "Target", Direction: "callers"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sawTestCaller bool
+	for _, hops := range out.Chains {
+		if len(hops) < 2 {
+			continue
+		}
+		if hops[0].Symbol == "helperTest" {
+			sawTestCaller = true
+			if !hops[0].IsTest {
+				t.Error("caller hop in a_test.go not flagged is_test")
+			}
+			if hops[len(hops)-1].IsTest {
+				t.Error("Target (a.go) wrongly flagged is_test")
+			}
+		}
+	}
+	if !sawTestCaller {
+		t.Fatalf("no caller chain from helperTest in %+v", out.Chains)
+	}
+	if !strings.Contains(out.Hint, "test code") || !strings.Contains(out.Hint, "find_references") {
+		t.Errorf("hint = %q, want all-test-callers steer toward find_references", out.Hint)
+	}
+}
+
 func TestFindReferencesHandler(t *testing.T) {
 	a := newTestApp(t, "main")
 	wt := t.TempDir()
