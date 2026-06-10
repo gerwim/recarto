@@ -65,7 +65,7 @@ func (e *Engine) ImportMemory(ctx context.Context, im ImportMemory) (ImportOutco
 			return err
 		}
 
-		candID, found, ferr := e.findNearDup(ctx, c, im.Kind, bands, set)
+		candID, found, _, ferr := e.findNearDup(ctx, c, im.Kind, bands, set)
 		if ferr != nil {
 			return ferr
 		}

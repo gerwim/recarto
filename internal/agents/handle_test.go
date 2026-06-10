@@ -187,7 +187,7 @@ func TestAugmentSuppressesRepeatedPattern(t *testing.T) {
 	ctx := context.Background()
 	// Record a bug so the augment hook has injectable content (the empty test
 	// graph yields no symbol hits).
-	if _, _, err := a.Engine.Record(ctx, memory.NewMemory{
+	if _, _, _, err := a.Engine.Record(ctx, memory.NewMemory{
 		Kind: memory.KindBug, Title: "Widget overflow", Body: "Widget overflow — fix: clamp",
 		Source: "cli", Extra: map[string]any{"fix": "clamp"},
 	}); err != nil {
@@ -225,7 +225,7 @@ func TestAugmentDedupsBugAlreadySurfacedOnRead(t *testing.T) {
 	rel := "internal/agents/handle.go"
 	// A bug both anchored to a file (so post-read surfaces it) and matching a
 	// search term (so augment recall finds it).
-	if _, _, err := a.Engine.Record(ctx, memory.NewMemory{
+	if _, _, _, err := a.Engine.Record(ctx, memory.NewMemory{
 		Kind: memory.KindBug, Title: "Widget overflow", Body: "Widget overflow",
 		Refs: []memory.Ref{{Type: memory.RefFile, Value: rel}}, Branch: a.Git.Branch,
 		Source: "cli", Extra: map[string]any{"fix": "clamp"},
@@ -256,7 +256,7 @@ func TestPostReadDedupsBugAlreadySurfacedByAugment(t *testing.T) {
 	a := newTestApp(t, "main")
 	ctx := context.Background()
 	rel := "internal/agents/handle.go"
-	if _, _, err := a.Engine.Record(ctx, memory.NewMemory{
+	if _, _, _, err := a.Engine.Record(ctx, memory.NewMemory{
 		Kind: memory.KindBug, Title: "Widget overflow", Body: "Widget overflow",
 		Refs: []memory.Ref{{Type: memory.RefFile, Value: rel}}, Branch: a.Git.Branch,
 		Source: "cli", Extra: map[string]any{"fix": "clamp"},
@@ -285,7 +285,7 @@ func TestPostReadDedupsBugAlreadySurfacedByAugment(t *testing.T) {
 func TestAugmentNoDedupWithoutSession(t *testing.T) {
 	a := newTestApp(t, "main")
 	ctx := context.Background()
-	if _, _, err := a.Engine.Record(ctx, memory.NewMemory{
+	if _, _, _, err := a.Engine.Record(ctx, memory.NewMemory{
 		Kind: memory.KindBug, Title: "Widget overflow", Body: "Widget overflow — fix: clamp",
 		Source: "cli", Extra: map[string]any{"fix": "clamp"},
 	}); err != nil {
@@ -337,7 +337,7 @@ func TestPostReadSurfacesTodo(t *testing.T) {
 	ctx := context.Background()
 
 	rel := "internal/agents/handle.go"
-	if _, _, err := a.Engine.Record(ctx, memory.NewMemory{
+	if _, _, _, err := a.Engine.Record(ctx, memory.NewMemory{
 		Kind: memory.KindTodo, Title: "split this file", Body: "split handle.go",
 		Refs: []memory.Ref{{Type: memory.RefFile, Value: rel}}, Branch: a.Git.Branch, Source: "cli",
 	}); err != nil {
@@ -357,7 +357,7 @@ func TestPostEditSurfacesGuidance(t *testing.T) {
 	a := newTestApp(t, "main")
 	ctx := context.Background()
 	rel := "internal/agents/handle.go"
-	if _, _, err := a.Engine.Record(ctx, memory.NewMemory{
+	if _, _, _, err := a.Engine.Record(ctx, memory.NewMemory{
 		Kind: memory.KindDoNotRepeat, Title: "do not hand-roll the lexer", Body: "use tree-sitter",
 		Refs: []memory.Ref{{Type: memory.RefFile, Value: rel}}, Branch: a.Git.Branch, Source: "cli",
 	}); err != nil {
@@ -376,7 +376,7 @@ func TestJustInTimeSurfacingDedupsPerSession(t *testing.T) {
 	a := newTestApp(t, "main")
 	ctx := context.Background()
 	rel := "internal/agents/handle.go"
-	if _, _, err := a.Engine.Record(ctx, memory.NewMemory{
+	if _, _, _, err := a.Engine.Record(ctx, memory.NewMemory{
 		Kind: memory.KindDoNotRepeat, Title: "do not hand-roll the lexer", Body: "use tree-sitter",
 		Refs: []memory.Ref{{Type: memory.RefFile, Value: rel}}, Branch: a.Git.Branch, Source: "cli",
 	}); err != nil {
@@ -405,7 +405,7 @@ func TestSessionStartSuppressesLaterJustInTimeReinjection(t *testing.T) {
 	ctx := context.Background()
 	rel := "internal/agents/handle.go"
 	// A pinned do_not_repeat is always emitted in the session-start block.
-	if _, _, err := a.Engine.Record(ctx, memory.NewMemory{
+	if _, _, _, err := a.Engine.Record(ctx, memory.NewMemory{
 		Kind: memory.KindDoNotRepeat, Title: "do not hand-roll the lexer", Body: "use tree-sitter",
 		Refs: []memory.Ref{{Type: memory.RefFile, Value: rel}}, Branch: a.Git.Branch, Source: "cli", Pinned: true,
 	}); err != nil {
@@ -438,7 +438,7 @@ func TestSessionStartDoesNotSuppressDroppedGuidance(t *testing.T) {
 	rel := "internal/agents/handle.go"
 	// Non-pinned guidance: under the tiny budget the session-start block drops it,
 	// so it must NOT be marked surfaced and must still appear when the file is read.
-	if _, _, err := a.Engine.Record(ctx, memory.NewMemory{
+	if _, _, _, err := a.Engine.Record(ctx, memory.NewMemory{
 		Kind: memory.KindDecision, Title: "settled: cache lives outside the worktree", Body: "rationale",
 		Refs: []memory.Ref{{Type: memory.RefFile, Value: rel}}, Branch: a.Git.Branch, Source: "cli",
 	}); err != nil {
@@ -519,7 +519,7 @@ func TestStopDoesNotNudgeBelowThresholdOrWithMemories(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = a.Ledger.Incr(ctx, "ns3", "edits", 3)
-	if _, _, err := a.Engine.Record(ctx, memory.NewMemory{
+	if _, _, _, err := a.Engine.Record(ctx, memory.NewMemory{
 		Kind: memory.KindLearning, Body: "learned something", Branch: a.Git.Branch,
 		Worktree: a.Git.Worktree, Author: "test", Source: "cli",
 	}); err != nil {

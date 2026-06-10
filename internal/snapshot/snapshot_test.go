@@ -25,7 +25,7 @@ func newEngine(t *testing.T) *memory.Engine {
 func TestExportThenImportRoundTrip(t *testing.T) {
 	ctx := context.Background()
 	src := newEngine(t)
-	if _, _, err := src.Record(ctx, memory.NewMemory{
+	if _, _, _, err := src.Record(ctx, memory.NewMemory{
 		Kind: memory.KindLearning, Title: "L", Body: "learned about retries and backoff",
 		Refs: []memory.Ref{{Type: memory.RefFile, Value: "retry.go"}},
 	}); err != nil {
@@ -84,13 +84,13 @@ func TestSnapshotRoundTripsActiveTodoNotDone(t *testing.T) {
 	ctx := context.Background()
 	src := newEngine(t)
 
-	openID, _, err := src.Record(ctx, memory.NewMemory{
+	openID, _, _, err := src.Record(ctx, memory.NewMemory{
 		Kind: memory.KindTodo, Title: "open work", Body: "open work body", Branch: "main", Source: "cli",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	doneID, _, _ := src.Record(ctx, memory.NewMemory{
+	doneID, _, _, _ := src.Record(ctx, memory.NewMemory{
 		Kind: memory.KindTodo, Title: "finished work", Body: "finished work body", Branch: "main", Source: "cli",
 	})
 	if _, err := src.CompleteTodo(ctx, doneID); err != nil {

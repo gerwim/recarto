@@ -63,7 +63,7 @@ func recordMemory(ctx context.Context, a *app.App, in RecordMemoryInput) (Record
 	if in.Global {
 		branch = ""
 	}
-	id, reinforced, err := a.Engine.Record(ctx, memory.NewMemory{
+	id, reinforced, _, err := a.Engine.Record(ctx, memory.NewMemory{ // Task 9 consumes conflicts
 		Kind:         kind,
 		Title:        in.Title,
 		Body:         in.Body,
@@ -217,7 +217,7 @@ func recordBug(ctx context.Context, a *app.App, in RecordBugInput) (RecordBugOut
 	if in.Fix != "" {
 		body = in.ErrorMessage + " — fix: " + in.Fix
 	}
-	id, reinforced, err := a.Engine.Record(ctx, memory.NewMemory{
+	id, reinforced, _, err := a.Engine.Record(ctx, memory.NewMemory{
 		Kind:     memory.KindBug,
 		Title:    in.ErrorMessage,
 		Body:     body,

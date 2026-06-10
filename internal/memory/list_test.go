@@ -12,11 +12,11 @@ func TestListFiltersByKind(t *testing.T) {
 	e := newTestEngine(t, clock.NewFake(time.UnixMilli(5_000_000)))
 	ctx := context.Background()
 
-	if _, _, err := e.Record(ctx, NewMemory{Kind: KindLearning,
+	if _, _, _, err := e.Record(ctx, NewMemory{Kind: KindLearning,
 		Body: "use wal mode and busy_timeout for cross process writers"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := e.Record(ctx, NewMemory{Kind: KindBug,
+	if _, _, _, err := e.Record(ctx, NewMemory{Kind: KindBug,
 		Body: "auth token refresh leaks a goroutine on error return"}); err != nil {
 		t.Fatal(err)
 	}
@@ -50,7 +50,7 @@ func TestListBranchFilter(t *testing.T) {
 
 	mustRecord := func(branch, body string) {
 		t.Helper()
-		if _, _, err := e.Record(ctx, NewMemory{Kind: KindLearning, Branch: branch, Body: body}); err != nil {
+		if _, _, _, err := e.Record(ctx, NewMemory{Kind: KindLearning, Branch: branch, Body: body}); err != nil {
 			t.Fatal(err)
 		}
 	}

@@ -19,7 +19,7 @@ func TestGuidanceForCodeReturnsOnlyGuardrailKinds(t *testing.T) {
 
 	rec := func(k Kind, title string) {
 		t.Helper()
-		if _, _, err := eng.Record(ctx, NewMemory{
+		if _, _, _, err := eng.Record(ctx, NewMemory{
 			Kind: k, Title: title, Body: title + " body", Source: "cli", Branch: "main",
 			Refs: []Ref{{Type: RefFile, Value: rel}},
 		}); err != nil {
@@ -56,7 +56,7 @@ func TestGuidanceForCodeReturnsOnlyGuardrailKinds(t *testing.T) {
 func TestGuidanceForCodeMatchesBySymbol(t *testing.T) {
 	eng := newTestEngine(t, clock.NewFake(time.UnixMilli(10_000_000)))
 	ctx := context.Background()
-	if _, _, err := eng.Record(ctx, NewMemory{
+	if _, _, _, err := eng.Record(ctx, NewMemory{
 		Kind: KindDoNotRepeat, Title: "ExecuteAsync must stay allocation-free",
 		Body: "hot path", Source: "cli", Branch: "main",
 		Refs: []Ref{{Type: RefSymbol, Value: "DefaultRequestExecutor.ExecuteAsync"}},

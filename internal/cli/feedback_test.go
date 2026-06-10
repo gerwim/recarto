@@ -18,7 +18,7 @@ func seedFeedback(t *testing.T) string {
 		t.Fatal(err)
 	}
 	defer b.Close()
-	id, _, err := b.Engine.Record(context.Background(), memory.NewMemory{
+	id, _, _, err := b.Engine.Record(context.Background(), memory.NewMemory{
 		Kind:  memory.KindFeedback,
 		Title: "search_content rejected query param",
 		Body:  "search_content rejected query param\n\ndetail",

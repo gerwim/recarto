@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"strings"
 
 	"git.gerwim.nl/gerwim/recarto/internal/clock"
 	"git.gerwim.nl/gerwim/recarto/internal/ids"
@@ -190,17 +191,52 @@ var errInvalidKind = errors.New("memory: invalid kind")
 // embeddings path rejected for v1).
 const dedupThreshold = 0.55
 
+// ConflictCandidate is an existing memory the new one may contradict or
+// supersede: similar enough to be about the same thing (or anchored to the same
+// code), not similar enough to auto-reinforce. Judgment belongs to the
+// recording agent — Recarto surfaces, never decides.
+type ConflictCandidate struct {
+	ID      string
+	Title   string
+	Snippet string // body prefix, ~160 chars
+	Reason  string // "similar wording" | "shares refs"
+}
+
+// conflictKinds are the judgment-bearing kinds where an opposite claim is
+// costly if it lingers. Bugs and todos are factual/transient and excluded.
+var conflictKinds = map[Kind]bool{
+	KindPreference: true, KindDecision: true, KindDoNotRepeat: true, KindLearning: true,
+}
+
+const (
+	// conflictJaccardFloor..dedupThreshold is the "same topic, different claim"
+	// middle band: below the floor is unrelated, at the threshold it reinforces.
+	conflictJaccardFloor  = 0.25
+	maxConflictCandidates = 3
+	conflictSnippetLen    = 160
+)
+
+// bodySnippet trims a body to the candidate-snippet budget on a rune boundary.
+func bodySnippet(body string) string {
+	r := []rune(body)
+	if len(r) <= conflictSnippetLen {
+		return body
+	}
+	return string(r[:conflictSnippetLen]) + "…"
+}
+
 // Record inserts nm, or reinforces a near-duplicate same-kind active memory.
-// It returns the affected row id and whether it was a reinforcement.
+// It returns the affected row id, whether it was a reinforcement, and advisory
+// conflict candidates (existing memories that may contradict the new one).
 //
 // The near-dup check and the insert/reinforce run inside a SINGLE write
 // transaction (BEGIN IMMEDIATE), so the check-and-act is atomic across
 // goroutines and processes: a concurrent racer reads the winner's just-
 // committed row inside its own immediate transaction and reinforces instead of
 // inserting a duplicate — the §7.9 convergence guarantee.
-func (e *Engine) Record(ctx context.Context, nm NewMemory) (id string, reinforced bool, err error) {
+func (e *Engine) Record(ctx context.Context, nm NewMemory) (id string, reinforced bool, conflicts []ConflictCandidate, err error) {
 	if !nm.Kind.Valid() {
-		return "", false, errInvalidKind
+		return "", false, nil, errInvalidKind
 	}
 	if nm.Kind == KindDoNotRepeat {
 		nm.Pinned = true
@@ -212,7 +248,7 @@ func (e *Engine) Record(ctx context.Context, nm NewMemory) (id string, reinforce
 	now := e.clk.Now().UnixMilli()
 
 	if txErr := e.st.WriteTx(ctx, func(c store.Conn) error {
-		candID, found, ferr := e.findNearDup(ctx, c, nm.Kind, bands, set)
+		candID, found, mid, ferr := e.findNearDup(ctx, c, nm.Kind, bands, set)
 		if ferr != nil {
 			return ferr
 		}
@@ -221,9 +257,34 @@ func (e *Engine) Record(ctx context.Context, nm NewMemory) (id string, reinforce
 			return e.reinforce(ctx, c, candID, nm, now)
 		}
 		id, reinforced = ids.New(), false
-		return e.insert(ctx, c, id, nm, searchText, sim, bands, now)
+		if err := e.insert(ctx, c, id, nm, searchText, sim, bands, now); err != nil {
+			return err
+		}
+		// Advisory contradiction suspects, judged by the recording agent. Same
+		// transaction, so the read is consistent with the insert; never blocks it.
+		if conflictKinds[nm.Kind] {
+			seen := map[string]bool{}
+			for _, m := range mid {
+				if !seen[m.ID] {
+					seen[m.ID] = true
+					conflicts = append(conflicts, m)
+				}
+			}
+			if refCands, rerr := e.refConflicts(ctx, c, nm.Kind, id, nm.Refs); rerr == nil {
+				for _, m := range refCands {
+					if !seen[m.ID] {
+						seen[m.ID] = true
+						conflicts = append(conflicts, m)
+					}
+				}
+			}
+			if len(conflicts) > maxConflictCandidates {
+				conflicts = conflicts[:maxConflictCandidates]
+			}
+		}
+		return nil
 	}); txErr != nil {
-		return "", false, txErr
+		return "", false, nil, txErr
 	}
 
 	// Best-effort counter bump. It MUST run outside the WriteTx above: the
@@ -231,15 +292,16 @@ func (e *Engine) Record(ctx context.Context, nm NewMemory) (id string, reinforce
 	// its own WriteTx) while holding it would deadlock. A failed stat must not
 	// fail an already-committed Record, so the error is intentionally ignored.
 	_ = e.led.Incr(ctx, "lifetime", "memories_recorded", 1)
-	return id, reinforced, nil
+	return id, reinforced, conflicts, nil
 }
 
 // findNearDup returns the id of an active same-kind memory whose body has
-// Jaccard >= dedupThreshold with set, using MinHash-LSH bands to gather
-// candidates and exact shingle Jaccard to confirm. It reads on the caller's
-// transaction connection c so the check is consistent with the ensuing write.
+// Jaccard >= dedupThreshold with set (the reinforce target), plus the
+// middle-band candidates (conflictJaccardFloor <= j < dedupThreshold) that are
+// about the same topic without being the same statement — the contradiction
+// suspects Record surfaces.
 func (e *Engine) findNearDup(ctx context.Context, c store.Conn, kind Kind,
-	bands [lshBands]uint64, set map[string]struct{}) (string, bool, error) {
+	bands [lshBands]uint64, set map[string]struct{}) (string, bool, []ConflictCandidate, error) {
 	seen := map[string]bool{}
 	var candidates []string
 	for b := 0; b < lshBands; b++ {
@@ -250,13 +312,13 @@ func (e *Engine) findNearDup(ctx context.Context, c store.Conn, kind Kind,
 			  WHERE mh.band = ? AND mh.hash = ? AND m.kind = ? AND m.status = 'active'`,
 			b, int64(bands[b]), string(kind))
 		if err != nil {
-			return "", false, err
+			return "", false, nil, err
 		}
 		for rows.Next() {
 			var id string
 			if err := rows.Scan(&id); err != nil {
 				rows.Close()
-				return "", false, err
+				return "", false, nil, err
 			}
 			if !seen[id] {
 				seen[id] = true
@@ -265,24 +327,67 @@ func (e *Engine) findNearDup(ctx context.Context, c store.Conn, kind Kind,
 		}
 		if err := rows.Err(); err != nil {
 			rows.Close()
-			return "", false, err
+			return "", false, nil, err
 		}
 		rows.Close()
 	}
+	var mid []ConflictCandidate
 	for _, id := range candidates {
-		var body string
+		var title, body string
 		if err := c.QueryRowContext(ctx,
-			`SELECT body FROM memories WHERE id = ?`, id).Scan(&body); err != nil {
+			`SELECT title, body FROM memories WHERE id = ?`, id).Scan(&title, &body); err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				continue
 			}
-			return "", false, err
+			return "", false, nil, err
 		}
-		if jaccard(set, shingleSet(body)) >= dedupThreshold {
-			return id, true, nil
+		j := jaccard(set, shingleSet(body))
+		if j >= dedupThreshold {
+			return id, true, nil, nil
+		}
+		if j >= conflictJaccardFloor {
+			mid = append(mid, ConflictCandidate{
+				ID: id, Title: title, Snippet: bodySnippet(body), Reason: "similar wording",
+			})
 		}
 	}
-	return "", false, nil
+	return "", false, mid, nil
+}
+
+// refConflicts returns active same-kind memories (excluding selfID) anchored to
+// any of the new memory's file/symbol refs — the structural "same topic" signal
+// when wording differs entirely.
+func (e *Engine) refConflicts(ctx context.Context, c store.Conn, kind Kind, selfID string, refs []Ref) ([]ConflictCandidate, error) {
+	var args []any
+	var or []string
+	for _, r := range refs {
+		if r.Type != RefFile && r.Type != RefSymbol {
+			continue
+		}
+		or = append(or, "(r.ref_type = ? AND r.ref_value = ?)")
+		args = append(args, string(r.Type), r.Value)
+	}
+	if len(or) == 0 {
+		return nil, nil
+	}
+	q := `SELECT DISTINCT m.id, m.title, m.body
+	        FROM memories m JOIN memory_refs r ON r.memory_id = m.id
+	       WHERE m.kind = ? AND m.status = 'active' AND m.id != ? AND (` + strings.Join(or, " OR ") + `)
+	       LIMIT 6`
+	rows, err := c.QueryContext(ctx, q, append([]any{string(kind), selfID}, args...)...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ConflictCandidate
+	for rows.Next() {
+		var id, title, body string
+		if err := rows.Scan(&id, &title, &body); err != nil {
+			return nil, err
+		}
+		out = append(out, ConflictCandidate{ID: id, Title: title, Snippet: bodySnippet(body), Reason: "shares refs"})
+	}
+	return out, rows.Err()
 }
 
 // reinforce bumps an existing memory's reinforcement_count and confidence,

@@ -187,7 +187,7 @@ func TestCompleteTodoHandler(t *testing.T) {
 	a := newTestApp(t, "main")
 	ctx := context.Background()
 
-	id, _, err := a.Engine.Record(ctx, memory.NewMemory{
+	id, _, _, err := a.Engine.Record(ctx, memory.NewMemory{
 		Kind: memory.KindTodo, Title: "ship it", Body: "ship the feature", Source: "mcp",
 	})
 	if err != nil {

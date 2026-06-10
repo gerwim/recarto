@@ -11,7 +11,7 @@ import (
 func TestForgetRemovesMemory(t *testing.T) {
 	e := newTestEngine(t, clock.NewFake(time.UnixMilli(10_000_000)))
 	ctx := context.Background()
-	id, _, err := e.Record(ctx, NewMemory{Kind: KindLearning, Title: "x", Body: "forget me please"})
+	id, _, _, err := e.Record(ctx, NewMemory{Kind: KindLearning, Title: "x", Body: "forget me please"})
 	if err != nil {
 		t.Fatal(err)
 	}

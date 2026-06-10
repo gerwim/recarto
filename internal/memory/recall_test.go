@@ -40,7 +40,7 @@ func TestRecallReportsTruncation(t *testing.T) {
 		"echoxq minhash lsh band signature jaccard shingle near duplicate reinforce threshold confirm",
 	}
 	for i := 0; i < 5; i++ {
-		_, _, _ = e.Record(ctx, NewMemory{Kind: KindLearning, Body: "shared keyword payload number " + strconv.Itoa(i) + " " + uniques[i]})
+		_, _, _, _ = e.Record(ctx, NewMemory{Kind: KindLearning, Body: "shared keyword payload number " + strconv.Itoa(i) + " " + uniques[i]})
 	}
 	set, err := e.Recall(ctx, RecallQuery{TaskHint: "shared keyword payload", TokenBudget: 60})
 	if err != nil {
@@ -57,7 +57,7 @@ func TestRecallReportsTruncation(t *testing.T) {
 func TestRecallMinScoreFilters(t *testing.T) {
 	e := newTestEngine(t, clock.NewFake(time.UnixMilli(10_000_000)))
 	ctx := context.Background()
-	_, _, _ = e.Record(ctx, NewMemory{Kind: KindLearning, Body: "exact relevant text"})
+	_, _, _, _ = e.Record(ctx, NewMemory{Kind: KindLearning, Body: "exact relevant text"})
 	set, _ := e.Recall(ctx, RecallQuery{TaskHint: "exact relevant text", MinScore: 0.999})
 	if len(set.Results) != 0 {
 		t.Errorf("MinScore=0.999 should exclude all, got %d", len(set.Results))
@@ -70,7 +70,7 @@ func TestRecallStructuralBeatsLexical(t *testing.T) {
 	ctx := context.Background()
 
 	// A: shares the query FILE (structural — strongest signal), weak words.
-	structID, _, err := e.Record(ctx, NewMemory{
+	structID, _, _, err := e.Record(ctx, NewMemory{
 		Kind:   KindLearning,
 		Title:  "store opens with pragmas",
 		Body:   "open applies wal and busy timeout pragmas on every connection",
@@ -82,7 +82,7 @@ func TestRecallStructuralBeatsLexical(t *testing.T) {
 		t.Fatal(err)
 	}
 	// B: matches the query WORDS strongly but no shared ref.
-	_, _, err = e.Record(ctx, NewMemory{
+	_, _, _, err = e.Record(ctx, NewMemory{
 		Kind:   KindLearning,
 		Title:  "auth session refresh",
 		Body:   "auth session refresh token rotation auth session refresh",
@@ -116,11 +116,11 @@ func TestRecallStructuralBeatsLexical(t *testing.T) {
 func TestRecallDropsSuperseded(t *testing.T) {
 	e := newTestEngine(t, clock.NewFake(time.UnixMilli(11_000_000)))
 	ctx := context.Background()
-	oldID, _, _ := e.Record(ctx, NewMemory{Kind: KindDecision,
+	oldID, _, _, _ := e.Record(ctx, NewMemory{Kind: KindDecision,
 		Body: "we will store markdown files committed in the repo",
 		Refs: []Ref{{Type: RefFile, Value: "internal/export/render.go"}}})
 	// Supersede it.
-	if _, _, err := e.Record(ctx, NewMemory{Kind: KindDecision,
+	if _, _, _, err := e.Record(ctx, NewMemory{Kind: KindDecision,
 		Body:         "markdown is on-demand export only, sqlite is source of truth",
 		Refs:         []Ref{{Type: RefFile, Value: "internal/export/render.go"}},
 		SupersedesID: oldID}); err != nil {
@@ -144,7 +144,7 @@ func TestRecallBudgetCapsAndPinsFirst(t *testing.T) {
 	ctx := context.Background()
 
 	// One pinned do_not_repeat (always included, budget-exempt).
-	dnrID, _, _ := e.Record(ctx, NewMemory{Kind: KindDoNotRepeat,
+	dnrID, _, _, _ := e.Record(ctx, NewMemory{Kind: KindDoNotRepeat,
 		Body: "never add a redundant toolchain directive to go.mod it breaks builds",
 		Refs: []Ref{{Type: RefFile, Value: "go.mod"}}})
 
@@ -158,7 +158,7 @@ func TestRecallBudgetCapsAndPinsFirst(t *testing.T) {
 		"echo minhash lsh band signature jaccard shingle near duplicate reinforce threshold confirm",
 	}
 	for _, b := range bodies {
-		if _, _, err := e.Record(ctx, NewMemory{Kind: KindLearning,
+		if _, _, _, err := e.Record(ctx, NewMemory{Kind: KindLearning,
 			Body: b,
 			Refs: []Ref{{Type: RefFile, Value: "go.mod"}}}); err != nil {
 			t.Fatal(err)
@@ -220,12 +220,12 @@ func TestRecallExplicitKindIsAuthoritative(t *testing.T) {
 	e := newTestEngine(t, clock.NewFake(time.UnixMilli(30_000_000)))
 	ctx := context.Background()
 
-	pinID, _, err := e.Record(ctx, NewMemory{Kind: KindDoNotRepeat,
+	pinID, _, _, err := e.Record(ctx, NewMemory{Kind: KindDoNotRepeat,
 		Body: "never disable the busy_timeout pragma on the store connection"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := e.Record(ctx, NewMemory{Kind: KindBug,
+	if _, _, _, err := e.Record(ctx, NewMemory{Kind: KindBug,
 		Body: "nil deref in the recall budgeter when scored is empty",
 		Refs: []Ref{{Type: RefFile, Value: "internal/memory/recall.go"}}}); err != nil {
 		t.Fatal(err)
@@ -278,7 +278,7 @@ func TestRecallLimitCapsReturned(t *testing.T) {
 		"foxtrot embedding vector cosine ann index quantize recall candidate rerank distance metric",
 	}
 	for _, b := range bodies {
-		if _, _, err := e.Record(ctx, NewMemory{Kind: KindLearning,
+		if _, _, _, err := e.Record(ctx, NewMemory{Kind: KindLearning,
 			Body: b,
 			Refs: []Ref{{Type: RefFile, Value: "internal/limit/probe.go"}}}); err != nil {
 			t.Fatal(err)
@@ -308,7 +308,7 @@ func TestRecallPinSubBudgetCapsPins(t *testing.T) {
 		"never skip the wal checkpoint on the shutdown path or the database file grows without bound",
 	}
 	for _, b := range bodies {
-		if _, _, err := e.Record(ctx, NewMemory{Kind: KindDoNotRepeat, Body: b}); err != nil {
+		if _, _, _, err := e.Record(ctx, NewMemory{Kind: KindDoNotRepeat, Body: b}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -339,7 +339,7 @@ func TestRecallMissWhenBudgetExcludesAll(t *testing.T) {
 	ctx := context.Background()
 
 	big := "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi omicron pi"
-	if _, _, err := e.Record(ctx, NewMemory{Kind: KindLearning, Body: big,
+	if _, _, _, err := e.Record(ctx, NewMemory{Kind: KindLearning, Body: big,
 		Refs: []Ref{{Type: RefFile, Value: "internal/memory/recall.go"}}}); err != nil {
 		t.Fatal(err)
 	}
@@ -367,7 +367,7 @@ func TestRecallMissWhenBudgetExcludesAll(t *testing.T) {
 func TestRecallSynonymBridging(t *testing.T) {
 	e := newTestEngine(t, clock.NewFake(time.UnixMilli(32_000_000)))
 	ctx := context.Background()
-	id, _, err := e.Record(ctx, NewMemory{Kind: KindLearning,
+	id, _, _, err := e.Record(ctx, NewMemory{Kind: KindLearning,
 		Title: "pooling",
 		Body:  "reuse the database connection pool instead of dialing per request"})
 	if err != nil {
@@ -398,7 +398,7 @@ func TestBaselineRecallSurfacesCerebrumKinds(t *testing.T) {
 		{Kind: KindLearning, Title: "learn", Body: "store lives outside the worktree", Branch: "main", Source: "cli"},
 		{Kind: KindDecision, Title: "decide", Body: "chose sqlite over flat files", Branch: "main", Source: "cli"},
 	} {
-		if _, _, err := e.Record(ctx, nm); err != nil {
+		if _, _, _, err := e.Record(ctx, nm); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -422,10 +422,10 @@ func TestBaselineRecallExcludesBug(t *testing.T) {
 	clk := clock.NewFake(time.UnixMilli(10_000_000))
 	e := newTestEngine(t, clk)
 	ctx := context.Background()
-	if _, _, err := e.Record(ctx, NewMemory{Kind: KindLearning, Title: "keep", Body: "a durable learning fact", Branch: "main", Source: "cli"}); err != nil {
+	if _, _, _, err := e.Record(ctx, NewMemory{Kind: KindLearning, Title: "keep", Body: "a durable learning fact", Branch: "main", Source: "cli"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := e.Record(ctx, NewMemory{Kind: KindBug, Title: "boom", Body: "npe in the request handler", Branch: "main", Source: "cli"}); err != nil {
+	if _, _, _, err := e.Record(ctx, NewMemory{Kind: KindBug, Title: "boom", Body: "npe in the request handler", Branch: "main", Source: "cli"}); err != nil {
 		t.Fatal(err)
 	}
 	set, err := e.Recall(ctx, RecallQuery{Branch: "main", Baseline: true, TokenBudget: 100000})
@@ -444,13 +444,13 @@ func TestBaselineRecallBranchVisible(t *testing.T) {
 	clk := clock.NewFake(time.UnixMilli(10_000_000))
 	e := newTestEngine(t, clk)
 	ctx := context.Background()
-	if _, _, err := e.Record(ctx, NewMemory{Kind: KindLearning, Title: "global", Body: "alpha unique global one", Source: "cli"}); err != nil {
+	if _, _, _, err := e.Record(ctx, NewMemory{Kind: KindLearning, Title: "global", Body: "alpha unique global one", Source: "cli"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := e.Record(ctx, NewMemory{Kind: KindLearning, Title: "onbranch", Body: "beta unique feature two", Branch: "feature", Source: "cli"}); err != nil {
+	if _, _, _, err := e.Record(ctx, NewMemory{Kind: KindLearning, Title: "onbranch", Body: "beta unique feature two", Branch: "feature", Source: "cli"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := e.Record(ctx, NewMemory{Kind: KindLearning, Title: "otherbranch", Body: "gamma unique main three", Branch: "main", Source: "cli"}); err != nil {
+	if _, _, _, err := e.Record(ctx, NewMemory{Kind: KindLearning, Title: "otherbranch", Body: "gamma unique main three", Branch: "main", Source: "cli"}); err != nil {
 		t.Fatal(err)
 	}
 	set, err := e.Recall(ctx, RecallQuery{Branch: "feature", Baseline: true, TokenBudget: 100000})
@@ -474,13 +474,13 @@ func TestBaselineRecallRespectsBudgetAndPinsFirst(t *testing.T) {
 	clk := clock.NewFake(time.UnixMilli(10_000_000))
 	e := newTestEngine(t, clk)
 	ctx := context.Background()
-	pinID, _, err := e.Record(ctx, NewMemory{Kind: KindDoNotRepeat, Title: "never", Body: "never hardcode secrets in source", Branch: "main", Source: "cli"})
+	pinID, _, _, err := e.Record(ctx, NewMemory{Kind: KindDoNotRepeat, Title: "never", Body: "never hardcode secrets in source", Branch: "main", Source: "cli"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	for i := 0; i < 5; i++ {
 		body := fmt.Sprintf("decision number %d with a fairly long body to consume token budget quickly", i)
-		if _, _, err := e.Record(ctx, NewMemory{Kind: KindDecision, Title: fmt.Sprintf("d%d", i), Body: body, Branch: "main", Source: "cli"}); err != nil {
+		if _, _, _, err := e.Record(ctx, NewMemory{Kind: KindDecision, Title: fmt.Sprintf("d%d", i), Body: body, Branch: "main", Source: "cli"}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -508,13 +508,13 @@ func TestBaselineRecallIncludesOpenTodo(t *testing.T) {
 	e := newTestEngine(t, clk)
 	ctx := context.Background()
 
-	todoID, _, err := e.Record(ctx, NewMemory{
+	todoID, _, _, err := e.Record(ctx, NewMemory{
 		Kind: KindTodo, Title: "finish the parser", Body: "finish the parser work", Branch: "main", Source: "cli",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	doneID, _, _ := e.Record(ctx, NewMemory{
+	doneID, _, _, _ := e.Record(ctx, NewMemory{
 		Kind: KindTodo, Title: "already finished", Body: "already finished work", Branch: "main", Source: "cli",
 	})
 	if _, err := e.CompleteTodo(ctx, doneID); err != nil {
@@ -548,7 +548,7 @@ func TestRecallStampsLastUsedEpoch(t *testing.T) {
 	e := newTestEngine(t, clk)
 	ctx := context.Background()
 
-	id, _, err := e.Record(ctx, NewMemory{
+	id, _, _, err := e.Record(ctx, NewMemory{
 		Kind:   KindLearning,
 		Title:  "store wal pragmas",
 		Body:   "open applies wal and busy timeout pragmas on every connection",

@@ -12,7 +12,7 @@ import (
 func TestMemoryShowRendersMarkdown(t *testing.T) {
 	a := newTestApp(t, "main")
 	ctx := context.Background()
-	if _, _, err := a.Engine.Record(ctx, memory.NewMemory{
+	if _, _, _, err := a.Engine.Record(ctx, memory.NewMemory{
 		Kind:   memory.KindDecision,
 		Title:  "sqlite is source of truth",
 		Body:   "markdown is render-only so it cannot drift",
@@ -48,7 +48,7 @@ func TestMemoryShowBranchFilter(t *testing.T) {
 	ctx := context.Background()
 	rec := func(branch, title, body string) {
 		t.Helper()
-		if _, _, err := a.Engine.Record(ctx, memory.NewMemory{
+		if _, _, _, err := a.Engine.Record(ctx, memory.NewMemory{
 			Kind: memory.KindDecision, Title: title, Body: body, Branch: branch}); err != nil {
 			t.Fatal(err)
 		}

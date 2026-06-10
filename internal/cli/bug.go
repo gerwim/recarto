@@ -73,7 +73,7 @@ func bugAdd(ctx context.Context, a *app.App, w io.Writer, args []string) error {
 		body = *msg + " — fix: " + *fix
 	}
 
-	id, reinforced, err := a.Engine.Record(ctx, memory.NewMemory{
+	id, reinforced, _, err := a.Engine.Record(ctx, memory.NewMemory{
 		Kind:     memory.KindBug,
 		Title:    *msg,
 		Body:     body,

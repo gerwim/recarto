@@ -64,7 +64,7 @@ func TestOpenResolvesIdentityAndStore(t *testing.T) {
 	}
 
 	// Sanity: the engine writes through the opened store.
-	if _, _, err := a.Engine.Record(context.Background(), newLearning()); err != nil {
+	if _, _, _, err := a.Engine.Record(context.Background(), newLearning()); err != nil {
 		t.Fatalf("engine record failed: %v", err)
 	}
 

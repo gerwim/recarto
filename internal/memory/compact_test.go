@@ -47,13 +47,13 @@ func TestEvictableKinds(t *testing.T) {
 func TestGCSupersededDeletesRows(t *testing.T) {
 	e := newTestEngine(t, clock.NewFake(time.UnixMilli(13_000_000)))
 	ctx := context.Background()
-	oldID, _, err := e.Record(ctx, NewMemory{Kind: KindDecision,
+	oldID, _, _, err := e.Record(ctx, NewMemory{Kind: KindDecision,
 		Body: "we will store markdown files committed in the repo"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	// A distinct-body superseding record marks oldID superseded.
-	if _, _, err := e.Record(ctx, NewMemory{Kind: KindDecision,
+	if _, _, _, err := e.Record(ctx, NewMemory{Kind: KindDecision,
 		Body:         "markdown is on-demand export only, sqlite is source of truth",
 		SupersedesID: oldID}); err != nil {
 		t.Fatal(err)
@@ -82,11 +82,11 @@ func TestGCSupersededDeletesRows(t *testing.T) {
 func TestGCSupersededDryRunCounts(t *testing.T) {
 	e := newTestEngine(t, clock.NewFake(time.UnixMilli(13_500_000)))
 	ctx := context.Background()
-	oldID, _, err := e.Record(ctx, NewMemory{Kind: KindDecision, Body: "old fact about the thing"})
+	oldID, _, _, err := e.Record(ctx, NewMemory{Kind: KindDecision, Body: "old fact about the thing"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := e.Record(ctx, NewMemory{Kind: KindDecision, Body: "totally new and different statement", SupersedesID: oldID}); err != nil {
+	if _, _, _, err := e.Record(ctx, NewMemory{Kind: KindDecision, Body: "totally new and different statement", SupersedesID: oldID}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -336,7 +336,7 @@ func TestCompactDryRunDoesNotWrite(t *testing.T) {
 	e := newTestEngine(t, clock.NewFake(time.UnixMilli(1_700_000_000_000)))
 	ctx := context.Background()
 	// Seed a superseded row.
-	oldID, _, _ := e.Record(ctx, NewMemory{Kind: KindDecision, Body: "old decision text here"})
+	oldID, _, _, _ := e.Record(ctx, NewMemory{Kind: KindDecision, Body: "old decision text here"})
 	e.Record(ctx, NewMemory{Kind: KindDecision, Body: "a wholly different decision now", SupersedesID: oldID})
 
 	before, _ := e.Epoch(ctx)

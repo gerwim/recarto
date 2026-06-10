@@ -84,7 +84,7 @@ func TestPostEditSurfacesBugForEditedFile(t *testing.T) {
 	a.Git.Worktree = wt
 	os.WriteFile(filepath.Join(wt, "a.go"), []byte("package p\nfunc F(){}"), 0o644)
 	ctx := context.Background()
-	if _, _, err := a.Engine.Record(ctx, memory.NewMemory{
+	if _, _, _, err := a.Engine.Record(ctx, memory.NewMemory{
 		Kind: memory.KindBug, Title: "edge case in F", Body: "edge case in F — fix: clamp",
 		Refs:   []memory.Ref{{Type: memory.RefFile, Value: "a.go"}},
 		Source: "cli", Extra: map[string]any{"fix": "clamp"},
@@ -108,7 +108,7 @@ func TestAugmentSurfacesBugsMatchingPattern(t *testing.T) {
 	os.WriteFile(filepath.Join(wt, "a.go"), []byte("package p\nfunc Authenticate(){}"), 0o644)
 	ctx := context.Background()
 	PostEdit(ctx, a, strings.NewReader(`{"session_id":"s1","tool_input":{"file_path":"`+filepath.Join(wt, "a.go")+`"}}`), &bytes.Buffer{})
-	if _, _, err := a.Engine.Record(ctx, memory.NewMemory{
+	if _, _, _, err := a.Engine.Record(ctx, memory.NewMemory{
 		Kind: memory.KindBug, Title: "Authenticate bypass", Body: "Authenticate bypass when token empty — fix: reject",
 		Source: "cli", Extra: map[string]any{"fix": "reject"},
 	}); err != nil {

@@ -23,7 +23,7 @@ func TestOpenIsRepoIndependentAndPersists(t *testing.T) {
 	if b.Store.Path() != want {
 		t.Fatalf("store path = %q, want %q", b.Store.Path(), want)
 	}
-	if _, _, err := b.Engine.Record(ctx, memory.NewMemory{
+	if _, _, _, err := b.Engine.Record(ctx, memory.NewMemory{
 		Kind: memory.KindFeedback, Title: "t", Body: "b", Source: "test",
 	}); err != nil {
 		t.Fatal(err)

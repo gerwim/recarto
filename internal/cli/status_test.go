@@ -13,7 +13,7 @@ import (
 func TestStatusReportsIdentityCountsAndLedger(t *testing.T) {
 	a := newTestApp(t, "main")
 	ctx := context.Background()
-	if _, _, err := a.Engine.Record(ctx, memory.NewMemory{
+	if _, _, _, err := a.Engine.Record(ctx, memory.NewMemory{
 		Kind: memory.KindLearning, Body: "use wal mode for cross process writers"}); err != nil {
 		t.Fatal(err)
 	}

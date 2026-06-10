@@ -78,7 +78,7 @@ func TestRecordReinforcesNearDup(t *testing.T) {
 		Body:   "the auth token refresh path leaks a goroutine on error return",
 		Source: "cli",
 	}
-	id1, reinf1, err := e.Record(ctx, nm)
+	id1, reinf1, _, err := e.Record(ctx, nm)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,7 +89,7 @@ func TestRecordReinforcesNearDup(t *testing.T) {
 	// Near-identical body, same kind → should reinforce id1, not insert.
 	nm2 := nm
 	nm2.Body = "the auth token refresh path leaks a goroutine on error returns"
-	id2, reinf2, err := e.Record(ctx, nm2)
+	id2, reinf2, _, err := e.Record(ctx, nm2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,11 +115,11 @@ func TestRecordInsertsDistinct(t *testing.T) {
 	e := newTestEngine(t, clock.NewFake(time.UnixMilli(3_000_000)))
 	ctx := context.Background()
 
-	if _, _, err := e.Record(ctx, NewMemory{Kind: KindLearning,
+	if _, _, _, err := e.Record(ctx, NewMemory{Kind: KindLearning,
 		Body: "use WAL mode and busy_timeout for cross-process writers"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := e.Record(ctx, NewMemory{Kind: KindLearning,
+	if _, _, _, err := e.Record(ctx, NewMemory{Kind: KindLearning,
 		Body: "render markdown export to stdout on demand only"}); err != nil {
 		t.Fatal(err)
 	}
@@ -135,7 +135,7 @@ func TestRecordInsertsDistinct(t *testing.T) {
 
 func TestRecordRejectsInvalidKind(t *testing.T) {
 	e := newTestEngine(t, clock.NewFake(time.UnixMilli(1)))
-	if _, _, err := e.Record(context.Background(), NewMemory{Kind: "bogus"}); err == nil {
+	if _, _, _, err := e.Record(context.Background(), NewMemory{Kind: "bogus"}); err == nil {
 		t.Error("expected error for invalid kind")
 	}
 }
@@ -143,7 +143,7 @@ func TestRecordRejectsInvalidKind(t *testing.T) {
 func TestRecordPinsDoNotRepeat(t *testing.T) {
 	e := newTestEngine(t, clock.NewFake(time.UnixMilli(1)))
 	ctx := context.Background()
-	id, _, err := e.Record(ctx, NewMemory{Kind: KindDoNotRepeat,
+	id, _, _, err := e.Record(ctx, NewMemory{Kind: KindDoNotRepeat,
 		Body: "never run go.mod with a redundant toolchain directive"})
 	if err != nil {
 		t.Fatal(err)
@@ -175,7 +175,7 @@ func TestRecordConcurrentDedupConverges(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if _, _, err := e.Record(ctx, nm); err != nil {
+			if _, _, _, err := e.Record(ctx, nm); err != nil {
 				errs <- err
 			}
 		}()
@@ -197,5 +197,96 @@ func TestRecordConcurrentDedupConverges(t *testing.T) {
 	}
 	if reinf != n-1 {
 		t.Errorf("reinforcement_count = %d, want %d", reinf, n-1)
+	}
+}
+
+func TestRecordSurfacesMiddleBandConflictCandidates(t *testing.T) {
+	e := newTestEngine(t, clock.NewFake(time.UnixMilli(6_000_000)))
+	ctx := context.Background()
+	_, _, _, err := e.Record(ctx, NewMemory{
+		Kind: KindPreference, Title: "tabs", Body: "always use hard tab characters when indenting Go code in this project",
+		Author: "t", Source: "cli",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Similar topic, opposite claim: middle-band similarity (Jaccard ~0.50), NOT a near-dup.
+	_, reinforced, conflicts, err := e.Record(ctx, NewMemory{
+		Kind: KindPreference, Title: "spaces", Body: "always use two spaces when indenting Go code in this project",
+		Author: "t", Source: "cli",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reinforced {
+		t.Fatal("opposite claim must not auto-reinforce")
+	}
+	if len(conflicts) == 0 {
+		t.Fatalf("middle-band similar memory must surface as a conflict candidate")
+	}
+	if conflicts[0].Snippet == "" || conflicts[0].ID == "" || conflicts[0].Reason == "" {
+		t.Errorf("candidate must carry id/snippet/reason: %+v", conflicts[0])
+	}
+}
+
+func TestRecordSurfacesSharedRefConflicts(t *testing.T) {
+	e := newTestEngine(t, clock.NewFake(time.UnixMilli(7_000_000)))
+	ctx := context.Background()
+	ref := []Ref{{Type: RefFile, Value: "internal/auth/login.go"}}
+	if _, _, _, err := e.Record(ctx, NewMemory{
+		Kind: KindDecision, Title: "sessions in redis", Body: "store auth sessions in redis",
+		Refs: ref, Author: "t", Source: "cli",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_, _, conflicts, err := e.Record(ctx, NewMemory{
+		Kind: KindDecision, Title: "jwt only", Body: "drop server-side state entirely and use signed jwt",
+		Refs: ref, Author: "t", Source: "cli",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sawRefReason bool
+	for _, c := range conflicts {
+		if c.Reason == "shares refs" {
+			sawRefReason = true
+		}
+	}
+	if !sawRefReason {
+		t.Fatalf("same-kind memory sharing a file ref must surface, got %+v", conflicts)
+	}
+}
+
+func TestRecordNoConflictsForFactualKindsOrReinforce(t *testing.T) {
+	e := newTestEngine(t, clock.NewFake(time.UnixMilli(8_000_000)))
+	ctx := context.Background()
+	if _, _, _, err := e.Record(ctx, NewMemory{
+		Kind: KindBug, Title: "npe", Body: "nil deref in parser on empty file",
+		Author: "t", Source: "cli",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_, _, conflicts, err := e.Record(ctx, NewMemory{
+		Kind: KindBug, Title: "panic", Body: "panic slice bounds in lexer on empty file input",
+		Author: "t", Source: "cli",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(conflicts) != 0 {
+		t.Fatalf("bug kind must not produce conflict candidates, got %+v", conflicts)
+	}
+
+	// Exact restatement reinforces and returns no candidates.
+	body := "the user always wants conventional commit messages on every commit in this repo"
+	if _, _, _, err := e.Record(ctx, NewMemory{Kind: KindPreference, Body: body, Author: "t", Source: "cli"}); err != nil {
+		t.Fatal(err)
+	}
+	_, reinforced, conflicts, err := e.Record(ctx, NewMemory{Kind: KindPreference, Body: body, Author: "t", Source: "cli"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reinforced || len(conflicts) != 0 {
+		t.Fatalf("reinforce path must return no candidates, got reinforced=%v %+v", reinforced, conflicts)
 	}
 }

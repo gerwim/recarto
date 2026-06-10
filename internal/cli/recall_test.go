@@ -19,7 +19,7 @@ func TestRecallPrintsCaveat(t *testing.T) {
 		 VALUES ('p',?,?,?,?,?,?,?)`, a.Git.Worktree, "present.go", "go", "h", 0, 0, 0); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := a.Engine.Record(ctx, memory.NewMemory{
+	if _, _, _, err := a.Engine.Record(ctx, memory.NewMemory{
 		Kind: memory.KindLearning, Title: "ghost", Body: "ghost learning about absent.go",
 		Refs: []memory.Ref{{Type: memory.RefFile, Value: "absent.go"}},
 	}); err != nil {
@@ -37,7 +37,7 @@ func TestRecallPrintsCaveat(t *testing.T) {
 func TestRecallByFileRef(t *testing.T) {
 	a := newTestApp(t, "main")
 	ctx := context.Background()
-	if _, _, err := a.Engine.Record(ctx, memory.NewMemory{
+	if _, _, _, err := a.Engine.Record(ctx, memory.NewMemory{
 		Kind:   memory.KindLearning,
 		Title:  "WAL setup",
 		Body:   "use wal mode and busy_timeout for cross process writers",

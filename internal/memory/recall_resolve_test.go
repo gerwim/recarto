@@ -9,7 +9,7 @@ import (
 
 func recordWithRef(t *testing.T, e *Engine, kind Kind, title string, ref Ref, pinned bool) {
 	t.Helper()
-	if _, _, err := e.Record(context.Background(), NewMemory{
+	if _, _, _, err := e.Record(context.Background(), NewMemory{
 		Kind: kind, Title: title, Body: title + " body about " + ref.Value,
 		Refs: []Ref{ref}, Pinned: pinned,
 	}); err != nil {
@@ -121,7 +121,7 @@ func TestRecallPartialDanglingNotDemoted(t *testing.T) {
 	e := newTestEngine(t, clock.Real{})
 	mk := func(title string, refs ...Ref) {
 		body := title + " body about partial"
-		if _, _, err := e.Record(context.Background(), NewMemory{
+		if _, _, _, err := e.Record(context.Background(), NewMemory{
 			Kind: KindLearning, Title: title, Body: body, Refs: refs,
 		}); err != nil {
 			t.Fatal(err)

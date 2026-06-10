@@ -13,7 +13,7 @@ func TestTodoListAndDone(t *testing.T) {
 	a := newTestApp(t, "main")
 	ctx := context.Background()
 
-	id, _, err := a.Engine.Record(ctx, memory.NewMemory{
+	id, _, _, err := a.Engine.Record(ctx, memory.NewMemory{
 		Kind: memory.KindTodo, Title: "write docs", Body: "write the docs", Branch: a.Git.Branch, Source: "cli",
 	})
 	if err != nil {

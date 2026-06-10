@@ -13,7 +13,7 @@ func TestCompleteTodoTransitionsActiveToDone(t *testing.T) {
 	e := newTestEngine(t, clk)
 	ctx := context.Background()
 
-	id, _, err := e.Record(ctx, NewMemory{
+	id, _, _, err := e.Record(ctx, NewMemory{
 		Kind: KindTodo, Title: "wire the thing", Body: "wire the thing up", Branch: "main", Source: "cli",
 	})
 	if err != nil {
@@ -47,8 +47,8 @@ func TestActiveTodosExcludesDone(t *testing.T) {
 	e := newTestEngine(t, clk)
 	ctx := context.Background()
 
-	openID, _, _ := e.Record(ctx, NewMemory{Kind: KindTodo, Title: "open one", Body: "open one body", Branch: "main", Source: "cli"})
-	doneID, _, _ := e.Record(ctx, NewMemory{Kind: KindTodo, Title: "done one", Body: "done one body", Branch: "main", Source: "cli"})
+	openID, _, _, _ := e.Record(ctx, NewMemory{Kind: KindTodo, Title: "open one", Body: "open one body", Branch: "main", Source: "cli"})
+	doneID, _, _, _ := e.Record(ctx, NewMemory{Kind: KindTodo, Title: "done one", Body: "done one body", Branch: "main", Source: "cli"})
 	if _, err := e.CompleteTodo(ctx, doneID); err != nil {
 		t.Fatal(err)
 	}
@@ -68,11 +68,11 @@ func TestTodosForCodeMatchesRef(t *testing.T) {
 	e := newTestEngine(t, clk)
 	ctx := context.Background()
 
-	hitID, _, _ := e.Record(ctx, NewMemory{
+	hitID, _, _, _ := e.Record(ctx, NewMemory{
 		Kind: KindTodo, Title: "refactor handler", Body: "refactor the handler",
 		Refs: []Ref{{Type: RefFile, Value: "internal/agents/handle.go"}}, Branch: "main", Source: "cli",
 	})
-	_, _, _ = e.Record(ctx, NewMemory{
+	_, _, _, _ = e.Record(ctx, NewMemory{
 		Kind: KindTodo, Title: "other", Body: "other body",
 		Refs: []Ref{{Type: RefFile, Value: "internal/store/store.go"}}, Branch: "main", Source: "cli",
 	})

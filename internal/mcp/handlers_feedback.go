@@ -63,7 +63,7 @@ func reportRecartoIssue(ctx context.Context, a *app.App, in ReportRecartoIssueIn
 	if source != "" {
 		refs = append(refs, memory.Ref{Type: memory.RefTag, Value: feedback.RepoRefPrefix + source})
 	}
-	id, reinforced, err := b.Engine.Record(ctx, memory.NewMemory{
+	id, reinforced, _, err := b.Engine.Record(ctx, memory.NewMemory{
 		Kind:   memory.KindFeedback,
 		Title:  in.Title,
 		Body:   in.Title + "\n\n" + in.Detail, // body drives dedup + lexical match

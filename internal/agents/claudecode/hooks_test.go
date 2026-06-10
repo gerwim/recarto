@@ -57,7 +57,7 @@ func newTestApp(t *testing.T, branch string) *app.App {
 func TestSessionStartInjectsRecallAndOpensSession(t *testing.T) {
 	a := newTestApp(t, "main")
 	ctx := context.Background()
-	if _, _, err := a.Engine.Record(ctx, memory.NewMemory{
+	if _, _, _, err := a.Engine.Record(ctx, memory.NewMemory{
 		Kind:  memory.KindDoNotRepeat,
 		Title: "no redundant toolchain line",
 		Body:  "go.mod must not carry a toolchain directive equal to the go line",
@@ -169,13 +169,13 @@ func TestStopFinalizesSession(t *testing.T) {
 func TestSessionStartInjectsCerebrumAndRecentBugs(t *testing.T) {
 	a := newTestApp(t, "main")
 	ctx := context.Background()
-	if _, _, err := a.Engine.Record(ctx, memory.NewMemory{Kind: memory.KindDecision, Title: "Use SQLite", Body: "chose sqlite with wal", Source: "cli"}); err != nil {
+	if _, _, _, err := a.Engine.Record(ctx, memory.NewMemory{Kind: memory.KindDecision, Title: "Use SQLite", Body: "chose sqlite with wal", Source: "cli"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := a.Engine.Record(ctx, memory.NewMemory{Kind: memory.KindLearning, Title: "Store outside tree", Body: "db lives outside the worktree", Source: "cli"}); err != nil {
+	if _, _, _, err := a.Engine.Record(ctx, memory.NewMemory{Kind: memory.KindLearning, Title: "Store outside tree", Body: "db lives outside the worktree", Source: "cli"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := a.Engine.Record(ctx, memory.NewMemory{Kind: memory.KindBug, Title: "panic in handler", Body: "panic in handler — fix: guard", Source: "cli", Extra: map[string]any{"fix": "guard"}}); err != nil {
+	if _, _, _, err := a.Engine.Record(ctx, memory.NewMemory{Kind: memory.KindBug, Title: "panic in handler", Body: "panic in handler — fix: guard", Source: "cli", Extra: map[string]any{"fix": "guard"}}); err != nil {
 		t.Fatal(err)
 	}
 	var out bytes.Buffer
@@ -193,7 +193,7 @@ func TestSessionStartInjectsCerebrumAndRecentBugs(t *testing.T) {
 func TestPostReadSurfacesBugForFile(t *testing.T) {
 	a := newTestApp(t, "main") // worktree "/repo"
 	ctx := context.Background()
-	if _, _, err := a.Engine.Record(ctx, memory.NewMemory{
+	if _, _, _, err := a.Engine.Record(ctx, memory.NewMemory{
 		Kind: memory.KindBug, Title: "nil deref here", Body: "nil deref — fix: guard",
 		Refs:   []memory.Ref{{Type: memory.RefFile, Value: "internal/store/store.go"}},
 		Source: "cli", Extra: map[string]any{"fix": "guard"},

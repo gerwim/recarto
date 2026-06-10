@@ -10,7 +10,7 @@ import (
 func TestResolveFeedback(t *testing.T) {
 	ctx := context.Background()
 	e := newTestEngine(t, clock.Real{})
-	id, _, err := e.Record(ctx, NewMemory{Kind: KindFeedback, Title: "t", Body: "b", Source: "test"})
+	id, _, _, err := e.Record(ctx, NewMemory{Kind: KindFeedback, Title: "t", Body: "b", Source: "test"})
 	if err != nil {
 		t.Fatal(err)
 	}

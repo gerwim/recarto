@@ -65,7 +65,7 @@ func TestSnapshotExportThenImport(t *testing.T) {
 	ctx := context.Background()
 	// Use a real writable worktree so the export can write .recarto/memory.jsonl.
 	a := newTestAppWithWorktree(t, "main")
-	if _, _, err := a.Engine.Record(ctx, memory.NewMemory{
+	if _, _, _, err := a.Engine.Record(ctx, memory.NewMemory{
 		Kind: memory.KindLearning, Title: "L", Body: "shareable learning about queues",
 	}); err != nil {
 		t.Fatal(err)

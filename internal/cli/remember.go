@@ -39,7 +39,7 @@ func Remember(ctx context.Context, a *app.App, w io.Writer, args []string) error
 		return fmt.Errorf("remember: --body is required")
 	}
 
-	id, reinforced, err := a.Engine.Record(ctx, memory.NewMemory{
+	id, reinforced, _, err := a.Engine.Record(ctx, memory.NewMemory{ // Task 9 consumes conflicts
 		Kind:     kind,
 		Title:    *title,
 		Body:     *body,
