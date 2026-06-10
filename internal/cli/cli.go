@@ -121,7 +121,7 @@ func usage(w io.Writer) error {
 	fmt.Fprintln(w, "  bug add|search    record or search bug memories")
 	fmt.Fprintln(w, "  feedback          triage cross-repo Recarto bug reports (list|show|resolve) — works anywhere")
 	fmt.Fprintln(w, "  memory show       render all active memory as markdown (--branch)")
-	fmt.Fprintln(w, "  index             build/refresh the code graph for this worktree")
+	fmt.Fprintln(w, "  index             build/refresh the code graph for this worktree (--force: full rebuild/heal)")
 	fmt.Fprintln(w, "  graph <sub>       query the code graph (search|grep|callers|callees|impls|annotated|outline|arch|query|snippet)")
 	fmt.Fprintln(w, "  compact           prune/decay memory (--force --dry-run --budget-tokens)")
 	fmt.Fprintln(w, "  snapshot          export|import the committable team memory (.recarto/memory.jsonl)")
