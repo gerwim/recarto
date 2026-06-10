@@ -707,6 +707,53 @@ func TestGetCodeSnippetNoSymbolErrors(t *testing.T) {
 	}
 }
 
+func TestGetGraphDeltaHandler(t *testing.T) {
+	a := newTestApp(t, "main")
+	wt := t.TempDir()
+	a.Git.Worktree = wt
+	ctx := context.Background()
+
+	// A prior session whose window contains deltas, then a later session.
+	now := a.Clock.Now().UnixMilli()
+	if _, err := a.Store.DB.ExecContext(ctx,
+		`INSERT INTO sessions(id, agent, branch, worktree, started_at, ended_at) VALUES
+		 ('prior','claude-code','main',?,?,?), ('current','claude-code','main',?,?,NULL)`,
+		wt, now-10_000, now-5_000, wt, now-1_000); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(filepath.Join(wt, "a.go"), []byte("package p\nfunc A() {}\n"), 0o644)
+	if err := a.Graph.Reconcile(ctx, wt, graph.FSSource{Root: wt}); err != nil {
+		t.Fatal(err)
+	}
+	// Reindex with a change whose journal row lands inside the prior session's
+	// window by inserting it directly (unit seam: the journal is engine-tested).
+	if _, err := a.Store.DB.ExecContext(ctx,
+		`INSERT INTO graph_deltas(id, worktree, path, qualified_name, kind, change, at)
+		 VALUES ('gd1', ?, 'a.go', 'A', 'function', 'changed', ?)`, wt, now-7_000); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := getGraphDelta(ctx, a, GetGraphDeltaInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.BaselineAt == "" || out.Count != 1 || out.Deltas[0].QualifiedName != "A" || out.Deltas[0].Change != "changed" {
+		t.Fatalf("got %+v, want one 'changed' delta for A with a baseline", out)
+	}
+}
+
+func TestGetGraphDeltaNoBaseline(t *testing.T) {
+	a := newTestApp(t, "main")
+	a.Git.Worktree = t.TempDir()
+	out, err := getGraphDelta(context.Background(), a, GetGraphDeltaInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Count != 0 || out.BaselineAt != "" || out.Note == "" {
+		t.Fatalf("no prior working session must return an explanatory note, got %+v", out)
+	}
+}
+
 func TestSearchContentHandlerOffset(t *testing.T) {
 	a := newTestApp(t, "main")
 	wt := t.TempDir()

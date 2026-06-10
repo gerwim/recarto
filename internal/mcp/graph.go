@@ -692,3 +692,57 @@ func findReferences(ctx context.Context, a *app.App, in FindReferencesInput) (Fi
 	}
 	return out, nil
 }
+
+// --- get_graph_delta ---
+
+type GetGraphDeltaInput struct {
+	Limit int `json:"limit,omitempty" jsonschema:"max symbol-level changes to return (default 50)"`
+}
+type GraphDeltaEntry struct {
+	Path          string `json:"path"`
+	QualifiedName string `json:"qualified_name"`
+	Kind          string `json:"kind"`
+	Change        string `json:"change"` // added | removed | changed
+}
+type GetGraphDeltaOutput struct {
+	// BaselineAt is the start of the last session that changed the graph — the
+	// same baseline the session-start tier uses. Empty when no prior working
+	// session exists (see Note).
+	BaselineAt string            `json:"baseline_at,omitempty"`
+	Count      int               `json:"count"`
+	Total      int               `json:"total"`
+	Truncated  bool              `json:"truncated,omitempty"`
+	Deltas     []GraphDeltaEntry `json:"deltas"`
+	Note       string            `json:"note,omitempty"`
+	Hint       string            `json:"hint,omitempty"` // freshness status while a refresh is in flight
+}
+
+func getGraphDelta(ctx context.Context, a *app.App, in GetGraphDeltaInput) (GetGraphDeltaOutput, error) {
+	fresh := ensureFresh(ctx, a)
+	now := a.Clock.Now().UnixMilli()
+	at, ok, err := a.Graph.DeltaBaseline(ctx, a.Git.Worktree, now)
+	if err != nil {
+		return GetGraphDeltaOutput{}, err
+	}
+	if !ok {
+		return GetGraphDeltaOutput{
+			Note: "no prior working session has changed the code graph here — nothing to compare against.",
+			Hint: fresh, Deltas: []GraphDeltaEntry{},
+		}, nil
+	}
+	deltas, total, err := a.Graph.DeltasSince(ctx, a.Git.Worktree, at, in.Limit)
+	if err != nil {
+		return GetGraphDeltaOutput{}, err
+	}
+	out := GetGraphDeltaOutput{
+		BaselineAt: time.UnixMilli(at).Format(time.RFC3339),
+		Count:      len(deltas), Total: total, Truncated: total > len(deltas),
+		Deltas: make([]GraphDeltaEntry, 0, len(deltas)), Hint: fresh,
+	}
+	for _, d := range deltas {
+		out.Deltas = append(out.Deltas, GraphDeltaEntry{
+			Path: d.Path, QualifiedName: d.QualifiedName, Kind: d.Kind, Change: d.Change,
+		})
+	}
+	return out, nil
+}
