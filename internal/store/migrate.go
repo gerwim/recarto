@@ -8,7 +8,7 @@ import (
 )
 
 // schemaVersion is the number of applied migrations.
-const schemaVersion = 17
+const schemaVersion = 18
 
 // migrations are applied in order; index+1 becomes user_version.
 var migrations = []string{
@@ -452,6 +452,25 @@ UPDATE sqlite_master
      '''active'',''superseded'',''archived'',''done'',''resolved''')
  WHERE type='table' AND name='memories' AND sql NOT LIKE '%''resolved''%';
 PRAGMA writable_schema=RESET;
+`,
+	// v18: the Go parser now records single-spec type declarations with the
+	// `type` keyword span (start_byte/start_line now cover the leading `type`
+	// keyword, not just the identifier). Spans are stored at index time, so
+	// existing caches contain the old, narrower spans and will not be updated
+	// by the freshness-token reconcile alone. Wipe the rebuildable derived
+	// graph + freshness tokens to force a full reindex with the corrected
+	// parser. Memories are untouched. See the v5 comment for the standing
+	// convention.
+	`
+DELETE FROM nodes_fts;
+DELETE FROM nodes_fts_stem;
+DELETE FROM nodes_fts_tri;
+DELETE FROM edge_candidates;
+DELETE FROM type_bindings;
+DELETE FROM edges;
+DELETE FROM nodes;
+DELETE FROM files;
+DELETE FROM meta WHERE key LIKE 'graph_token:%';
 `,
 }
 
