@@ -90,7 +90,7 @@ per-repo SQLite cache outside the working tree.
   trust high/typed/self hops; treat low/name hops as candidates to verify with
   ` + "`get_code_snippet`" + `. Tracing a *type* (class/interface/record) dead-ends —
   calls target its methods, not its declaration — so it returns a ` + "`hint`" + `: use
-  ` + "`find_implementations`" + ` for implementers and ` + "`search_content`" + ` for references.
+  ` + "`find_implementations`" + ` for implementers and ` + "`find_references`" + ` for references.
   A resolved symbol with no edges returns an honest dead-end (a root-only chain plus
   a ` + "`hint`" + `), never an empty result — so "no callers" means it has none (an
   entrypoint, or dynamically-bound call sites), not that the symbol is unknown.
