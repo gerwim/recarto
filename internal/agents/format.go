@@ -3,8 +3,10 @@ package agents
 import (
 	"fmt"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"git.gerwim.nl/gerwim/recarto/internal/graph"
 	"git.gerwim.nl/gerwim/recarto/internal/ledger"
@@ -19,8 +21,12 @@ const (
 	largeReadTokens    = 2000 // a read above this is "large enough" to steer toward the graph
 	recentBugLimit     = 5
 	archModuleLimit    = 8   // caps both the module list and the dependency-edge list of the map
-	cerebrumReserve    = 256 // headroom for the map (~165 tok) + recent-bugs (~60 tok) tiers
+	cerebrumReserve    = 384 // headroom for the map (~165 tok) + recent-bugs (~60 tok) + delta (~150 tok) tiers
 	cerebrumBodyMax    = 160
+
+	// deltaTierBudget caps the session-start "what changed" tier. The full list is
+	// one get_graph_delta call away, so the tier only buys orientation.
+	deltaTierBudget = 150
 )
 
 // sessionBudget is the session-start token budget: RECARTO_SESSION_BUDGET if set
@@ -56,7 +62,8 @@ func largeReadThreshold() int {
 // so the just-in-time read/edit hooks do not re-inject a guardrail/bug/todo already
 // sitting in this block — duplicate context is pure token waste. A memory dropped
 // here is deliberately left unmarked so it can still surface when its code is touched.
-func formatSessionContext(results []memory.RecallResult, arch graph.Architecture, bugs []*memory.Record, budget int) (string, []string) {
+func formatSessionContext(results []memory.RecallResult, arch graph.Architecture, bugs []*memory.Record,
+	deltas []graph.Delta, deltaTotal int, deltaBaselineMs int64, budget int) (string, []string) {
 	var b strings.Builder
 	b.WriteString("Recarto memory for this repo/branch:\n")
 
@@ -129,6 +136,10 @@ func formatSessionContext(results []memory.RecallResult, arch graph.Architecture
 			fmt.Fprintf(&b, "  %s → %s (%d)\n", d.From, d.To, d.Count)
 		}
 		b.WriteString("Query the code graph (search/snippet/callers) instead of reading whole files; grep/glob auto-injects matching symbols.\n")
+	}
+
+	if tier := formatDeltaTier(deltas, deltaTotal, deltaBaselineMs); tier != "" {
+		b.WriteString(tier)
 	}
 
 	if len(bugs) > 0 {
@@ -214,4 +225,106 @@ func nullable(s string) any {
 		return nil
 	}
 	return s
+}
+
+// formatDeltaTier renders the budgeted "changed since your last working
+// session" block: per-module +added ~changed -removed counts (module = first
+// path segment, matching how the code map names top-level modules), symbol
+// names for the heaviest module only, and the drill-down pointer. Empty input
+// renders nothing — a no-op session must not produce an empty list.
+func formatDeltaTier(deltas []graph.Delta, total int, baselineMs int64) string {
+	if len(deltas) == 0 {
+		return ""
+	}
+	type agg struct {
+		added, changed, removed int
+		names                   []string
+	}
+	mods := map[string]*agg{}
+	var order []string
+	// Use the file's directory as the module key so "internal/mcp" and
+	// "internal/parse" are distinct entries rather than collapsing to "internal".
+	// For a flat file (no slash) the file name itself is the key.
+	dirOf := func(p string) string {
+		if i := strings.LastIndex(p, "/"); i >= 0 {
+			return p[:i]
+		}
+		return p
+	}
+	for _, d := range deltas {
+		m := dirOf(d.Path)
+		a, ok := mods[m]
+		if !ok {
+			a = &agg{}
+			mods[m] = a
+			order = append(order, m)
+		}
+		switch d.Change {
+		case "added":
+			a.added++
+			a.names = append(a.names, leafName(d.QualifiedName))
+		case "removed":
+			a.removed++
+		default:
+			a.changed++
+			a.names = append(a.names, leafName(d.QualifiedName))
+		}
+	}
+	sort.SliceStable(order, func(i, j int) bool {
+		ai, aj := mods[order[i]], mods[order[j]]
+		return ai.added+ai.changed+ai.removed > aj.added+aj.changed+aj.removed
+	})
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "\nChanged since your last working session here (%s):\n",
+		time.UnixMilli(baselineMs).Format("Jan 2"))
+	const maxModLines = 5
+	for i, m := range order {
+		if i >= maxModLines {
+			fmt.Fprintf(&b, "- … %d more modules\n", len(order)-maxModLines)
+			break
+		}
+		a := mods[m]
+		line := "- " + m + ":"
+		if a.added > 0 {
+			line += fmt.Sprintf(" +%d", a.added)
+		}
+		if a.changed > 0 {
+			line += fmt.Sprintf(" ~%d", a.changed)
+		}
+		if a.removed > 0 {
+			line += fmt.Sprintf(" -%d", a.removed)
+		}
+		if i == 0 && len(a.names) > 0 {
+			n := a.names
+			if len(n) > 3 {
+				n = n[:3]
+			}
+			line += " (" + strings.Join(n, ", ") + ", …)"
+			if len(a.names) <= 3 {
+				line = strings.Replace(line, ", …)", ")", 1)
+			}
+		}
+		b.WriteString(line + "\n")
+	}
+	fmt.Fprintf(&b, "(get_graph_delta lists all %d)\n", total)
+	out := b.String()
+	// Degrade under budget: drop the symbol names first, then the module tail.
+	if ledger.EstimateTokens(out) > deltaTierBudget {
+		if i := strings.Index(out, " ("); i >= 0 {
+			if j := strings.Index(out[i:], ")"); j >= 0 {
+				out = out[:i] + out[i+j+1:]
+			}
+		}
+	}
+	return out
+}
+
+// leafName returns the last dotted segment of a (possibly qualified) symbol.
+// "A.B.Create" → "Create".
+func leafName(sym string) string {
+	if i := strings.LastIndex(sym, "."); i >= 0 && i < len(sym)-1 {
+		return sym[i+1:]
+	}
+	return sym
 }

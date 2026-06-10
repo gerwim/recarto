@@ -125,7 +125,24 @@ func handleSessionStart(ctx context.Context, a *app.App, ev Event) (Result, erro
 	// Orientation map + recent bugs are best-effort tiers; failure omits the tier.
 	arch, _ := a.Graph.Architecture(ctx, a.Git.Worktree, "")
 	bugs, _ := a.Engine.RecentBugs(ctx, a.Git.Branch, recentBugLimit)
-	out, emitted := formatSessionContext(results, arch, bugs, budget)
+
+	// "What changed since you were last here": baseline = the last session that
+	// journaled deltas, so /clear and open-and-close sessions are transparent
+	// (the same delta keeps showing until a context has lived alongside it).
+	var deltas []graph.Delta
+	var deltaTotal int
+	var deltaBaseline int64
+	if at, ok, err := a.Graph.DeltaBaseline(ctx, a.Git.Worktree, now); err == nil && ok {
+		deltaBaseline = at
+		deltas, deltaTotal, _ = a.Graph.DeltasSince(ctx, a.Git.Worktree, at, 200)
+	}
+	// Retention: journal rows older than the 10th-most-recent session are no
+	// longer reachable by any baseline walk — drop them (best-effort).
+	if cutoff, err := tenthSessionStart(ctx, a); err == nil && cutoff > 0 {
+		_ = a.Graph.PruneDeltas(ctx, a.Git.Worktree, cutoff)
+	}
+
+	out, emitted := formatSessionContext(results, arch, bugs, deltas, deltaTotal, deltaBaseline, budget)
 	// Mark every memory rendered into this block as surfaced for the session, so the
 	// just-in-time read/edit hooks won't re-inject a guardrail/bug/todo the agent can
 	// already see here. Memories dropped under budget stay unmarked and still surface
@@ -370,6 +387,20 @@ func handleAugment(ctx context.Context, a *app.App, ev Event) (Result, error) {
 		_ = a.Ledger.Incr(ctx, scope, metric, 1)
 	}
 	return Result{Context: out}, nil
+}
+
+// tenthSessionStart returns the started_at of the worktree's 10th-most-recent
+// session, or 0 when fewer exist. Older graph_deltas rows are unreachable by
+// any DeltaBaseline walk and can be pruned.
+func tenthSessionStart(ctx context.Context, a *app.App) (int64, error) {
+	var at int64
+	err := a.Store.DB.QueryRowContext(ctx,
+		`SELECT started_at FROM sessions WHERE worktree = ?
+		  ORDER BY started_at DESC LIMIT 1 OFFSET 9`, a.Git.Worktree).Scan(&at)
+	if err != nil {
+		return 0, nil // fewer than 10 sessions: nothing to prune (sql.ErrNoRows folds here)
+	}
+	return at, nil
 }
 
 // handleStop finalizes the session row and returns an advisory reminder.

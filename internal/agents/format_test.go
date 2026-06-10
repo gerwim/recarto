@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"git.gerwim.nl/gerwim/recarto/internal/graph"
+	"git.gerwim.nl/gerwim/recarto/internal/ledger"
 	"git.gerwim.nl/gerwim/recarto/internal/memory"
 )
 
@@ -14,7 +15,7 @@ func TestFormatSessionContextIncludesCaveat(t *testing.T) {
 		Score:        0.5,
 		DanglingRefs: []memory.Ref{{Type: memory.RefFile, Value: "absent.go"}},
 	}}
-	out, _ := formatSessionContext(results, graph.Architecture{}, nil, 1500)
+	out, _ := formatSessionContext(results, graph.Architecture{}, nil, nil, 0, 0, 1500)
 	if !strings.Contains(out, "not present in this worktree") {
 		t.Fatalf("expected caveat in session context, got:\n%s", out)
 	}
@@ -82,7 +83,7 @@ func TestFormatSessionContextMapSelectsProductOverTestModules(t *testing.T) {
 	// One product module, alphabetically last and smaller — must still win a slot.
 	mods = append(mods, graph.Module{Name: "Zproduct", Files: 20, Symbols: 80})
 
-	out, _ := formatSessionContext(nil, graph.Architecture{Modules: mods}, nil, 1500)
+	out, _ := formatSessionContext(nil, graph.Architecture{Modules: mods}, nil, nil, 0, 0, 1500)
 	if !strings.Contains(out, "Zproduct") {
 		t.Fatalf("product module must be selected over test modules in the orientation map:\n%s", out)
 	}
@@ -99,8 +100,35 @@ func TestFormatSessionContextPinnedDNRIncludesCaveat(t *testing.T) {
 		Score:        1.0,
 		DanglingRefs: []memory.Ref{{Type: memory.RefFile, Value: "absent.go"}},
 	}}
-	out, _ := formatSessionContext(results, graph.Architecture{}, nil, 1500)
+	out, _ := formatSessionContext(results, graph.Architecture{}, nil, nil, 0, 0, 1500)
 	if !strings.Contains(out, "not present in this worktree") {
 		t.Fatalf("expected caveat in pinned do_not_repeat output, got:\n%s", out)
+	}
+}
+
+func TestFormatDeltaTier(t *testing.T) {
+	deltas := []graph.Delta{
+		{Path: "internal/mcp/graph.go", QualifiedName: "findReferences", Kind: "function", Change: "added"},
+		{Path: "internal/mcp/graph.go", QualifiedName: "getCodeSnippet", Kind: "function", Change: "changed"},
+		{Path: "internal/parse/parse.go", QualifiedName: "ParseFile", Kind: "function", Change: "changed"},
+	}
+	out := formatDeltaTier(deltas, 3, 1749340800000) // 2025-06-08 (any fixed ms)
+	if !strings.Contains(out, "Changed since your last working session") {
+		t.Errorf("missing tier header: %q", out)
+	}
+	if !strings.Contains(out, "internal/mcp: +1 ~1") {
+		t.Errorf("missing per-module counts: %q", out)
+	}
+	if !strings.Contains(out, "findReferences") {
+		t.Errorf("heaviest module should name symbols: %q", out)
+	}
+	if !strings.Contains(out, "get_graph_delta") {
+		t.Errorf("must point at the drill-down tool: %q", out)
+	}
+	if got := ledger.EstimateTokens(out); got > deltaTierBudget {
+		t.Errorf("tier costs %d tokens, budget %d", got, deltaTierBudget)
+	}
+	if formatDeltaTier(nil, 0, 0) != "" {
+		t.Error("empty delta must render nothing at all")
 	}
 }

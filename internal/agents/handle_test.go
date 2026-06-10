@@ -2,9 +2,13 @@ package agents
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"git.gerwim.nl/gerwim/recarto/internal/clock"
 	"git.gerwim.nl/gerwim/recarto/internal/graph"
 	"git.gerwim.nl/gerwim/recarto/internal/memory"
 )
@@ -316,7 +320,7 @@ func TestFormatSessionContextDegradesToTitles(t *testing.T) {
 		{Record: &memory.Record{Kind: memory.KindLearning, Title: "AAA", Body: "short body"}},
 		{Record: &memory.Record{Kind: memory.KindLearning, Title: "BBB", Body: strings.Repeat("x", 2000)}},
 	}
-	s, _ := formatSessionContext(results, graph.Architecture{}, nil, 60)
+	s, _ := formatSessionContext(results, graph.Architecture{}, nil, nil, 0, 0, 60)
 	if !strings.Contains(s, "AAA") || !strings.Contains(s, "short body") {
 		t.Errorf("first entry should render with its body:\n%s", s)
 	}
@@ -462,11 +466,65 @@ func TestFormatSessionContextDropsEntryUnderTinyBudget(t *testing.T) {
 	results := []memory.RecallResult{
 		{Record: &memory.Record{Kind: memory.KindLearning, Title: "WontFitAtAll", Body: "body"}},
 	}
-	s, _ := formatSessionContext(results, graph.Architecture{}, nil, 2)
+	s, _ := formatSessionContext(results, graph.Architecture{}, nil, nil, 0, 0, 2)
 	if strings.Contains(s, "WontFitAtAll") {
 		t.Errorf("entry should be dropped entirely when even its title exceeds the budget:\n%s", s)
 	}
 	if strings.Contains(s, "no prior memories yet") {
 		t.Errorf("results were non-empty; must not claim none exist:\n%s", s)
+	}
+}
+
+func TestSessionStartShowsDeltaSinceLastWorkingSession(t *testing.T) {
+	a := newTestApp(t, "main")
+	ctx := context.Background()
+
+	// Point the app at a real temp dir so graph.Reconcile can walk real files.
+	wt := t.TempDir()
+	a.Git.Worktree = wt
+
+	// Advance the fake clock so each session gets a distinct started_at.
+	clk := a.Clock.(*clock.Fake)
+
+	// Session 1 does real work: start it, then index a file, then re-index it changed.
+	if _, err := Handle(ctx, a, Event{Kind: KindSessionStart, SessionID: "s1", Agent: "claude-code"}); err != nil {
+		t.Fatal(err)
+	}
+	// Write and reconcile initial version.
+	if err := os.WriteFile(filepath.Join(wt, "w.go"), []byte("package p\nfunc Work() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Graph.Reconcile(ctx, wt, graph.FSSource{Root: wt}); err != nil {
+		t.Fatal(err)
+	}
+	// Advance clock so the reindex delta timestamp falls inside s1's window.
+	clk.Advance(time.Second)
+	// Reindex with a change so deltas are journaled.
+	if err := os.WriteFile(filepath.Join(wt, "w.go"), []byte("package p\nfunc Work() { _ = 1 }\nfunc Extra() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Graph.Reconcile(ctx, wt, graph.FSSource{Root: wt}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Advance clock to a new instant for session 2.
+	clk.Advance(time.Second)
+
+	// Session 2 is a no-op (/clear): no deltas in its window.
+	if _, err := Handle(ctx, a, Event{Kind: KindSessionStart, SessionID: "s2", Agent: "claude-code"}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Advance clock to a new instant for session 3.
+	clk.Advance(time.Second)
+
+	// Session 3 must still show session 1's changes (baseline skips the no-op).
+	res, err := Handle(ctx, a, Event{Kind: KindSessionStart, SessionID: "s3", Agent: "claude-code"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(res.Context, "Changed since your last working session") ||
+		!strings.Contains(res.Context, "Extra") && !strings.Contains(res.Context, "~") {
+		t.Errorf("session 3 context missing the delta tier:\n%s", res.Context)
 	}
 }
