@@ -37,6 +37,9 @@ type parsedFile struct {
 // Reconcile makes the worktree's graph match src: it (re)indexes new and changed
 // files (mtime/size pre-check, then content-hash confirm), deletes removed files,
 // and resolves name references. Unchanged files are skipped cheaply.
+// graphTokenKey prefixes the meta key holding a worktree's freshness token.
+const graphTokenKey = "graph_token:"
+
 // resolvePendingKey is the meta key marking that worktree has committed graph
 // writes (or dropped indexes) whose resolution has not completed. It is set
 // durably before the first destructive step of a mutating reconcile and cleared
@@ -445,18 +448,12 @@ func (e *Engine) ReconcileIfStale(ctx context.Context, worktree string, src Sour
 	for _, opt := range opts {
 		opt(&o)
 	}
-	const keyPrefix = "graph_token:"
-	if token != "" && !o.force {
-		var stored string
-		_ = e.st.DB.QueryRowContext(ctx,
-			`SELECT value FROM meta WHERE key=?`, keyPrefix+worktree).Scan(&stored)
-		// A matching token alone is not proof of health: a reconcile that died
-		// mid-recovery leaves the pending marker (or physically missing indexes)
-		// behind a token an earlier run stamped. All three point lookups are
-		// microsecond-scale, keeping this — the per-query freshness check — cheap.
-		if stored == token && !e.resolvePending(ctx, worktree) && !e.graphIndexesMissing(ctx) {
-			return nil
-		}
+	// A matching token alone is not proof of health: a reconcile that died
+	// mid-recovery leaves the pending marker (or physically missing indexes)
+	// behind a token an earlier run stamped, so graphFresh checks all three.
+	// Each is a microsecond point lookup, keeping the per-query check cheap.
+	if !o.force && e.graphFresh(ctx, worktree, token) {
+		return nil
 	}
 	if err := e.Reconcile(ctx, worktree, src, opts...); err != nil {
 		return err
@@ -466,7 +463,7 @@ func (e *Engine) ReconcileIfStale(ctx context.Context, worktree string, src Sour
 			_, err := c.ExecContext(ctx,
 				`INSERT INTO meta(key, value) VALUES (?, ?)
 				 ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
-				keyPrefix+worktree, token)
+				graphTokenKey+worktree, token)
 			return err
 		})
 	}
