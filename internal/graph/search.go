@@ -191,7 +191,7 @@ SELECT n.id, n.name, n.qualified_name, n.kind, f.language, f.path, n.start_line,
 	// relevance order among them (unlike the bm25-ranked FTS passes). Order
 	// shortest-name-first as a tie-break — a shorter exact match is the tightest
 	// reading of the agent's guess — then by name for determinism.
-	sql += " ORDER BY length(n.name), n.name LIMIT ?"
+	sql += " ORDER BY length(n.name), n.name, f.path, n.start_line LIMIT ?"
 	args = append(args, limit)
 
 	rows, err := e.st.DB.QueryContext(ctx, sql, args...)
@@ -362,7 +362,10 @@ SELECT n.id, n.name, n.qualified_name, n.kind, f.language, f.path, n.start_line,
 		sql += " AND f.language = ?"
 		args = append(args, lang)
 	}
-	sql += " ORDER BY score ASC LIMIT ?"
+	// Equal bm25 scores (e.g. one class split across partial-class files, all
+	// with identical FTS text) would otherwise come back in FTS rowid order —
+	// insertion order, which permutes across reindexes of an unchanged repo.
+	sql += " ORDER BY score ASC, f.path, n.start_line LIMIT ?"
 	args = append(args, limit)
 
 	rows, err := e.st.DB.QueryContext(ctx, sql, args...)

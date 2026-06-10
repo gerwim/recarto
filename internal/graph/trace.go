@@ -206,7 +206,7 @@ func (e *Engine) nodesByName(ctx context.Context, worktree, name string) ([]Call
 SELECT n.id, n.name, n.kind, f.path, n.start_line, (n.qualified_name = ?) AS exact
   FROM nodes n JOIN files f ON f.id = n.file_id
  WHERE f.worktree = ? AND (n.name = ? OR n.qualified_name = ? OR n.qualified_name LIKE ?)
- ORDER BY exact DESC, n.id
+ ORDER BY exact DESC, f.path, n.start_byte
  LIMIT ?`, name, worktree, name, name, suffix, maxAmbiguousStarts)
 	if err != nil {
 		return nil, err
@@ -244,6 +244,12 @@ SELECT n.id, n.name, n.kind, f.path, n.start_line, (n.qualified_name = ?) AS exa
 // that inverted plan took ~21s where the forced one takes milliseconds.
 func callNeighborsQuery(direction string, n int) string {
 	ph := strings.TrimSuffix(strings.Repeat("?,", n), ",")
+	// Both orderings use stable source-position keys (file path, line, callee
+	// name), NOT raw ids: ids are UUIDv7 — insertion-ordered — and the parallel
+	// parse workers race, so an id order permutes across reindexes of an
+	// unchanged repo. ed.id remains only to keep one edge's rows grouped when
+	// two same-name calls share a line (their rendered output is identical
+	// either way, so the residual id instability cannot show).
 	if direction == "callers" {
 		return `
 SELECT ed.id, n.id, n.name, f.path, n.start_line, ec.confidence, ec.method, ed.dst_recv
@@ -252,16 +258,17 @@ SELECT ed.id, n.id, n.name, f.path, n.start_line, ec.confidence, ec.method, ed.d
   CROSS JOIN nodes n  ON n.id = ed.src_node_id
   CROSS JOIN files f  ON f.id = n.file_id
  WHERE ed.kind='calls' AND ec.dst_node_id IN (` + ph + `) AND f.worktree = ?
- ORDER BY ed.id, ec.confidence DESC, n.id`
+ ORDER BY f.path, ed.line, ed.dst_name, ed.id, ec.confidence DESC, ec.method`
 	}
 	return `
 SELECT ed.id, n.id, n.name, f.path, n.start_line, ec.confidence, ec.method, ed.dst_recv
   FROM edges ed
+  CROSS JOIN files ef ON ef.id = ed.file_id
   CROSS JOIN edge_candidates ec ON ec.edge_id = ed.id
   CROSS JOIN nodes n ON n.id = ec.dst_node_id
   CROSS JOIN files f ON f.id = n.file_id
  WHERE ed.kind='calls' AND ed.src_node_id IN (` + ph + `) AND f.worktree = ?
- ORDER BY ed.id, ec.confidence DESC, n.id`
+ ORDER BY ef.path, ed.line, ed.dst_name, ed.id, ec.confidence DESC, f.path, n.start_byte`
 }
 
 // callNeighbors returns next-hop nodes for cur in the given direction, reading

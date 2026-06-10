@@ -53,7 +53,7 @@ SELECT DISTINCT COALESCE(dn.id, ''), COALESCE(dn.name, e.dst_name),
   LEFT JOIN files df ON df.id = dn.file_id
  WHERE e.kind = 'extends' AND sf.worktree = ?
    AND (sn.name = ? OR sn.qualified_name = ?)
- ORDER BY 2 LIMIT ?`
+ ORDER BY 2, 5, 6 LIMIT ?`
 	} else {
 		// Subtypes/implementers of the named type: every source node whose extends
 		// edge targets the type, matched by resolved node or by recorded name.
@@ -67,7 +67,7 @@ SELECT DISTINCT n.id, n.name, n.qualified_name, n.kind, f.path, n.start_line
          OR e.dst_node_id IN (
               SELECT id FROM nodes
                WHERE name = ? OR qualified_name = ?) )
- ORDER BY n.qualified_name LIMIT ?`
+ ORDER BY n.qualified_name, f.path, n.start_line LIMIT ?`
 	}
 
 	var args []any

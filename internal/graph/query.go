@@ -85,7 +85,9 @@ SELECT n.id, n.name, n.qualified_name, n.kind, f.path, n.start_line, n.signature
 		}
 		args = append(args, spec.Edge.Kind)
 	}
-	b.WriteString(" ORDER BY n.qualified_name LIMIT ?")
+	// path+line break qualified-name ties (partial classes) so the page is
+	// stable across reindexes instead of following insertion order.
+	b.WriteString(" ORDER BY n.qualified_name, f.path, n.start_line LIMIT ?")
 	args = append(args, limit)
 
 	rows, err := e.st.DB.QueryContext(ctx, b.String(), args...)

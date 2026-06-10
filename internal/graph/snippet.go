@@ -266,7 +266,7 @@ func (e *Engine) Snippet(ctx context.Context, worktree, path, symbol string) (Sn
 SELECT n.start_byte, n.end_byte, n.start_line, n.end_line, n.qualified_name
   FROM nodes n JOIN files f ON f.id = n.file_id
  WHERE f.worktree = ? AND f.path = ? AND (n.name = ? OR n.qualified_name = ? OR n.qualified_name LIKE ?)
- ORDER BY (n.qualified_name = ?) DESC
+ ORDER BY (n.qualified_name = ?) DESC, n.start_byte
  LIMIT 1`, worktree, path, symbol, symbol, suffix, symbol).Scan(&sb, &eb, &sl, &el, &qn)
 	if errors.Is(err, sql.ErrNoRows) {
 		return SnippetResult{Found: false}, nil
