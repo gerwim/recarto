@@ -6,8 +6,19 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
+
+	"git.gerwim.nl/gerwim/recarto/internal/graph"
 )
+
+// writeRepoFile writes content to a file at wt/rel, creating it with 0o644.
+func writeRepoFile(t *testing.T, wt, rel, content string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(wt, rel), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestGraphSearch(t *testing.T) {
 	a := newTestApp(t, "main")
@@ -591,5 +602,45 @@ func TestGraphCallersMissShowsSuggestions(t *testing.T) {
 	}
 	if !bytes.Contains(out.Bytes(), []byte("Greet")) {
 		t.Errorf("missed trace did not suggest 'Greet'; output = %q", out.String())
+	}
+}
+
+func TestGraphRefs(t *testing.T) {
+	a := newTestApp(t, "main")
+	wt := t.TempDir()
+	a.Git.Worktree = wt
+	writeRepoFile(t, wt, "a.go", "package p\nfunc Target() {}\n")
+	writeRepoFile(t, wt, "b.go", "package p\nfunc Caller() { Target() }\n")
+	writeRepoFile(t, wt, "a_test.go", "package p\nfunc helper() { Target() }\n")
+	if err := a.Graph.Reconcile(context.Background(), wt, graph.FSSource{Root: wt}); err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	if err := Graph(context.Background(), a, &buf, []string{"refs", "Target"}); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "b.go:2") || !strings.Contains(out, "calls") {
+		t.Errorf("output missing the calls reference from b.go:2:\n%s", out)
+	}
+	if !strings.Contains(out, "[test]") {
+		t.Errorf("output missing the [test] marker for a_test.go:\n%s", out)
+	}
+}
+
+func TestGraphRefsUnknownSymbol(t *testing.T) {
+	a := newTestApp(t, "main")
+	wt := t.TempDir()
+	a.Git.Worktree = wt
+	writeRepoFile(t, wt, "a.go", "package p\nfunc Only() {}\n")
+	if err := a.Graph.Reconcile(context.Background(), wt, graph.FSSource{Root: wt}); err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	if err := Graph(context.Background(), a, &buf, []string{"refs", "NoSuchSym"}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), "did not resolve") {
+		t.Errorf("unknown symbol must say it did not resolve to a graph node:\n%s", buf.String())
 	}
 }

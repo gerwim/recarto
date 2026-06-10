@@ -14,7 +14,7 @@ import (
 // Graph dispatches `graph <sub>`: search | callers | callees | arch | query | snippet.
 func Graph(ctx context.Context, a *app.App, w io.Writer, args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("graph: subcommand required (search|grep|callers|callees|impls|annotated|outline|arch|query|snippet)")
+		return fmt.Errorf("graph: subcommand required (search|grep|refs|callers|callees|impls|annotated|outline|arch|query|snippet)")
 	}
 	sub, rest := args[0], args[1:]
 	// Accept space-separated flags (--kind class) as equivalent to the documented
@@ -241,6 +241,53 @@ func Graph(ctx context.Context, a *app.App, w io.Writer, args []string) error {
 				name = r.Name
 			}
 			fmt.Fprintf(w, "• [%s] %s  %s\n", r.Kind, name, loc)
+		}
+		return nil
+	case "refs", "references":
+		if len(rest) == 0 {
+			return fmt.Errorf("graph %s: symbol required", sub)
+		}
+		refLimit := 50
+		var sym []string
+		for _, tok := range rest {
+			switch {
+			case strings.HasPrefix(tok, "--limit="):
+				refLimit, _ = strconv.Atoi(strings.TrimPrefix(tok, "--limit="))
+			case strings.HasPrefix(tok, "-"):
+				continue // skip stray flags, don't fold them into the symbol
+			default:
+				sym = append(sym, tok)
+			}
+		}
+		if refLimit <= 0 {
+			refLimit = 50
+		}
+		refs, meta, err := a.Graph.References(ctx, wt, strings.Join(sym, " "), refLimit)
+		if err != nil {
+			return err
+		}
+		if !meta.Resolved {
+			fmt.Fprintf(w, "(%q did not resolve to a graph node — hits below are text-only)\n", strings.Join(sym, " "))
+		}
+		if len(refs) == 0 {
+			fmt.Fprintln(w, "(no references)")
+			return nil
+		}
+		for _, r := range refs {
+			line := fmt.Sprintf("%s:%d  [%s]", r.Path, r.Line, r.Kind)
+			if r.From != "" {
+				line += "  from " + r.From
+			}
+			if r.IsTest {
+				line += "  [test]"
+			}
+			if r.Kind == "text" && r.Text != "" {
+				line += "  " + r.Text
+			}
+			fmt.Fprintln(w, line)
+		}
+		if meta.Truncated {
+			fmt.Fprintf(w, "… truncated at %d; raise --limit=\n", refLimit)
 		}
 		return nil
 	case "annotated", "annotations", "decorated":
@@ -527,6 +574,9 @@ const graphUsage = `recarto graph <sub> — query the code graph
       --lang=<lang>                 restrict to a language (go, csharp, typescript, …)
       --limit=<n>                   max matches (default 50)
       --max-per-file=<n>            max matches per file (default 5)
+  refs <symbol> [--limit=<n>]       every place a symbol is used: call sites, type usages,
+                                    imports (graph edges) + a word-boundary text sweep;
+                                    [test] marks hits in test code
   callers <symbol>                  who calls a function/method (reads outer caller → … → symbol)
   callees <symbol>                  what a function/method calls (reads symbol → callee → …)
   impls <type> [--super|--up] [--limit=<n>]  implementers (or supertypes) of an interface/base
@@ -544,6 +594,6 @@ const graphUsage = `recarto graph <sub> — query the code graph
 
 Flags accept either form: --kind=class or --kind class.
 
-Tip: for precise references to a type, use ` + "`grep -r '\\bName\\b'`" + ` (word boundaries)
-rather than a bare substring, which also matches NameFactory, GetName, etc.
+Tip: for references to a type/symbol, ` + "`refs <Name>`" + ` is the structural answer;
+` + "`grep -r '\\bName\\b'`" + ` is the raw-text fallback.
 `
