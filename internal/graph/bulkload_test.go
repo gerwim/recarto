@@ -51,6 +51,38 @@ func TestGraphSecondaryIndexListMatchesSchema(t *testing.T) {
 	}
 }
 
+// TestCreateGraphSecondaryIndexesSurvivesCancellation: a rebuild interrupted
+// between two index builds must keep the indexes already built. On a large
+// store each CREATE INDEX takes real time; if all 11 share one transaction, a
+// client cancellation rolls back every completed build and the next attempt
+// starts from zero — under a per-call timeout the rebuild then NEVER completes
+// (the production wedge), while each attempt bloats the WAL with rolled-back
+// pages.
+func TestCreateGraphSecondaryIndexesSurvivesCancellation(t *testing.T) {
+	e := newTestEngine(t)
+	if err := e.dropGraphSecondaryIndexes(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	first := graphSecondaryIndexes[0].name
+	prev := createIndexHook
+	createIndexHook = func(name string) {
+		if name == first {
+			cancel() // simulate the client timeout landing mid-rebuild
+		}
+	}
+	defer func() { createIndexHook = prev }()
+
+	if err := e.createGraphSecondaryIndexes(ctx); err == nil {
+		t.Fatal("want error from rebuild cancelled after the first index, got nil")
+	}
+	if got := secondaryIndexesOnGraphTables(t, e); !got[first] {
+		t.Fatalf("index %q built before the cancellation was rolled back: rebuild must commit per index", first)
+	}
+}
+
 // TestDropRebuildGraphSecondaryIndexes verifies the drop removes exactly the
 // rebuild set, the rebuild restores all of them, and both are idempotent (the
 // rebuild is also the crash self-heal path, so it must be safe to re-run).
