@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"sort"
 
 	"git.gerwim.nl/gerwim/recarto/internal/ids"
@@ -25,13 +26,16 @@ type Delta struct {
 // "changed". Called only when the file already had rows (first index of a file
 // journals nothing — fresh clones and wipe-migration rebuilds must not flood
 // the journal).
+//
+// Overload sets: C# and other languages can produce multiple nodes with the
+// same (qualified_name, kind) — e.g. Add(int) and Add(string). We collect each
+// side as a sorted multiset of "startByte:endByte:signature" strings and diff
+// the multisets, so an unchanged overload set never emits a spurious "changed".
 func journalFileDeltas(ctx context.Context, c store.Conn, worktree, path, fileID string,
 	newNodes []nodeRow, now int64) error {
-	type sig struct {
-		startByte, endByte int64
-		signature          string
-	}
-	old := map[string]sig{}
+
+	// oldMulti maps key → sorted slice of "sb:eb:sig" fingerprints.
+	oldMulti := map[string][]string{}
 	rows, err := c.QueryContext(ctx,
 		`SELECT qualified_name, kind, start_byte, end_byte, signature FROM nodes WHERE file_id = ?`, fileID)
 	if err != nil {
@@ -44,11 +48,28 @@ func journalFileDeltas(ctx context.Context, c store.Conn, worktree, path, fileID
 			rows.Close()
 			return err
 		}
-		old[qn+"\x00"+kind] = sig{sb, eb, sg}
+		key := qn + "\x00" + kind
+		fp := fmt.Sprintf("%d:%d:%s", sb, eb, sg)
+		oldMulti[key] = append(oldMulti[key], fp)
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
 		return err
+	}
+	// Sort each old slice so multiset comparison is order-independent.
+	for k := range oldMulti {
+		sort.Strings(oldMulti[k])
+	}
+
+	// Build newMulti the same way.
+	newMulti := map[string][]string{}
+	for _, n := range newNodes {
+		key := n.qn + "\x00" + n.kind
+		fp := fmt.Sprintf("%d:%d:%s", n.startByte, n.endByte, n.signature)
+		newMulti[key] = append(newMulti[key], fp)
+	}
+	for k := range newMulti {
+		sort.Strings(newMulti[k])
 	}
 
 	emit := func(qn, kind, change string) error {
@@ -58,24 +79,24 @@ func journalFileDeltas(ctx context.Context, c store.Conn, worktree, path, fileID
 		return err
 	}
 
-	seen := map[string]bool{}
-	for _, n := range newNodes {
-		key := n.qn + "\x00" + n.kind
-		seen[key] = true
-		o, ok := old[key]
+	// New keys: added or changed.
+	for key, newFPs := range newMulti {
+		qn, kind := splitDeltaKey(key)
+		oldFPs, ok := oldMulti[key]
 		switch {
 		case !ok:
-			if err := emit(n.qn, n.kind, "added"); err != nil {
+			if err := emit(qn, kind, "added"); err != nil {
 				return err
 			}
-		case o.startByte != n.startByte || o.endByte != n.endByte || o.signature != n.signature:
-			if err := emit(n.qn, n.kind, "changed"); err != nil {
+		case !multisetEqual(oldFPs, newFPs):
+			if err := emit(qn, kind, "changed"); err != nil {
 				return err
 			}
 		}
 	}
-	for key := range old {
-		if seen[key] {
+	// Old keys absent from new: removed.
+	for key := range oldMulti {
+		if _, ok := newMulti[key]; ok {
 			continue
 		}
 		qn, kind := splitDeltaKey(key)
@@ -84,6 +105,20 @@ func journalFileDeltas(ctx context.Context, c store.Conn, worktree, path, fileID
 		}
 	}
 	return nil
+}
+
+// multisetEqual reports whether two sorted string slices are identical.
+// Both inputs must already be sorted (journalFileDeltas sorts them).
+func multisetEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // splitDeltaKey undoes the qn+"\x00"+kind composite.
@@ -105,9 +140,11 @@ func (e *Engine) DeltasSince(ctx context.Context, worktree string, sinceMs int64
 	if limit <= 0 {
 		limit = 50
 	}
+	// at ties are common (one transaction stamps a whole batch); id is UUIDv7,
+	// monotonic with insertion, so it pins chronological order within a tie.
 	rows, err := e.st.DB.QueryContext(ctx,
 		`SELECT path, qualified_name, kind, change FROM graph_deltas
-		  WHERE worktree = ? AND at >= ? ORDER BY at, path, qualified_name`,
+		  WHERE worktree = ? AND at >= ? ORDER BY at, id`,
 		worktree, sinceMs)
 	if err != nil {
 		return nil, 0, err

@@ -2,6 +2,7 @@ package graph
 
 import (
 	"context"
+	"strings"
 	"testing"
 )
 
@@ -93,6 +94,24 @@ func TestDeltaJournalOnFileDelete(t *testing.T) {
 	}
 	if !saw {
 		t.Fatalf("deleted file's symbols must journal as removed: %+v", d)
+	}
+}
+
+func TestDeltaOverloadSetUnchangedJournalsNothingForIt(t *testing.T) {
+	e := newTestEngine(t)
+	ctx := context.Background()
+	wt := t.TempDir()
+	indexInto(t, e, wt, "C.cs", "class C {\n  void Run(int a) {}\n  void Run(string b) {}\n  void Other() {}\n}\n")
+	// Change ONLY Other — the Run overload set is untouched.
+	indexInto(t, e, wt, "C.cs", "class C {\n  void Run(int a) {}\n  void Run(string b) {}\n  void Other() { var x = 1; }\n}\n")
+	d, _, err := e.DeltasSince(ctx, wt, 0, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, dd := range d {
+		if dd.QualifiedName != "" && dd.Change != "" && strings.Contains(dd.QualifiedName, "Run") {
+			t.Errorf("unchanged overload set journaled %s for %s", dd.Change, dd.QualifiedName)
+		}
 	}
 }
 
