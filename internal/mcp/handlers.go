@@ -42,10 +42,23 @@ type RecordMemoryInput struct {
 	SupersedesID string   `json:"supersedes_id,omitempty" jsonschema:"id of a prior memory this replaces"`
 }
 
+// ConflictCandidateOut is one existing memory the new one may contradict.
+type ConflictCandidateOut struct {
+	ID      string `json:"id"`
+	Title   string `json:"title,omitempty"`
+	Snippet string `json:"snippet,omitempty"`
+	Reason  string `json:"reason"` // similar wording | shares refs
+}
+
 // RecordMemoryOutput is the result of the record_memory tool.
 type RecordMemoryOutput struct {
 	ID         string `json:"id" jsonschema:"id of the recorded or reinforced memory"`
 	Reinforced bool   `json:"reinforced" jsonschema:"true if an existing near-duplicate was reinforced"`
+	// ConflictCandidates are existing memories the new one may contradict or
+	// supersede — similar topic, different claim. Advisory: the write already
+	// happened; review and resolve via Note's instructions.
+	ConflictCandidates []ConflictCandidateOut `json:"conflict_candidates,omitempty"`
+	Note               string                 `json:"note,omitempty"`
 }
 
 func recordMemory(ctx context.Context, a *app.App, in RecordMemoryInput) (RecordMemoryOutput, error) {
@@ -63,7 +76,7 @@ func recordMemory(ctx context.Context, a *app.App, in RecordMemoryInput) (Record
 	if in.Global {
 		branch = ""
 	}
-	id, reinforced, _, err := a.Engine.Record(ctx, memory.NewMemory{ // Task 9 consumes conflicts
+	id, reinforced, conflicts, err := a.Engine.Record(ctx, memory.NewMemory{
 		Kind:         kind,
 		Title:        in.Title,
 		Body:         in.Body,
@@ -78,7 +91,16 @@ func recordMemory(ctx context.Context, a *app.App, in RecordMemoryInput) (Record
 	if err != nil {
 		return RecordMemoryOutput{}, err
 	}
-	return RecordMemoryOutput{ID: id, Reinforced: reinforced}, nil
+	out := RecordMemoryOutput{ID: id, Reinforced: reinforced}
+	for _, c := range conflicts {
+		out.ConflictCandidates = append(out.ConflictCandidates, ConflictCandidateOut{
+			ID: c.ID, Title: c.Title, Snippet: c.Snippet, Reason: c.Reason,
+		})
+	}
+	if len(out.ConflictCandidates) > 0 {
+		out.Note = "Review these existing memories — if your new memory supersedes or contradicts one, call forget_memory(old_id) (or re-record with supersedes_id). If they genuinely coexist, no action needed."
+	}
+	return out, nil
 }
 
 // RecallMemoryInput are the arguments to the recall_memory tool (all optional).

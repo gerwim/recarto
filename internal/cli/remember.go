@@ -39,7 +39,7 @@ func Remember(ctx context.Context, a *app.App, w io.Writer, args []string) error
 		return fmt.Errorf("remember: --body is required")
 	}
 
-	id, reinforced, _, err := a.Engine.Record(ctx, memory.NewMemory{ // Task 9 consumes conflicts
+	id, reinforced, conflicts, err := a.Engine.Record(ctx, memory.NewMemory{
 		Kind:     kind,
 		Title:    *title,
 		Body:     *body,
@@ -58,5 +58,18 @@ func Remember(ctx context.Context, a *app.App, w io.Writer, args []string) error
 		verb = "reinforced"
 	}
 	fmt.Fprintf(w, "%s %s %s\n", verb, kind, id)
+	for i, c := range conflicts {
+		if i == 0 {
+			fmt.Fprintln(w, "may contradict existing memories — review:")
+		}
+		title := c.Title
+		if title == "" {
+			title = "(untitled)"
+		}
+		fmt.Fprintf(w, "• %s  %q (%s): %s\n", c.ID, title, c.Reason, c.Snippet)
+	}
+	if len(conflicts) > 0 {
+		fmt.Fprintln(w, "(if superseded: recarto forget <id>)")
+	}
 	return nil
 }

@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -256,5 +257,27 @@ func TestForgetMemoryHandler(t *testing.T) {
 	miss, _ := forgetMemory(ctx, a, ForgetMemoryInput{ID: "nope"})
 	if miss.Forgotten {
 		t.Error("unknown id reported as forgotten")
+	}
+}
+
+func TestRecordMemorySurfacesConflictCandidates(t *testing.T) {
+	a := newTestApp(t, "main")
+	ctx := context.Background()
+	if _, err := recordMemory(ctx, a, RecordMemoryInput{
+		Kind: "preference", Title: "tabs", Body: "always use hard tab characters when indenting Go code in this project",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	out, err := recordMemory(ctx, a, RecordMemoryInput{
+		Kind: "preference", Title: "spaces", Body: "always use two spaces when indenting Go code in this project",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.ConflictCandidates) == 0 {
+		t.Fatal("middle-band conflict must surface in record_memory output")
+	}
+	if out.Note == "" || !strings.Contains(out.Note, "forget_memory") {
+		t.Errorf("note must teach the resolution path, got %q", out.Note)
 	}
 }

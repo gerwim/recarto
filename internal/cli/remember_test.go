@@ -52,3 +52,31 @@ func TestRememberHelpIsCleanExit(t *testing.T) {
 		t.Errorf("--help should exit cleanly, got %v", err)
 	}
 }
+
+func TestRememberSurfacesConflictCandidates(t *testing.T) {
+	a := newTestApp(t, "main")
+	ctx := context.Background()
+
+	var buf bytes.Buffer
+	if err := Remember(ctx, a, &buf, []string{"preference",
+		"--title", "tabs",
+		"--body", "always use hard tab characters when indenting Go code in this project",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	buf.Reset()
+	if err := Remember(ctx, a, &buf, []string{"preference",
+		"--title", "spaces",
+		"--body", "always use two spaces when indenting Go code in this project",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "may contradict existing memories") {
+		t.Errorf("conflict render missing from output:\n%s", out)
+	}
+	if !strings.Contains(out, "recarto forget") {
+		t.Errorf("resolution hint missing from output:\n%s", out)
+	}
+}

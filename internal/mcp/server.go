@@ -17,7 +17,7 @@ import (
 func NewServer(a *app.App) *sdk.Server {
 	s := sdk.NewServer(&sdk.Implementation{Name: "recarto", Version: version.Version}, nil)
 	addToolSchema(s, a, "record_memory",
-		"Record (or reinforce a near-duplicate of) a memory: a preference, learning, decision, do_not_repeat, bug, or todo (open work that resurfaces until done).",
+		"Record (or reinforce a near-duplicate of) a memory: a preference, learning, decision, do_not_repeat, bug, or todo (open work that resurfaces until done). When the new memory looks like it may contradict an existing one (same topic, different claim — or anchored to the same code), the response lists conflict_candidates with a resolution note; review them rather than leaving both claims standing.",
 		recordMemorySchema(), recordMemory)
 	addTool(s, a, "record_bug",
 		"Record a bug with its error message, root cause, and fix (a convenience wrapper over record_memory).",
