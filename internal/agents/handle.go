@@ -457,6 +457,6 @@ func handleStop(ctx context.Context, a *app.App, ev Event) (Result, error) {
 	}
 	_ = a.Ledger.Incr(ctx, ev.SessionID, "stop_nudged", 1)
 	return Result{Block: true, Reason: fmt.Sprintf(
-		"recarto: you made %d edits this session and recorded nothing. Record learnings, preferences, or bug fixes now (record_memory / record_bug) — or finish if there's genuinely nothing to keep.",
+		"recarto: you made %d edits this session and recorded nothing. Record learnings, preferences (especially if the user corrected your approach), or bug fixes now (record_memory / record_bug) — and report_recarto_issue if Recarto itself misbehaved. Or finish if there's genuinely nothing to keep.",
 		edits)}, nil
 }

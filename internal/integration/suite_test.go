@@ -192,8 +192,14 @@ func runLanguageSuite(t *testing.T, dir string) {
 					// members, whose node is just the identifier — the whole snippet is
 					// a sub-span of that line.
 					decl := strings.TrimSpace(fx.stripMarker(fx.lines[d.File][d.Line-1]))
-					snip := strings.TrimSpace(out)
-					if !strings.Contains(out, decl) && !(snip != "" && strings.Contains(decl, snip)) {
+					// graph snippet leads with a "// path:start-end" header line; the
+					// sub-span fallback below must compare the BODY only, or a one-token
+					// snippet (enum member) can never be a sub-span of its line.
+					body := strings.TrimSpace(out)
+					if first, rest, ok := strings.Cut(body, "\n"); ok && strings.HasPrefix(first, "// ") {
+						body = strings.TrimSpace(rest)
+					}
+					if !strings.Contains(out, decl) && !(body != "" && strings.Contains(decl, body)) {
 						t.Errorf("snippet %s: missing declaration %q from %s\noutput:\n%s", qn, decl, d.loc(), out)
 					}
 				}
