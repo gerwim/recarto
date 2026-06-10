@@ -34,7 +34,7 @@ never to the model, so it nudges the wrong party and trains the human to ignore 
   bug fixes now (record_memory / record_bug) — or finish if there's genuinely nothing to keep."*
 - Mark `nudged` in the ledger before returning, so the follow-up stop passes through even
   if the model records nothing.
-- The unconditional every-stop `SystemMessage` is replaced by the block-once model nudge; the static human-facing reminder is retained ONLY as the sub-threshold fallback (no block: edits < 3, already nudged, or memories recorded) — without it, conversation-heavy low-edit sessions, exactly where preference corrections surface, would get no capture prompt at all.
+- The unconditional every-stop `SystemMessage` is replaced by the block-once model nudge; the static human-facing reminder is retained ONLY as the no-block fallback (edits < 3, or memories already recorded) — without it, conversation-heavy low-edit sessions, exactly where preference corrections surface, would get no capture prompt at all. The already-nudged follow-up stop passes through silently: the model just saw the block reason, so re-showing the reminder would be noise.
 - `sessions.ended_at` keeps being set on every stop, as today.
 
 **Scope.** Claude Code adapter only. OpenCode/Copilot keep current pass-through behavior.
