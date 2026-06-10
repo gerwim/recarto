@@ -501,7 +501,7 @@ SELECT ed.id, ed.dst_name, ed.file_id
 			continue
 		}
 		// Confidence keys on the FULL match count (uncapped), mirroring the SQL's
-		// COUNT(*) OVER (PARTITION BY edge) — only the emitted rows are capped at 10.
+		// COUNT(*) OVER (PARTITION BY edge) — only the emission is capped.
 		conf := 0.2
 		if len(cand) == 1 {
 			conf = 0.45
@@ -522,11 +522,15 @@ SELECT ed.id, ed.dst_name, ed.file_id
 			}
 			return x.id < y.id // unique id: a total, reproducible order
 		})
-		n := min(len(cand), 10)
-		for _, r := range cand[:n] {
-			if _, err := stmt.ExecContext(ctx, e.id, r.id, conf); err != nil {
-				return err
-			}
+		// Materialize ONLY the locality-best match. The non-winner rows were 89%
+		// of edge_candidates (60%+ of store size at scale) and influenced nothing
+		// downstream but trace's ambiguous-alternative listing: the denormalize
+		// comparator (betterCandidate) orders identically to this sort, so the
+		// winner — and edges.dst_node_id — is byte-identical with one row.
+		// Alternatives for trace are derivable at query time from dst_name via
+		// idx_nodes_name (see the s5 query-time todo).
+		if _, err := stmt.ExecContext(ctx, e.id, cand[0].id, conf); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -951,7 +955,11 @@ SELECT edge_id, dst_node_id, CASE WHEN cnt = 1 THEN 0.45 ELSE 0.2 END, 'name' FR
           OR ( ef.language IN ('typescript','tsx','javascript')
                AND mf.language IN ('typescript','tsx','javascript') ) )
     AND NOT EXISTS (SELECT 1 FROM edge_candidates ec WHERE ec.edge_id = ed.id)
-) WHERE rn <= 10`
+-- Emit only the locality-best row (rn = 1): the non-winners were 89% of
+-- edge_candidates at scale and only fed trace's alternative listing, while the
+-- denormalized winner is identical (same ordering as the denormalize tiebreak).
+-- cnt still counts the FULL match set, so confidence keys on true ambiguity.
+) WHERE rn <= 1`
 
 // deleteFile removes a file's graph rows for the given worktree. nodes/edges
 // cascade via FK; nodes_fts rows are dropped manually (FTS5 is unlinked).
