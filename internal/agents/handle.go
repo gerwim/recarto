@@ -136,9 +136,16 @@ func handleSessionStart(ctx context.Context, a *app.App, ev Event) (Result, erro
 		deltaBaseline = at
 		deltas, deltaTotal, _ = a.Graph.DeltasSince(ctx, a.Git.Worktree, at, 200)
 	}
-	// Retention: journal rows older than the 10th-most-recent session are no
-	// longer reachable by any baseline walk — drop them (best-effort).
+	// Retention: drop journal rows no baseline walk can reach (best-effort).
+	// The walk is unbounded — it skips no-op sessions all the way back to the
+	// last delta-bearing one — so the cutoff must never pass the current
+	// baseline: any run of consecutive /clear or read-only sessions, however
+	// long, must not erase the deltas the tier is still reporting. Past that,
+	// rows older than the 10th-most-recent session are unreachable.
 	if cutoff, err := tenthSessionStart(ctx, a); err == nil && cutoff > 0 {
+		if deltaBaseline > 0 && deltaBaseline < cutoff {
+			cutoff = deltaBaseline
+		}
 		_ = a.Graph.PruneDeltas(ctx, a.Git.Worktree, cutoff)
 	}
 
@@ -395,8 +402,9 @@ func handleAugment(ctx context.Context, a *app.App, ev Event) (Result, error) {
 }
 
 // tenthSessionStart returns the started_at of the worktree's 10th-most-recent
-// session, or 0 when fewer exist. Older graph_deltas rows are unreachable by
-// any DeltaBaseline walk and can be pruned.
+// session, or 0 when fewer exist. It is the retention horizon for graph_deltas
+// rows — but only after the caller clamps it to the current delta baseline,
+// which an unbounded run of no-op sessions can push past this horizon.
 func tenthSessionStart(ctx context.Context, a *app.App) (int64, error) {
 	var at int64
 	err := a.Store.DB.QueryRowContext(ctx,
@@ -412,12 +420,20 @@ func tenthSessionStart(ctx context.Context, a *app.App) (int64, error) {
 // before an empty memory log warrants the block-once capture nudge.
 const stopNudgeEditThreshold = 3
 
+// stopCaptureReminder is the static human-facing Stop reminder — the no-block
+// fallback (low-edit sessions, memories already recorded, or any fault in the
+// nudge decision). Conversation-heavy low-edit sessions are exactly where
+// preference corrections surface, so it must not disappear with the nudge.
+const stopCaptureReminder = "recarto: before ending, record any new learnings (record_memory), bug fixes (record_bug), and preferences — e.g. if the user corrected your approach or stated a style/workflow choice. And if Recarto itself errored, ranked the wrong result first, confused you, or lacked a capability you needed this session, call report_recarto_issue so it can be fixed."
+
 // handleStop closes the session row and, at most once per session, blocks the
 // stop with a capture nudge when the session edited code but recorded nothing.
 // The nudge must reach the MODEL, not the human — a systemMessage is only shown
 // to the user, so the only acting channel is a block-once with the reason fed
 // back as an instruction. ev.StopActive is the host's loop guard: when Claude
-// Code re-invokes Stop after our block, always pass through.
+// Code re-invokes Stop after our block, always pass through. Every fault in the
+// nudge decision degrades to the static reminder — never to silence, and never
+// to a false block.
 func handleStop(ctx context.Context, a *app.App, ev Event) (Result, error) {
 	if ev.SessionID == "" {
 		return Result{}, nil
@@ -439,21 +455,36 @@ func handleStop(ctx context.Context, a *app.App, ev Event) (Result, error) {
 	}
 	edits, err := a.Ledger.Get(ctx, ev.SessionID, "edits")
 	if err != nil || edits < stopNudgeEditThreshold {
-		return Result{SystemMessage: "recarto: before ending, record any new learnings (record_memory), bug fixes (record_bug), and preferences — e.g. if the user corrected your approach or stated a style/workflow choice. And if Recarto itself errored, ranked the wrong result first, confused you, or lacked a capability you needed this session, call report_recarto_issue so it can be fixed."}, nil
+		return Result{SystemMessage: stopCaptureReminder}, nil
 	}
-	if nudged, err := a.Ledger.Get(ctx, ev.SessionID, "stop_nudged"); err != nil || nudged > 0 {
+	nudged, err := a.Ledger.Get(ctx, ev.SessionID, "stop_nudged")
+	if err != nil {
+		return Result{SystemMessage: stopCaptureReminder}, nil
+	}
+	if nudged > 0 {
+		// The model just saw the block reason; re-showing the reminder is noise.
 		return Result{}, nil
 	}
 	var startedAt int64
 	if err := a.Store.DB.QueryRowContext(ctx,
 		`SELECT started_at FROM sessions WHERE id = ?`, ev.SessionID).Scan(&startedAt); err != nil {
-		return Result{SystemMessage: "recarto: before ending, record any new learnings (record_memory), bug fixes (record_bug), and preferences — e.g. if the user corrected your approach or stated a style/workflow choice. And if Recarto itself errored, ranked the wrong result first, confused you, or lacked a capability you needed this session, call report_recarto_issue so it can be fixed."}, nil
+		return Result{SystemMessage: stopCaptureReminder}, nil
 	}
+	// "Recorded anything" must count reinforcements too: Record on a near-dup
+	// bumps only updated_at (created_at stays with the original), and the
+	// contract is "record freely — repeated learnings converge", so a session
+	// whose record converged must not be told it recorded nothing. Inserts stamp
+	// updated_at = created_at, so they count through the same predicate; the
+	// status filter keeps archive/supersede/resolve/done bumps out. Known benign
+	// noise, both failing quiet (nudge skipped, never falsely fired): a
+	// session-start compact absorb, or a concurrent session recording on this
+	// branch.
 	var recorded int
 	if err := a.Store.DB.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM memories WHERE created_at >= ? AND (branch IS NULL OR branch = ?)`,
+		`SELECT COUNT(*) FROM memories
+		  WHERE updated_at >= ? AND status = 'active' AND (branch IS NULL OR branch = ?)`,
 		startedAt, a.Git.Branch).Scan(&recorded); err != nil || recorded > 0 {
-		return Result{SystemMessage: "recarto: before ending, record any new learnings (record_memory), bug fixes (record_bug), and preferences — e.g. if the user corrected your approach or stated a style/workflow choice. And if Recarto itself errored, ranked the wrong result first, confused you, or lacked a capability you needed this session, call report_recarto_issue so it can be fixed."}, nil
+		return Result{SystemMessage: stopCaptureReminder}, nil
 	}
 	_ = a.Ledger.Incr(ctx, ev.SessionID, "stop_nudged", 1)
 	return Result{Block: true, Reason: fmt.Sprintf(

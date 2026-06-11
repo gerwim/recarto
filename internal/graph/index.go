@@ -333,12 +333,19 @@ func (e *Engine) writeFileGraph(ctx context.Context, c store.Conn, st *writeStmt
 			fileID, worktree, path, lang, hash, mtime, size, now); err != nil {
 			return err
 		}
+		// A first index normally journals nothing (fresh-clone flood guard), but
+		// a path with earlier journal rows is a delete-then-recreate (branch
+		// switch, stash pop): journal its symbols as added so the prior
+		// "removed" folds to a present disposition instead of standing as false.
+		if err := journalRecreatedFileDeltas(ctx, c, worktree, path, g.nodes, now); err != nil {
+			return err
+		}
 	case err != nil:
 		return err
 	default:
 		// Journal symbol-level deltas before the old rows are replaced — this is
-		// the only moment both node sets exist. New files (ErrNoRows above) are
-		// first-index and journal nothing.
+		// the only moment both node sets exist. Genuinely new files journal
+		// nothing (see the ErrNoRows recreate carve-out above).
 		if err := journalFileDeltas(ctx, c, worktree, path, fileID, g.nodes, now); err != nil {
 			return err
 		}

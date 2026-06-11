@@ -228,10 +228,10 @@ func nullable(s string) any {
 }
 
 // formatDeltaTier renders the budgeted "changed since your last working
-// session" block: per-module +added ~changed -removed counts (module = first
-// path segment, matching how the code map names top-level modules), symbol
-// names for the heaviest module only, and the drill-down pointer. Empty input
-// renders nothing — a no-op session must not produce an empty list.
+// session" block: per-module +added ~changed -removed counts (module = the
+// file's directory, so internal/mcp and internal/parse stay distinct entries),
+// symbol names for the heaviest module only, and the drill-down pointer. Empty
+// input renders nothing — a no-op session must not produce an empty list.
 //
 // Budget degradation drops names first, then trims module lines (5→3→1), then
 // falls back to a header-only pointer. The header date is never stripped.

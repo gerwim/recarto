@@ -24,8 +24,14 @@ never to the model, so it nudges the wrong party and trains the human to ignore 
   2. Already nudged this session (ledger flag `nudged` under the session scope) → pass through.
   3. Edits this session < 3 → pass through.
   4. Memories recorded this session == 0 → NUDGE. Count: `SELECT COUNT(*) FROM memories
-     WHERE created_at >= session.started_at AND (branch IS NULL OR branch = ?)` — created_at
-     is already stamped; no schema change.
+     WHERE updated_at >= session.started_at AND status = 'active' AND (branch IS NULL OR
+     branch = ?)` — no schema change. `updated_at` (not `created_at`) so reinforcements
+     count: Record on a near-dup bumps only `updated_at`, and "record freely — near-dups
+     converge" is the system's own contract, so a converged record must satisfy the nudge
+     exactly like a fresh insert. Inserts stamp `updated_at = created_at` and count through
+     the same predicate; the status filter keeps archive/supersede/resolve/done bumps out.
+     Accepted fail-quiet noise (nudge skipped, never falsely fired): a session-start compact
+     absorb, or a concurrent session recording on the same branch.
 - The nudge **blocks the stop once**: the Claude Code adapter encodes
   `{"decision": "block", "reason": "<nudge text>"}` for `KindStop` when the handler result
   asks for it (new `Result.Block bool` + `Result.Reason string`; other adapters ignore Block
@@ -34,7 +40,7 @@ never to the model, so it nudges the wrong party and trains the human to ignore 
   bug fixes now (record_memory / record_bug) — or finish if there's genuinely nothing to keep."*
 - Mark `nudged` in the ledger before returning, so the follow-up stop passes through even
   if the model records nothing.
-- The unconditional every-stop `SystemMessage` is replaced by the block-once model nudge; the static human-facing reminder is retained ONLY as the no-block fallback (edits < 3, or memories already recorded) — without it, conversation-heavy low-edit sessions, exactly where preference corrections surface, would get no capture prompt at all. The already-nudged follow-up stop passes through silently: the model just saw the block reason, so re-showing the reminder would be noise.
+- The unconditional every-stop `SystemMessage` is replaced by the block-once model nudge; the static human-facing reminder is retained ONLY as the no-block fallback (edits < 3, memories already recorded, or any fault while deciding the nudge — every fault degrades to the reminder, never to silence and never to a false block) — without it, conversation-heavy low-edit sessions, exactly where preference corrections surface, would get no capture prompt at all. The already-nudged follow-up stop passes through silently: the model just saw the block reason, so re-showing the reminder would be noise.
 - `sessions.ended_at` keeps being set on every stop, as today.
 
 **Scope.** Claude Code adapter only. OpenCode/Copilot keep current pass-through behavior.
@@ -63,9 +69,16 @@ acting on stale knowledge.
   diff old vs new node sets by `(qualified_name, kind)` — present-only-in-old → `removed`,
   only-in-new → `added`, in both with different `(start_byte, end_byte, signature)` →
   `changed`. A file's *first* index in a worktree journals nothing (no old set — covers fresh
-  clones and wipe migrations). File deletions journal each removed symbol.
+  clones and wipe migrations), with one carve-out: a first index at a path that already has
+  journal rows is a delete-then-recreate (branch switch, stash pop) and journals its symbols
+  as `added`, so the earlier `removed` folds to a present disposition instead of standing as
+  false. File deletions journal each removed symbol. Renames remain a known blind spot: the
+  old path journals removals, the new path is a genuine first index — the tool description
+  carries the caveat.
 - Retention: on session start, prune rows older than the 10th-most-recent session's
-  started_at for that worktree (keeps the journal bounded without a config knob).
+  started_at for that worktree (keeps the journal bounded without a config knob) — clamped
+  to the current baseline, because the baseline walk is unbounded: any run of consecutive
+  no-op sessions, however long, must not erase the deltas the tier is still reporting.
 
 **Design — baseline (the /clear rule, per user).** The delta a session shows is "changes
 since the last session that did real work," not "since the previous session row":

@@ -115,6 +115,36 @@ func TestDeltaOverloadSetUnchangedJournalsNothingForIt(t *testing.T) {
 	}
 }
 
+func TestDeltaFileRecreateReadsAsChangedNotRemoved(t *testing.T) {
+	e := newTestEngine(t)
+	ctx := context.Background()
+	wt := t.TempDir()
+
+	// Baseline: the file exists and is indexed.
+	indexInto(t, e, wt, "back.go", "package p\nfunc Back() {}\n")
+
+	// Branch-switch shape: the file vanishes, then comes back at the same path.
+	if err := e.deleteFile(ctx, wt, "back.go"); err != nil {
+		t.Fatal(err)
+	}
+	indexInto(t, e, wt, "back.go", "package p\nfunc Back() {}\n")
+
+	d, _, err := e.DeltasSince(ctx, wt, 0, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for _, dd := range d {
+		got[dd.QualifiedName] = dd.Change
+	}
+	// The symbol existed at baseline and exists now. "removed" would be false —
+	// it is sitting right there — and "added" would deny its baseline existence;
+	// "changed" is the honest disposition (content may differ, we cannot tell).
+	if got["Back"] != "changed" {
+		t.Errorf("Back = %q, want changed (delete + recreate must not read as a removal)", got["Back"])
+	}
+}
+
 func TestPruneDeltas(t *testing.T) {
 	e := newTestEngine(t)
 	ctx := context.Background()

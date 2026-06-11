@@ -107,6 +107,36 @@ func journalFileDeltas(ctx context.Context, c store.Conn, worktree, path, fileID
 	return nil
 }
 
+// journalRecreatedFileDeltas journals "added" for every node of a file whose
+// first index follows earlier journal rows at the same path — the
+// delete-then-recreate shape (branch switches, stash pops). Without it the
+// recreation is invisible (a first index journals nothing) and the earlier
+// "removed" stands as the symbol's disposition while it sits in the worktree.
+// Genuinely new paths have no journal rows and still journal nothing, so the
+// fresh-clone / wipe-migration flood guard holds. The probe rides the small,
+// session-pruned graph_deltas table, so it costs nothing on the fresh-clone
+// path where it runs once per file.
+func journalRecreatedFileDeltas(ctx context.Context, c store.Conn, worktree, path string,
+	newNodes []nodeRow, now int64) error {
+	var seen bool
+	if err := c.QueryRowContext(ctx,
+		`SELECT EXISTS(SELECT 1 FROM graph_deltas WHERE worktree = ? AND path = ?)`,
+		worktree, path).Scan(&seen); err != nil {
+		return err
+	}
+	if !seen {
+		return nil
+	}
+	for _, n := range newNodes {
+		if _, err := c.ExecContext(ctx,
+			`INSERT INTO graph_deltas(id, worktree, path, qualified_name, kind, change, at)
+			 VALUES (?,?,?,?,?,?,?)`, ids.New(), worktree, path, n.qn, n.kind, "added", now); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // multisetEqual reports whether two sorted string slices are identical.
 // Both inputs must already be sorted (journalFileDeltas sorts them).
 func multisetEqual(a, b []string) bool {
@@ -132,10 +162,13 @@ func splitDeltaKey(key string) (qn, kind string) {
 }
 
 // DeltasSince returns the folded symbol-level changes journaled after sinceMs:
-// one entry per (path, qualified_name, kind), where a symbol added within the
-// window stays "added" through later changes, and one added AND removed within
-// the window nets out entirely — the answer reads as a disposition relative to
-// the baseline, not a raw event log. total is the folded count before limit.
+// one entry per (path, qualified_name, kind), with the disposition read
+// relative to the baseline, not as a raw event log. The first event tells
+// whether the symbol existed at baseline (anything but "added" means it did);
+// the last tells whether it exists now (anything but "removed" means it does).
+// Born-and-gone within the window nets out entirely; existed-then-recreated
+// reads as "changed" (it is present, content unknown), never "removed".
+// total is the folded count before limit.
 func (e *Engine) DeltasSince(ctx context.Context, worktree string, sinceMs int64, limit int) ([]Delta, int, error) {
 	if limit <= 0 {
 		limit = 50
@@ -150,8 +183,7 @@ func (e *Engine) DeltasSince(ctx context.Context, worktree string, sinceMs int64
 		return nil, 0, err
 	}
 	type state struct {
-		addedInWindow bool
-		last          string
+		first, last string
 	}
 	folded := map[string]*state{}
 	var order []string
@@ -164,12 +196,9 @@ func (e *Engine) DeltasSince(ctx context.Context, worktree string, sinceMs int64
 		key := p + "\x00" + qn + "\x00" + kind
 		st, ok := folded[key]
 		if !ok {
-			st = &state{}
+			st = &state{first: ch}
 			folded[key] = st
 			order = append(order, key)
-		}
-		if ch == "added" {
-			st.addedInWindow = true
 		}
 		st.last = ch
 	}
@@ -181,14 +210,18 @@ func (e *Engine) DeltasSince(ctx context.Context, worktree string, sinceMs int64
 	var out []Delta
 	for _, key := range order {
 		st := folded[key]
+		existedAtBaseline := st.first != "added"
+		existsNow := st.last != "removed"
 		var change string
 		switch {
-		case st.addedInWindow && st.last == "removed":
+		case !existedAtBaseline && !existsNow:
 			continue // net nothing: born and gone within the window
-		case st.addedInWindow:
+		case !existedAtBaseline:
 			change = "added"
+		case !existsNow:
+			change = "removed"
 		default:
-			change = st.last
+			change = "changed"
 		}
 		var p, rest string
 		p, rest = splitDeltaKey(key)

@@ -386,9 +386,12 @@ func (e *Engine) refConflicts(ctx context.Context, c store.Conn, kind Kind, self
 	if len(or) == 0 {
 		return nil, nil
 	}
-	q := `SELECT DISTINCT m.id, m.title, m.body
+	// Most recently updated first: under Record's candidate cap the suspects
+	// most likely to still matter survive, deterministically (id breaks ties).
+	q := `SELECT DISTINCT m.id, m.title, m.body, m.updated_at
 	        FROM memories m JOIN memory_refs r ON r.memory_id = m.id
 	       WHERE m.kind = ? AND m.status = 'active' AND m.id != ? AND (` + strings.Join(or, " OR ") + `)
+	       ORDER BY m.updated_at DESC, m.id
 	       LIMIT 6`
 	rows, err := c.QueryContext(ctx, q, append([]any{string(kind), selfID}, args...)...)
 	if err != nil {
@@ -398,7 +401,8 @@ func (e *Engine) refConflicts(ctx context.Context, c store.Conn, kind Kind, self
 	var out []ConflictCandidate
 	for rows.Next() {
 		var id, title, body string
-		if err := rows.Scan(&id, &title, &body); err != nil {
+		var updatedAt int64 // selected only so DISTINCT permits the ORDER BY
+		if err := rows.Scan(&id, &title, &body, &updatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, ConflictCandidate{ID: id, Title: title, Snippet: bodySnippet(body), Reason: "shares refs"})

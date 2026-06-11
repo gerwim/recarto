@@ -2,6 +2,7 @@ package agents
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -530,6 +531,50 @@ func TestStopDoesNotNudgeBelowThresholdOrWithMemories(t *testing.T) {
 	}
 }
 
+func TestStopDoesNotNudgeWhenRecordOnlyReinforced(t *testing.T) {
+	a := newTestApp(t, "main")
+	ctx := context.Background()
+	clk := a.Clock.(*clock.Fake)
+
+	// A prior session left this memory behind, created before this session starts.
+	body := "always run gofmt before committing because CI rejects unformatted files"
+	if _, _, _, err := a.Engine.Record(ctx, memory.NewMemory{
+		Kind: memory.KindLearning, Body: body, Branch: a.Git.Branch,
+		Worktree: a.Git.Worktree, Author: "test", Source: "cli",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	clk.Advance(time.Minute)
+	if _, err := Handle(ctx, a, Event{Kind: KindSessionStart, SessionID: "nr1", Agent: "claude-code"}); err != nil {
+		t.Fatal(err)
+	}
+	_ = a.Ledger.Incr(ctx, "nr1", "edits", 3)
+
+	// The session records the same learning again. Recarto's contract is "record
+	// freely — near-duplicates reinforce", so a reinforcement IS a recording and
+	// must satisfy the capture nudge exactly like a fresh insert.
+	clk.Advance(time.Second)
+	_, reinforced, _, err := a.Engine.Record(ctx, memory.NewMemory{
+		Kind: memory.KindLearning, Body: body, Branch: a.Git.Branch,
+		Worktree: a.Git.Worktree, Author: "test", Source: "cli",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reinforced {
+		t.Fatal("test setup: second record must reinforce, not insert")
+	}
+
+	res, err := Handle(ctx, a, Event{Kind: KindStop, SessionID: "nr1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Block {
+		t.Fatalf("a reinforced record must satisfy the capture nudge, got block with reason %q", res.Reason)
+	}
+}
+
 func TestStopActiveLoopGuardPassesThrough(t *testing.T) {
 	a := newTestApp(t, "main")
 	ctx := context.Background()
@@ -611,5 +656,52 @@ func TestSessionStartShowsDeltaSinceLastWorkingSession(t *testing.T) {
 	if !strings.Contains(res.Context, "Changed since your last working session") ||
 		(!strings.Contains(res.Context, "Extra") && !strings.Contains(res.Context, "~")) {
 		t.Errorf("session 4 context missing the delta tier (EXISTS clause must skip both no-op sessions):\n%s", res.Context)
+	}
+}
+
+func TestDeltaTierSurvivesManyNoOpSessions(t *testing.T) {
+	a := newTestApp(t, "main")
+	ctx := context.Background()
+	wt := t.TempDir()
+	a.Git.Worktree = wt
+	clk := a.Clock.(*clock.Fake)
+
+	// Session w1 does real work: index a file, then reindex it changed.
+	if _, err := Handle(ctx, a, Event{Kind: KindSessionStart, SessionID: "w1", Agent: "claude-code"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wt, "w.go"), []byte("package p\nfunc Work() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Graph.Reconcile(ctx, wt, graph.FSSource{Root: wt}); err != nil {
+		t.Fatal(err)
+	}
+	clk.Advance(time.Second)
+	if err := os.WriteFile(filepath.Join(wt, "w.go"), []byte("package p\nfunc Work() { _ = 1 }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Graph.Reconcile(ctx, wt, graph.FSSource{Root: wt}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Eleven consecutive no-op sessions (/clear spam, quick questions): more
+	// than the 10-session retention window, so a prune keyed only on the
+	// 10th-most-recent session row would erase w1's journal — exactly the rows
+	// the unbounded baseline walk still reports.
+	for i := range 11 {
+		clk.Advance(time.Second)
+		if _, err := Handle(ctx, a, Event{Kind: KindSessionStart,
+			SessionID: fmt.Sprintf("noop%d", i), Agent: "claude-code"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	clk.Advance(time.Second)
+	res, err := Handle(ctx, a, Event{Kind: KindSessionStart, SessionID: "final", Agent: "claude-code"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(res.Context, "Changed since your last working session") {
+		t.Errorf("delta tier must survive any number of no-op sessions (prune must not pass the baseline):\n%s", res.Context)
 	}
 }

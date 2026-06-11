@@ -257,6 +257,53 @@ func TestRecordSurfacesSharedRefConflicts(t *testing.T) {
 	}
 }
 
+// TestRecordSharedRefConflictsPreferMostRecent pins which shared-ref suspects
+// survive Record's cap of 3 when more exist: the most recently updated, newest
+// first. Without an ORDER BY the survivors are whatever the storage engine
+// happens to return — typically the oldest, the least likely to still matter.
+func TestRecordSharedRefConflictsPreferMostRecent(t *testing.T) {
+	clk := clock.NewFake(time.UnixMilli(7_500_000))
+	e := newTestEngine(t, clk)
+	ctx := context.Background()
+	ref := []Ref{{Type: RefFile, Value: "internal/auth/login.go"}}
+
+	// Four prior decisions anchored to the same file, oldest first. Bodies are
+	// mutually dissimilar, so they surface only through the shared ref.
+	priors := []struct{ title, body string }{
+		{"one", "cache invalidation handled by ttl expiry alone"},
+		{"two", "retry policy uses exponential backoff with jitter"},
+		{"three", "feature flags resolved at request time from config service"},
+		{"four", "telemetry events batched and flushed every thirty seconds"},
+	}
+	for _, m := range priors {
+		clk.Advance(time.Minute)
+		if _, _, _, err := e.Record(ctx, NewMemory{
+			Kind: KindDecision, Title: m.title, Body: m.body,
+			Refs: ref, Author: "t", Source: "cli",
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	clk.Advance(time.Minute)
+	_, _, conflicts, err := e.Record(ctx, NewMemory{
+		Kind: KindDecision, Title: "new", Body: "login route migrates to passkeys next quarter",
+		Refs: ref, Author: "t", Source: "cli",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"four", "three", "two"}
+	if len(conflicts) != len(want) {
+		t.Fatalf("conflicts = %d, want %d: %+v", len(conflicts), len(want), conflicts)
+	}
+	for i, w := range want {
+		if conflicts[i].Title != w {
+			t.Errorf("conflicts[%d] = %q, want %q (most recently updated first)", i, conflicts[i].Title, w)
+		}
+	}
+}
+
 func TestRecordNoConflictsForFactualKindsOrReinforce(t *testing.T) {
 	e := newTestEngine(t, clock.NewFake(time.UnixMilli(8_000_000)))
 	ctx := context.Background()
