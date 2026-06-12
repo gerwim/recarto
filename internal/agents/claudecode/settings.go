@@ -50,10 +50,12 @@ func isOwnedCommand(c string) bool {
 	return strings.Contains(c, " hook ") && strings.Contains(c, "--agent claude")
 }
 
-// ownedCommands returns the set of recarto-owned hook commands currently in
-// settings.
-func ownedCommands(settings map[string]any) map[string]bool {
-	out := map[string]bool{}
+// ownedCommands returns the recarto-owned hook commands currently in settings,
+// mapped to their `shell` field ("" when absent). Tracking the shell lets a
+// re-install detect installs whose hooks predate the per-OS shell and re-sync
+// them, rather than treating a matching command set alone as up to date.
+func ownedCommands(settings map[string]any) map[string]string {
+	out := map[string]string{}
 	hooks, _ := settings["hooks"].(map[string]any)
 	for _, v := range hooks {
 		groups, _ := v.([]any)
@@ -63,7 +65,8 @@ func ownedCommands(settings map[string]any) map[string]bool {
 			for _, h := range hs {
 				hm, _ := h.(map[string]any)
 				if c, _ := hm["command"].(string); isOwnedCommand(c) {
-					out[c] = true
+					shell, _ := hm["shell"].(string)
+					out[c] = shell
 				}
 			}
 		}
@@ -112,16 +115,16 @@ func removeOwnedHooks(settings map[string]any) {
 // stale hooks in place. It returns a human-readable status for InstallResult.
 func syncHooks(settings map[string]any, binary string) string {
 	desired := hookSpecs(binary)
-	want := make(map[string]bool, len(desired))
+	want := make(map[string]string, len(desired))
 	for _, hs := range desired {
-		want[hs.command] = true
+		want[hs.command] = hs.shell
 	}
 	if reflect.DeepEqual(ownedCommands(settings), want) {
 		return "already present"
 	}
 	removeOwnedHooks(settings)
 	for _, hs := range desired {
-		appendHook(settings, hs.event, hs.matcher, hs.command)
+		appendHook(settings, hs.event, hs.matcher, hs.command, hs.shell)
 	}
 	return fmt.Sprintf("installed %d", len(desired))
 }
@@ -145,8 +148,9 @@ func hasCommand(settings map[string]any, event, command string) bool {
 }
 
 // appendHook appends a command hook group for event. matcher is omitted when
-// empty (events like SessionStart/Stop run unconditionally).
-func appendHook(settings map[string]any, event, matcher, command string) {
+// empty (events like SessionStart/Stop run unconditionally); shell is omitted
+// when empty (Claude uses its default shell for the platform).
+func appendHook(settings map[string]any, event, matcher, command, shell string) {
 	hooks, ok := settings["hooks"].(map[string]any)
 	if !ok {
 		hooks = map[string]any{}
@@ -154,6 +158,9 @@ func appendHook(settings map[string]any, event, matcher, command string) {
 	}
 	groups, _ := hooks[event].([]any)
 	entry := map[string]any{"type": "command", "command": command}
+	if shell != "" {
+		entry["shell"] = shell
+	}
 	group := map[string]any{"hooks": []any{entry}}
 	if matcher != "" {
 		group["matcher"] = matcher

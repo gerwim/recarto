@@ -76,12 +76,12 @@ func TestAppendHookAndHasCommandIdempotent(t *testing.T) {
 	if hasCommand(s, "SessionStart", cmd) {
 		t.Fatal("empty settings should not contain the command")
 	}
-	appendHook(s, "SessionStart", "", cmd)
+	appendHook(s, "SessionStart", "", cmd, "")
 	if !hasCommand(s, "SessionStart", cmd) {
 		t.Fatal("command should be present after append")
 	}
 	// A second, unrelated hook is added as a separate group (nothing clobbered).
-	appendHook(s, "SessionStart", "", "other-tool --flag")
+	appendHook(s, "SessionStart", "", "other-tool --flag", "")
 	groups := s["hooks"].(map[string]any)["SessionStart"].([]any)
 	if len(groups) != 2 {
 		t.Errorf("expected 2 hook groups, got %d", len(groups))

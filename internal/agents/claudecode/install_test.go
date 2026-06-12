@@ -1,6 +1,7 @@
 package claudecode
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -108,6 +109,90 @@ func TestInstallReplacesStaleHooks(t *testing.T) {
 		if !strings.Contains(s, want) {
 			t.Errorf("current hook %q missing:\n%s", want, s)
 		}
+	}
+}
+
+// setGOOS overrides the package's OS detection for one test and restores it.
+func setGOOS(t *testing.T, v string) {
+	t.Helper()
+	old := goos
+	goos = v
+	t.Cleanup(func() { goos = old })
+}
+
+func TestHookSpecsPinPowershellOnWindows(t *testing.T) {
+	setGOOS(t, "windows")
+	for _, hs := range hookSpecs("recarto") {
+		if hs.shell != "powershell" {
+			t.Errorf("hook %q shell = %q, want powershell", hs.command, hs.shell)
+		}
+	}
+}
+
+func TestHookSpecsLeaveShellDefaultElsewhere(t *testing.T) {
+	setGOOS(t, "linux")
+	for _, hs := range hookSpecs("recarto") {
+		if hs.shell != "" {
+			t.Errorf("hook %q shell = %q, want empty on linux", hs.command, hs.shell)
+		}
+	}
+}
+
+func TestInstallPinsPowershellShellOnWindows(t *testing.T) {
+	setGOOS(t, "windows")
+	dir := t.TempDir()
+	home := t.TempDir()
+	p := agents.Paths{Scope: agents.ScopeRepo, Dir: dir, Home: home}
+	if _, err := Install(p, "recarto"); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(filepath.Join(dir, ".claude", "settings.json"))
+	s := string(b)
+	// Every recarto-owned hook entry must carry the powershell shell so the
+	// command does not get launched under bash/Git Bash on Windows. The on-disk
+	// JSON is indented, so match the spaced form.
+	if n := strings.Count(s, `"shell": "powershell"`); n != len(hookSpecs("recarto")) {
+		t.Errorf("got %d powershell shells, want %d:\n%s", n, len(hookSpecs("recarto")), s)
+	}
+}
+
+func TestInstallNoShellFieldOnNonWindows(t *testing.T) {
+	setGOOS(t, "linux")
+	dir := t.TempDir()
+	home := t.TempDir()
+	p := agents.Paths{Scope: agents.ScopeRepo, Dir: dir, Home: home}
+	if _, err := Install(p, "recarto"); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(filepath.Join(dir, ".claude", "settings.json"))
+	if strings.Contains(string(b), `"shell"`) {
+		t.Errorf("non-windows install should not write a shell field:\n%s", b)
+	}
+}
+
+// A Windows user who installed with an older version has the recarto hooks but
+// no shell field (so they break under bash). Re-running init must add the shell
+// rather than report the hooks already present.
+func TestSyncHooksAddsMissingShellOnWindows(t *testing.T) {
+	setGOOS(t, "windows")
+	settings := map[string]any{}
+	// Seed the current commands WITHOUT a shell, as an older installer would.
+	for _, hs := range hookSpecs("recarto") {
+		appendHook(settings, hs.event, hs.matcher, hs.command, "")
+	}
+	if got := syncHooks(settings, "recarto"); got == "already present" {
+		t.Fatalf("syncHooks reported %q; expected a re-sync to add the shell", got)
+	}
+	b, err := json.Marshal(settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(string(b), `"shell":"powershell"`); n != len(hookSpecs("recarto")) {
+		t.Errorf("got %d powershell shells after re-sync, want %d:\n%s", n, len(hookSpecs("recarto")), b)
+	}
+	// And it is now idempotent.
+	if got := syncHooks(settings, "recarto"); got != "already present" {
+		t.Errorf("second syncHooks = %q, want already present", got)
 	}
 }
 
