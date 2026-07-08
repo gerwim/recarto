@@ -3,3 +3,6 @@
 recarto-minisign.key
 recarto-minisign.pub
 ci/osxcross-sdk/
+
+# Local compose secrets
+.env

@@ -1,0 +1,8 @@
+.git
+releases/
+docs/
+**/testdata/
+ci/
+*.md
+recarto-minisign.*
+.env

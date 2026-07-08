@@ -311,6 +311,75 @@ concurrently — including while offline — reconcile without conflicts to reso
 An explicit `forget` propagates as a tombstone; routine local housekeeping (archiving,
 dedup, GC) never does, so one machine's cleanup can't delete another's memories.
 
+### Deploy the sync server with Docker Compose
+
+The repo ships a `Dockerfile` and `docker-compose.yml` that run `recarto server` as a
+single long-lived container, plain HTTP internally, fronted by your own TLS-terminating
+reverse proxy.
+
+```sh
+cp .env.example .env
+# edit .env: set RECARTO_SERVER_KEY, e.g.  openssl rand -hex 32
+
+docker network create proxy   # once, unless your proxy already has a network to join
+
+docker compose up -d --build
+```
+
+Then point every client machine at the proxied URL, same as any other server (§ above):
+
+```sh
+export RECARTO_SYNC_URL=https://recarto-sync.example.com
+export RECARTO_SYNC_KEY=<the same token as RECARTO_SERVER_KEY>
+```
+
+By default the container joins an **external** `proxy` Docker network and publishes no
+host port — only a reverse proxy on that network can reach it. If you front it with a
+proxy running on the host instead (not dockerized), comment out `networks:` in
+`docker-compose.yml` and uncomment the `ports: ["127.0.0.1:8080:8080"]` line so it's only
+reachable from localhost.
+
+Whichever proxy you use, it must:
+1. **Terminate TLS** — the bearer token travels in the `Authorization` header and must
+   never cross an unencrypted public hop.
+2. **Forward the request path unmodified** (`/v1/repos/{key}/changes`, `/healthz`).
+3. **Allow request bodies up to 32 MB** (`client_max_body_size 32m;` in nginx) and not
+   strip `Content-Encoding: gzip`.
+
+Example nginx config:
+
+```nginx
+server {
+  listen 443 ssl;
+  server_name recarto-sync.example.com;
+  # ssl_certificate ...; ssl_certificate_key ...;
+  client_max_body_size 32m;
+  location / {
+    proxy_pass http://recarto-sync:8080;   # or 127.0.0.1:8080 for a host proxy
+    proxy_set_header Host $host;
+  }
+}
+```
+
+Caddy is a one-liner (auto-TLS, body size and gzip pass through by default):
+
+```
+recarto-sync.example.com {
+  reverse_proxy recarto-sync:8080
+}
+```
+
+For Traefik, uncomment and adjust the `labels:` block already present in
+`docker-compose.yml`.
+
+**Known caveat:** the server's rate limiter keys on the TCP peer address and does not
+read `X-Forwarded-For`, so behind a reverse proxy every client shares one rate-limit
+bucket (20 req/s, burst 60). For a personal, few-machine sync setup this is comfortably
+within headroom; it only matters if you're fronting a large fleet.
+
+State lives entirely in the named `recarto-sync-data` volume — back it up like any other
+SQLite data directory, and it survives `docker compose restart`/upgrades.
+
 ## Development
 
 ```sh

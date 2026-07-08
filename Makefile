@@ -18,7 +18,7 @@ LDFLAGS     := -ldflags "-s -w -X $(MODULE)/internal/version.Version=$(VERSION)"
 # linux and windows cross-build from any host with zig.
 TAGS := -tags netgo,osusergo
 
-.PHONY: all linux windows darwin native test vet fmt clean
+.PHONY: all linux windows darwin native test vet fmt clean image compose-up
 
 all: linux windows darwin
 
@@ -53,3 +53,9 @@ fmt:
 
 clean:
 	rm -rf releases
+
+image: ## build the sync-server container image
+	docker build --build-arg VERSION="$(VERSION)" -t recarto-sync:$(VERSION) .
+
+compose-up:
+	docker compose up -d --build

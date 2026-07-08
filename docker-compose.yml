@@ -1,0 +1,43 @@
+services:
+  recarto-sync:
+    build:
+      context: .
+      args:
+        VERSION: ${RECARTO_VERSION:-docker}
+    image: recarto-sync:${RECARTO_VERSION:-latest}
+    container_name: recarto-sync
+    restart: unless-stopped
+    environment:
+      # REQUIRED — a long random static token, shared verbatim with every client.
+      RECARTO_SERVER_KEY: ${RECARTO_SERVER_KEY:?RECARTO_SERVER_KEY must be set (see .env.example)}
+    command: ["server", "--addr", ":8080", "--data-dir", "/data"]
+    volumes:
+      - recarto-sync-data:/data
+    expose:
+      - "8080"                      # reachable on the proxy network, not published to host
+    # For a host-based proxy (system nginx/Caddy) instead of a dockerized one,
+    # comment out `networks:` below and publish to loopback only:
+    # ports:
+    #   - "127.0.0.1:8080:8080"
+    networks:
+      - proxy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    # Optional Traefik labels (uncomment + adjust host if you use Traefik):
+    # labels:
+    #   - "traefik.enable=true"
+    #   - "traefik.http.routers.recarto.rule=Host(`recarto-sync.example.com`)"
+    #   - "traefik.http.routers.recarto.entrypoints=websecure"
+    #   - "traefik.http.routers.recarto.tls.certresolver=le"
+    #   - "traefik.http.services.recarto.loadbalancer.server.port=8080"
+
+volumes:
+  recarto-sync-data:
+
+networks:
+  proxy:
+    external: true   # create once: `docker network create proxy` (or your proxy's existing net)
