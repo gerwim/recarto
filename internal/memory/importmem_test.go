@@ -93,3 +93,56 @@ func TestImportReinforceKeepsHigherPinnedAndConfidence(t *testing.T) {
 		t.Fatalf("reinforce must keep the higher confidence 0.95, got %v", rec.Confidence)
 	}
 }
+
+// TestImportMemoryQueuesRowsForHTTPPush proves the mechanism the
+// session-start hook's ordering fix depends on: a memory absorbed from the
+// committed team snapshot (internal/snapshot, via ImportMemory) must also be
+// queued in the local HTTP-sync outbox, exactly like a locally-authored
+// Record — otherwise reordering the session-start hook to push after the
+// snapshot import would have nothing new to push.
+func TestImportMemoryQueuesRowsForHTTPPush(t *testing.T) {
+	e := newTestEngine(t, clock.Real{})
+	ctx := context.Background()
+
+	// Fresh insert via ImportMemory (the snapshot-import path).
+	inserted := ImportMemory{
+		ID: "snap-ins", Kind: KindLearning, Title: "t",
+		Body: "a durable learning imported from a teammate's snapshot", CreatedAt: 1000,
+	}
+	if out, _, err := e.ImportMemory(ctx, inserted); err != nil || out != ImportInserted {
+		t.Fatalf("setup insert: out=%v err=%v", out, err)
+	}
+	pending, err := e.PendingPush(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 1 || pending[0].ID != "snap-ins" {
+		t.Fatalf("a fresh ImportMemory insert must be queued for push, got %+v", pending)
+	}
+	if err := e.ClearPushed(ctx, []string{"snap-ins"}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Reinforce-by-near-dup via ImportMemory (independent authoring converging).
+	reinforcing := ImportMemory{
+		ID: "snap-reinf", Kind: KindLearning, Title: "t",
+		Body: "a durable learning imported from a teammate's snapshot!", CreatedAt: 2000,
+	}
+	out, canonID, err := e.ImportMemory(ctx, reinforcing)
+	if err != nil || out != ImportReinforced {
+		t.Fatalf("setup reinforce: out=%v err=%v", out, err)
+	}
+	pending, err = e.PendingPush(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, p := range pending {
+		if p.ID == canonID {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("an ImportMemory reinforce must queue the canonical row for push, got %+v", pending)
+	}
+}

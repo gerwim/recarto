@@ -122,9 +122,14 @@ func (s *Server) handlePostChanges(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, maxPushBytes)
+	body, err := gzipRequestBody(w, r)
+	if err != nil {
+		httpError(w, http.StatusBadRequest, "bad request body: "+err.Error())
+		return
+	}
+	defer body.Close()
 	var req syncwire.PushRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(body).Decode(&req); err != nil {
 		httpError(w, http.StatusBadRequest, "bad request body: "+err.Error())
 		return
 	}

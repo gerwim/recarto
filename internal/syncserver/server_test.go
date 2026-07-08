@@ -2,7 +2,9 @@ package syncserver
 
 import (
 	"bytes"
+	"compress/gzip"
 	"encoding/json"
+	"io"
 	"net/http"
 	"path/filepath"
 	"strconv"
@@ -247,5 +249,152 @@ func TestChangesPaging(t *testing.T) {
 	resp.Body.Close()
 	if len(page3.Records) != 1 || page3.More {
 		t.Fatalf("page3 = %+v, want 1 record and More=false", page3)
+	}
+}
+
+func gzipCompress(t *testing.T, data []byte) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	gw := gzip.NewWriter(&buf)
+	if _, err := gw.Write(data); err != nil {
+		t.Fatal(err)
+	}
+	if err := gw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+// TestGzipCompressedPushBodyIsDecompressed exercises the server side of what
+// internal/remotesync.Client.Push does: a gzip-compressed push body with
+// Content-Encoding: gzip must be transparently decompressed and applied
+// exactly like an uncompressed one.
+func TestGzipCompressedPushBodyIsDecompressed(t *testing.T) {
+	client, base := testServer(t, "s3cret")
+	url := base + "/v1/repos/repo1/changes"
+
+	body, _ := json.Marshal(syncwire.PushRequest{Records: []syncwire.Record{
+		{ID: "m1", Kind: "learning", Title: "t", Body: "gzip-compressed push body", CreatedAt: 100, UpdatedAt: 100},
+	}})
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(gzipCompress(t, body)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer s3cret")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Content-Encoding", "gzip")
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	var pr syncwire.PushResponse
+	if err := json.NewDecoder(resp.Body).Decode(&pr); err != nil {
+		t.Fatal(err)
+	}
+	if pr.Accepted != 1 {
+		t.Fatalf("accepted = %d, want 1 (gzip body must be decompressed and applied)", pr.Accepted)
+	}
+
+	// Confirm it actually landed, via an ordinary (non-gzip) pull.
+	resp2 := doReq(t, client, http.MethodGet, url+"?since=0", "s3cret", nil)
+	defer resp2.Body.Close()
+	var cr syncwire.ChangesResponse
+	if err := json.NewDecoder(resp2.Body).Decode(&cr); err != nil {
+		t.Fatal(err)
+	}
+	if len(cr.Records) != 1 || cr.Records[0].Body != "gzip-compressed push body" {
+		t.Fatalf("changes after gzip push = %+v", cr.Records)
+	}
+}
+
+// TestGzipResponseWhenAcceptEncodingRequested exercises the server side of
+// what internal/remotesync.Client.do expects on the read path: a request
+// that advertises Accept-Encoding: gzip gets a gzip-compressed response body
+// with Content-Encoding: gzip set (mirroring the pull/bootstrap path, which
+// is where compression matters most).
+func TestGzipResponseWhenAcceptEncodingRequested(t *testing.T) {
+	client, base := testServer(t, "s3cret")
+	url := base + "/v1/repos/repo1/changes"
+
+	body, _ := json.Marshal(syncwire.PushRequest{Records: []syncwire.Record{
+		{ID: "m1", Kind: "learning", Title: "t", Body: "response gzip body", CreatedAt: 100, UpdatedAt: 100},
+	}})
+	resp := doReq(t, client, http.MethodPost, url, "s3cret", body)
+	resp.Body.Close()
+
+	req, err := http.NewRequest(http.MethodGet, url+"?since=0", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer s3cret")
+	req.Header.Set("Accept-Encoding", "gzip")
+	resp2, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp2.Body.Close()
+	if resp2.Header.Get("Content-Encoding") != "gzip" {
+		t.Fatalf("Content-Encoding = %q, want gzip", resp2.Header.Get("Content-Encoding"))
+	}
+	gzr, err := gzip.NewReader(resp2.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer gzr.Close()
+	raw, err := io.ReadAll(gzr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cr syncwire.ChangesResponse
+	if err := json.Unmarshal(raw, &cr); err != nil {
+		t.Fatal(err)
+	}
+	if len(cr.Records) != 1 || cr.Records[0].Body != "response gzip body" {
+		t.Fatalf("decompressed changes = %+v", cr.Records)
+	}
+}
+
+// TestRateLimitReturns429AfterBurstExceeded proves the per-IP token bucket
+// throttles requests BEFORE auth runs — the first two requests (using a
+// wrong key) are still processed far enough to return 401, but the third is
+// rejected outright with 429, never reaching the auth check.
+func TestRateLimitReturns429AfterBurstExceeded(t *testing.T) {
+	srv := New("s3cret", filepath.Join(t.TempDir(), "data"))
+	srv.limiter = newRateLimiter(0, 2) // no refill; exactly 2 requests allowed
+	t.Cleanup(func() { _ = srv.Close() })
+	client, base := unixHTTPClient(t, srv.Handler())
+
+	url := base + "/v1/repos/repo1/changes?since=0"
+	for i := range 2 {
+		resp := doReq(t, client, http.MethodGet, url, "wrongkey", nil)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("request %d: status = %d, want 401 (not yet rate limited)", i, resp.StatusCode)
+		}
+	}
+	resp := doReq(t, client, http.MethodGet, url, "wrongkey", nil)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("3rd request: status = %d, want 429", resp.StatusCode)
+	}
+}
+
+// TestRateLimitAppliesPerIndependentServer confirms a fresh Server's default
+// limiter has enough burst for ordinary test/CLI traffic (a handful of
+// requests), guarding against an overly aggressive default that would make
+// legitimate low-traffic sync flaky.
+func TestRateLimitDefaultBurstAllowsNormalTraffic(t *testing.T) {
+	client, base := testServer(t, "s3cret")
+	url := base + "/v1/repos/repo1/changes?since=0"
+	for i := range 10 {
+		resp := doReq(t, client, http.MethodGet, url, "s3cret", nil)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("request %d: status = %d, want 200 (default burst should not throttle normal traffic)", i, resp.StatusCode)
+		}
 	}
 }

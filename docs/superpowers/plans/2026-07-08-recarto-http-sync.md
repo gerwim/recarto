@@ -137,3 +137,71 @@ blocks loopback TCP, unrelated to this change); `-race` clean on
 rounds, `go` was available in this session (`/usr/local/go/bin`, not on
 `PATH` by default) — all of the above was actually executed, not just
 inspected.
+
+## Round 4 — review fixes: gzip transport, per-IP rate limiting, session-start ordering
+
+A review pass found three remaining gaps against the design (§6.1's planned
+gzip transport, §the syncserver's planned rate limiting, and a hook-ordering
+bug), all fixed:
+
+1. **Gzip transport was unimplemented.** `internal/remotesync.Client.Push`
+   sent plain JSON and neither side ever set `Content-Encoding`/
+   `Accept-Encoding`. Fixed: `Client.do` now always sends
+   `Accept-Encoding: gzip` and transparently decompresses a gzip response
+   body; `Client.Push` gzip-compresses its JSON body and sets
+   `Content-Encoding: gzip`. On the server, new `internal/syncserver/gzip.go`
+   adds `gzipRequestBody` (decompresses an incoming gzipped body, bounding
+   the wire size at `maxPushBytes` *and* the decompressed size at a separate
+   `maxDecompressedBytes` so a compressed body can't be used to exhaust
+   memory) and `withGzipResponse` (compresses the response whenever the
+   request's `Accept-Encoding` advertises gzip support), wired into both
+   `/v1/repos/{key}/changes` handlers in `server.go`. `handlePostChanges` now
+   reads through `gzipRequestBody` instead of a bare `MaxBytesReader`.
+   Explicit request/response gzip (rather than relying on Go's transport-level
+   auto-gzip, which never compresses request bodies and silently stops
+   decompressing responses once a caller sets `Accept-Encoding` itself) keeps
+   the behavior symmetric and testable. New tests:
+   `TestGzipCompressedPushBodyIsDecompressed`,
+   `TestGzipResponseWhenAcceptEncodingRequested`.
+2. **No per-IP rate limiting.** Added `internal/syncserver/ratelimit.go`: a
+   minimal in-memory per-IP token bucket (`rateLimiter`), deliberately simple
+   per the design doc's "basic per-IP rate limit" — no new dependency, no
+   distributed state. Wired as the outermost middleware in `Handler()` (before
+   `requireKey`), so it throttles repeated wrong-key guesses against the
+   single global bearer token, not just authenticated traffic. Defaults
+   (20 tokens/sec, burst 60) are generous for real sync traffic (a handful of
+   small requests per machine) while bounding a hostile/malfunctioning client.
+   New tests: `TestRateLimitReturns429AfterBurstExceeded` (proves it fires
+   before auth — first two wrong-key requests still get 401, the third gets
+   429), `TestRateLimitDefaultBurstAllowsNormalTraffic` (guards against an
+   overly aggressive default making legitimate use flaky).
+3. **Session-start pushed before absorbing the team snapshot.**
+   `handleSessionStart` (`internal/agents/handle.go`) ran the HTTP pull, then
+   the HTTP push, then `snapshot.SyncOnSessionStart` — so a memory just
+   absorbed from a teammate's committed `.recarto/memory.jsonl` (which calls
+   `ImportMemory`, and therefore queues the row in the local HTTP-sync
+   outbox — unchanged since round 1) sat unpushed until a later Stop/
+   background/manual sync, contrary to the design's intent that session-start
+   converge both sync mechanisms together. Fixed by reordering to
+   pull → snapshot import → push. New test:
+   `TestImportMemoryQueuesRowsForHTTPPush` (in `internal/memory`) pins the
+   underlying mechanism the reorder depends on — that `ImportMemory`'s insert
+   and reinforce paths both queue their canonical row for HTTP push, exactly
+   like a locally-authored `Record`. An end-to-end hook-level test (driving a
+   real `Syncer` + snapshot file + session-start hook together) was not added:
+   `remotesync.Client`'s `HTTP` field isn't test-injectable from
+   `internal/agents` today, and this sandbox's loopback TCP is unreachable
+   (the same constraint `internal/remotesync`'s own tests route around with a
+   unix-socket listener) — building that seam purely for this ordering test
+   felt like more surface than the six-line reorder warranted, so it's
+   flagged rather than silently skipped, consistent with round 2's identical
+   call on the Stop-hook push.
+
+Verification after round 4: `go build ./...`, `go vet ./...` clean; `gofmt -l .`
+clean on all touched files (same pre-existing unrelated exception as before,
+`internal/mcp/handlers_feedback_test.go`); `go test ./...` green except the
+same pre-existing, environment-specific `internal/update` `TestHTTPFetcher`
+failure (confirmed unchanged on `master` too — this sandbox blocks loopback
+TCP); `-race` clean on `internal/syncserver`, `internal/remotesync`,
+`internal/memory`, `internal/agents` (+ subpackages), `internal/app`,
+`internal/mcp`, `internal/store`, `internal/cli`, `internal/snapshot`.

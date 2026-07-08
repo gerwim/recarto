@@ -131,17 +131,26 @@ func handleSessionStart(ctx context.Context, a *app.App, ev Event) (Result, erro
 
 	// Pull remote memory changes before recall, so this session's injected
 	// context reflects other machines' work (best-effort, bounded — a wedged or
-	// unreachable sync server must never delay the agent), then push anything
-	// still sitting in the local outbox/tombstone queue — e.g. a prior session on
-	// this machine that recorded something but never reached its own Stop hook
-	// (crash, forced kill). Both no-op when sync is unconfigured (a.Sync == nil).
+	// unreachable sync server must never delay the agent). This runs BEFORE the
+	// snapshot import below so a snapshot-imported row (which also marks the
+	// outbox dirty) has a chance to be pushed in the same hook, not just pulled
+	// state that would otherwise be overwritten by an older local snapshot.
 	if a.Sync != nil {
 		boundedSync(ctx, syncPullBudget, a.Sync.Pull)
-		boundedSync(ctx, syncPushBudget, a.Sync.Push)
 	}
 
 	// Absorb a teammate's committed memory snapshot when it changed (best-effort).
 	_, _ = snapshot.SyncOnSessionStart(ctx, a.Engine, a.Store, a.Git.Worktree)
+
+	// Push anything now sitting in the local outbox/tombstone queue — a prior
+	// session on this machine that recorded something but never reached its own
+	// Stop hook (crash, forced kill), AND anything the snapshot import above
+	// just queued — so a snapshot-imported memory converges over HTTP sync too,
+	// in this same hook, rather than waiting for a later Stop/background/manual
+	// sync. No-op when sync is unconfigured (a.Sync == nil).
+	if a.Sync != nil {
+		boundedSync(ctx, syncPushBudget, a.Sync.Push)
+	}
 
 	// Opportunistic memory compaction (best-effort, gated to once per interval,
 	// single-flight across worktrees). Runs before recall so this session's

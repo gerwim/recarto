@@ -42,12 +42,22 @@ type repoStore struct {
 	eng *memory.Engine
 }
 
+// defaultRateLimit / defaultRateBurst are the per-IP token bucket
+// parameters: steady-state sync traffic is a handful of small requests per
+// machine, so this is generous headroom for legitimate use while still
+// bounding a hostile or malfunctioning client.
+const (
+	defaultRateLimit = 20.0 // tokens/sec
+	defaultRateBurst = 60.0
+)
+
 // Server holds the static auth key, the data directory root, and a lazily
 // populated, mutex-guarded cache of per-repo-key stores.
 type Server struct {
 	key     string
 	dataDir string
 	clk     clock.Clock
+	limiter *rateLimiter
 
 	mu     sync.Mutex
 	stores map[string]*repoStore
@@ -56,14 +66,21 @@ type Server struct {
 // New returns a Server. key must be non-empty (callers must refuse to start
 // otherwise — see cli.ServerCmd). dataDir is created on first use.
 func New(key, dataDir string) *Server {
-	return &Server{key: key, dataDir: dataDir, clk: clock.Real{}, stores: map[string]*repoStore{}}
+	return &Server{
+		key: key, dataDir: dataDir, clk: clock.Real{}, stores: map[string]*repoStore{},
+		limiter: newRateLimiter(defaultRateLimit, defaultRateBurst),
+	}
 }
 
-// Handler builds the routed, authenticated HTTP handler.
+// Handler builds the routed, authenticated HTTP handler. Middleware order
+// (outermost first): rate limit -> auth -> gzip response -> the handler
+// itself. Rate limiting runs before auth so it also throttles repeated wrong-
+// key guesses; gzip response wrapping runs innermost so it wraps exactly the
+// bytes the handler writes.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /v1/repos/{key}/changes", s.requireKey(s.handleGetChanges))
-	mux.HandleFunc("POST /v1/repos/{key}/changes", s.requireKey(s.handlePostChanges))
+	mux.HandleFunc("GET /v1/repos/{key}/changes", s.rateLimit(s.requireKey(withGzipResponse(s.handleGetChanges))))
+	mux.HandleFunc("POST /v1/repos/{key}/changes", s.rateLimit(s.requireKey(withGzipResponse(s.handlePostChanges))))
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	return mux
 }

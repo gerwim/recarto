@@ -2,9 +2,11 @@ package remotesync
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -45,8 +47,15 @@ func (c *Client) Healthz(ctx context.Context) error {
 	return nil
 }
 
+// do sends req, always advertising gzip support and transparently
+// decompressing a gzip response body. Explicitly setting Accept-Encoding
+// (rather than relying on Go's default transport-level auto-gzip) makes the
+// behavior deterministic and testable, and lets Push symmetrically
+// gzip-compress the request body — something the transport never does on its
+// own.
 func (c *Client) do(req *http.Request) (*http.Response, error) {
 	req.Header.Set("Authorization", "Bearer "+c.Key)
+	req.Header.Set("Accept-Encoding", "gzip")
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
 		return nil, err
@@ -55,7 +64,44 @@ func (c *Client) do(req *http.Request) (*http.Response, error) {
 		defer resp.Body.Close()
 		return nil, fmt.Errorf("recarto sync: %s %s: %s", req.Method, req.URL.Path, resp.Status)
 	}
+	if resp.Header.Get("Content-Encoding") == "gzip" {
+		gzr, err := gzip.NewReader(resp.Body)
+		if err != nil {
+			resp.Body.Close()
+			return nil, err
+		}
+		resp.Body = gzipRespBody{gz: gzr, underlying: resp.Body}
+	}
 	return resp, nil
+}
+
+// gzipRespBody closes both the gzip reader and the underlying HTTP body.
+type gzipRespBody struct {
+	gz         *gzip.Reader
+	underlying io.ReadCloser
+}
+
+func (g gzipRespBody) Read(p []byte) (int, error) { return g.gz.Read(p) }
+func (g gzipRespBody) Close() error {
+	gerr := g.gz.Close()
+	uerr := g.underlying.Close()
+	if gerr != nil {
+		return gerr
+	}
+	return uerr
+}
+
+// gzipEncode gzip-compresses data for a request body.
+func gzipEncode(data []byte) ([]byte, error) {
+	var buf bytes.Buffer
+	gw := gzip.NewWriter(&buf)
+	if _, err := gw.Write(data); err != nil {
+		return nil, err
+	}
+	if err := gw.Close(); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
 }
 
 // Pull fetches records with server seq > since, up to limit.
@@ -77,17 +123,25 @@ func (c *Client) Pull(ctx context.Context, repoKey string, since int64, limit in
 	return out, nil
 }
 
-// Push sends locally-authored records (including tombstones) to the server.
+// Push sends locally-authored records (including tombstones) to the server,
+// gzip-compressed (sync payloads are text-only memory rows and compress
+// well — see internal/syncwire's Deleted comment for what's excluded from
+// the wire; the code graph never travels).
 func (c *Client) Push(ctx context.Context, repoKey string, records []syncwire.Record) (syncwire.PushResponse, error) {
 	body, err := json.Marshal(syncwire.PushRequest{Records: records})
 	if err != nil {
 		return syncwire.PushResponse{}, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.changesURL(repoKey), bytes.NewReader(body))
+	gz, err := gzipEncode(body)
+	if err != nil {
+		return syncwire.PushResponse{}, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.changesURL(repoKey), bytes.NewReader(gz))
 	if err != nil {
 		return syncwire.PushResponse{}, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Content-Encoding", "gzip")
 	resp, err := c.do(req)
 	if err != nil {
 		return syncwire.PushResponse{}, err

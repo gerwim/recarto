@@ -132,18 +132,21 @@ machine's live memories (`TestCompactionNeverWritesTombstones`).
 
 ## 8. Scope cuts from the original proposal
 
-- **No gzip.** Sync payloads are text-only memory rows (never the graph), already small;
-  gzip adds transport complexity without changing the core performance story. Can be
-  added later without a wire-format change.
-- **No per-write debounced push channel** in `recarto serve` (MCP). The Stop-hook push
-  plus a periodic interval already deliver the important guarantee (an ephemeral
-  sandbox flushes before destruction); a sub-minute push-on-write channel was cut as
-  unnecessary complexity for this cut.
 - **`internal/snapshot` was left untouched** (not refactored to share `syncwire.Record`
   with the committed-file path). It already has its own tested wire shape (`line`); the
   reuse was a nice-to-have, not a functional requirement, and touching well-tested,
   unrelated code was not worth the regression risk here.
 - **No tombstone GC** (see §6) — deferred until real growth data justifies one.
+
+Two items initially cut in the first pass were added back in review: gzip
+request/response compression (`internal/remotesync.Client`, `internal/syncserver`'s
+`gzip.go`) and a basic per-IP rate limiter on the server (`internal/syncserver/ratelimit.go`)
+— both per the original design's §6.1/§11 expectations. `recarto serve`'s
+per-write debounced push (`App.SignalSync`/`SyncTrigger`, consumed by
+`mcp.Serve`'s `runSyncLoop`) also shipped, not cut — an interactive MCP
+session converges within seconds of a `record_memory`/`record_bug`/
+`complete_todo`/`forget_memory` call rather than waiting for the next
+periodic tick.
 
 ## 9. Performance
 
