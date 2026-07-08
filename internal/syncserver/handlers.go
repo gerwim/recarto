@@ -6,6 +6,7 @@ import (
 	"strconv"
 
 	"git.gerwim.nl/gerwim/recarto/internal/memory"
+	"git.gerwim.nl/gerwim/recarto/internal/store"
 	"git.gerwim.nl/gerwim/recarto/internal/syncwire"
 )
 
@@ -108,11 +109,13 @@ func (s *Server) handleGetChanges(w http.ResponseWriter, r *http.Request) {
 }
 
 // handlePostChanges answers POST /v1/repos/{key}/changes: applies each
-// incoming record through memory.SyncApply (the same merge core the client
-// uses to apply what it pulls — the server is a headless recarto store), then
-// bumps sync_index/seq ONLY for records that produced a genuine change, so an
-// idempotent re-push (or a record a resurrection guard drops) never grows the
-// server's change log.
+// incoming record through memory.SyncApplyTx (the same merge core the client
+// uses to apply what it pulls — the server is a headless recarto store),
+// bumping sync_index/seq in the SAME write transaction as the merge, via the
+// afterApply hook — and ONLY for records that produced a genuine change, so
+// an idempotent re-push (or a record a resurrection guard drops) never grows
+// the server's change log, and a crash between "apply" and "index" can never
+// happen (they are one commit).
 func (s *Server) handlePostChanges(w http.ResponseWriter, r *http.Request) {
 	rs, err := s.storeFor(r.PathValue("key"))
 	if err != nil {
@@ -129,25 +132,33 @@ func (s *Server) handlePostChanges(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	accepted := 0
 	for _, rec := range req.Records {
-		outcome, canonID, err := rs.eng.SyncApply(ctx, rec)
+		rec := rec
+		indexed := false
+		_, _, err := rs.eng.SyncApplyTx(ctx, rec, func(c store.Conn, outcome memory.SyncOutcome, canonID string) error {
+			updatedAt := rec.UpdatedAt
+			if !rec.Deleted {
+				// The merge (LWW / reinforce) may have adopted a different
+				// updated_at than the incoming record; read it back on the SAME
+				// connection/transaction so the index reflects what was actually
+				// committed.
+				var ua int64
+				if qerr := c.QueryRowContext(ctx, `SELECT updated_at FROM memories WHERE id=?`, canonID).Scan(&ua); qerr == nil {
+					updatedAt = ua
+				}
+			}
+			if _, err := bumpSyncIndexTx(ctx, c, canonID, rec.Deleted, updatedAt); err != nil {
+				return err
+			}
+			indexed = true
+			return nil
+		})
 		if err != nil {
 			httpError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		if outcome == memory.SyncNoop {
-			continue
+		if indexed {
+			accepted++
 		}
-		updatedAt := rec.UpdatedAt
-		if !rec.Deleted {
-			if canon, err := rs.eng.GetByID(ctx, canonID); err == nil && canon != nil {
-				updatedAt = canon.UpdatedAt
-			}
-		}
-		if _, err := bumpSyncIndex(ctx, rs.st, canonID, rec.Deleted, updatedAt); err != nil {
-			httpError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		accepted++
 	}
 
 	var cursor int64

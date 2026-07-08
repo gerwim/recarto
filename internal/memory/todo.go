@@ -14,11 +14,12 @@ import (
 // status, but this keeps the candidate pool clean — mirrors supersede in insert).
 func (e *Engine) CompleteTodo(ctx context.Context, id string) (bool, error) {
 	var done bool
+	now := e.clk.Now().UnixMilli()
 	err := e.st.WriteTx(ctx, func(c store.Conn) error {
 		res, err := c.ExecContext(ctx,
 			`UPDATE memories SET status='done', updated_at=?
 			   WHERE id=? AND kind='todo' AND status='active'`,
-			e.clk.Now().UnixMilli(), id)
+			now, id)
 		if err != nil {
 			return err
 		}
@@ -30,7 +31,12 @@ func (e *Engine) CompleteTodo(ctx context.Context, id string) (bool, error) {
 			return nil
 		}
 		done = true
-		return e.lex.Delete(ctx, c, id)
+		if err := e.lex.Delete(ctx, c, id); err != nil {
+			return err
+		}
+		// Completing a todo is an explicit local write, exactly like recording
+		// or forgetting one — other machines must stop surfacing it as open work.
+		return e.markDirty(ctx, c, id, now)
 	})
 	return done, err
 }

@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"time"
 
 	"github.com/google/jsonschema-go/jsonschema"
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -107,5 +108,32 @@ func addToolSchema[In, Out any](s *sdk.Server, a *app.App, name, desc string,
 // Serve runs the MCP server over stdio until the client disconnects. It is the
 // body of `recarto serve`.
 func Serve(ctx context.Context, a *app.App) error {
+	if a.Sync != nil {
+		go runSyncLoop(ctx, a)
+	}
 	return NewServer(a).Run(ctx, &sdk.StdioTransport{})
+}
+
+// runSyncLoop keeps a long-lived `recarto serve` session converged with the
+// remote sync server for as long as the process runs: a periodic tick
+// (RECARTO_SYNC_INTERVAL) catches up even an idle session, while
+// a.SyncTrigger — signaled by write-tool handlers right after a successful
+// record/complete/forget — collapses that wait to near-immediate for the
+// common case of "I just wrote something, converge now". Every cycle is
+// best-effort (Sync.Once already treats a network failure as non-fatal); this
+// goroutine is detached from any single tool call, so a wedged or
+// unreachable server can never block or fail one.
+func runSyncLoop(ctx context.Context, a *app.App) {
+	ticker := time.NewTicker(a.Sync.Interval())
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			_ = a.Sync.Once(ctx)
+		case <-a.SyncTrigger:
+			_ = a.Sync.Once(ctx)
+		}
+	}
 }

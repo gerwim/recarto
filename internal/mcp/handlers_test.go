@@ -281,3 +281,88 @@ func TestRecordMemorySurfacesConflictCandidates(t *testing.T) {
 		t.Errorf("note must teach the resolution path, got %q", out.Note)
 	}
 }
+
+// drainSyncSignal reports whether a's long-lived-serve sync loop was signaled
+// (a.SyncTrigger has a pending wakeup), draining it if so. a.SyncTrigger is
+// always allocated (app.Open), even with no RECARTO_SYNC_URL/KEY configured —
+// exactly the state newTestApp builds — so this checks handler-side signaling
+// in isolation from whether a real Syncer is wired up.
+func drainSyncSignal(a *app.App) bool {
+	select {
+	case <-a.SyncTrigger:
+		return true
+	default:
+		return false
+	}
+}
+
+func TestRecordMemorySignalsSyncLoop(t *testing.T) {
+	a := newTestApp(t, "main")
+	ctx := context.Background()
+	if _, err := recordMemory(ctx, a, RecordMemoryInput{Kind: "learning", Body: "signals the sync loop on record"}); err != nil {
+		t.Fatal(err)
+	}
+	if !drainSyncSignal(a) {
+		t.Error("record_memory must signal the long-lived serve sync loop so it converges promptly")
+	}
+}
+
+func TestRecordBugSignalsSyncLoop(t *testing.T) {
+	a := newTestApp(t, "main")
+	ctx := context.Background()
+	if _, err := recordBug(ctx, a, RecordBugInput{ErrorMessage: "boom"}); err != nil {
+		t.Fatal(err)
+	}
+	if !drainSyncSignal(a) {
+		t.Error("record_bug must signal the long-lived serve sync loop")
+	}
+}
+
+func TestCompleteTodoSignalsSyncLoopOnlyWhenCompleted(t *testing.T) {
+	a := newTestApp(t, "main")
+	ctx := context.Background()
+	id, _, _, err := a.Engine.Record(ctx, memory.NewMemory{Kind: memory.KindTodo, Title: "t", Body: "ship the feature"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// a.Engine.Record is called directly here (bypassing the record_memory MCP
+	// handler), so it never signals — only the handler layer does.
+
+	if _, err := completeTodo(ctx, a, CompleteTodoInput{ID: "missing"}); err != nil {
+		t.Fatal(err)
+	}
+	if drainSyncSignal(a) {
+		t.Error("completing an unknown id must not signal the sync loop")
+	}
+
+	if _, err := completeTodo(ctx, a, CompleteTodoInput{ID: id}); err != nil {
+		t.Fatal(err)
+	}
+	if !drainSyncSignal(a) {
+		t.Error("a genuine completion must signal the sync loop")
+	}
+}
+
+func TestForgetMemorySignalsSyncLoopOnlyWhenFound(t *testing.T) {
+	a := newTestApp(t, "main")
+	ctx := context.Background()
+	rec, err := recordMemory(ctx, a, RecordMemoryInput{Kind: "learning", Body: "temp, will be forgotten"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	drainSyncSignal(a) // clear the signal recordMemory itself raised
+
+	if _, err := forgetMemory(ctx, a, ForgetMemoryInput{ID: "missing"}); err != nil {
+		t.Fatal(err)
+	}
+	if drainSyncSignal(a) {
+		t.Error("forgetting an unknown id must not signal the sync loop")
+	}
+
+	if _, err := forgetMemory(ctx, a, ForgetMemoryInput{ID: rec.ID}); err != nil {
+		t.Fatal(err)
+	}
+	if !drainSyncSignal(a) {
+		t.Error("a genuine forget must signal the sync loop")
+	}
+}

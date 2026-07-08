@@ -14,8 +14,8 @@ import (
 // resolved report stops surfacing as a recall candidate.
 func (e *Engine) ResolveFeedback(ctx context.Context, id, note string) (bool, error) {
 	var done bool
+	now := e.clk.Now().UnixMilli()
 	err := e.st.WriteTx(ctx, func(c store.Conn) error {
-		now := e.clk.Now().UnixMilli()
 		var res sql.Result
 		var err error
 		if note != "" {
@@ -42,7 +42,10 @@ func (e *Engine) ResolveFeedback(ctx context.Context, id, note string) (bool, er
 			return nil
 		}
 		done = true
-		return e.lex.Delete(ctx, c, id)
+		if err := e.lex.Delete(ctx, c, id); err != nil {
+			return err
+		}
+		return e.markDirty(ctx, c, id, now)
 	})
 	return done, err
 }

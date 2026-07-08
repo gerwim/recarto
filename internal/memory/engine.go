@@ -267,6 +267,14 @@ func (e *Engine) Record(ctx context.Context, nm NewMemory) (id string, reinforce
 		if err := e.markDirty(ctx, c, id, now); err != nil {
 			return err
 		}
+		if nm.SupersedesID != "" {
+			// insert() just flipped the superseded row to status='superseded' — an
+			// explicit, locally-authored state change (not compaction), so it must
+			// propagate like any other authored write.
+			if err := e.markDirty(ctx, c, nm.SupersedesID, now); err != nil {
+				return err
+			}
+		}
 		// Advisory contradiction suspects, judged by the recording agent. Same
 		// transaction, so the read is consistent with the insert; never blocks it.
 		if conflictKinds[nm.Kind] {

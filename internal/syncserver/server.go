@@ -115,39 +115,34 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte("ok"))
 }
 
-// bumpSyncIndex records that repoKey's canonical row id changed, assigning it
-// the next monotonic seq. It runs in its own transaction, separate from the
-// SyncApply transaction that produced the change: store.WriteTx's write mutex
-// is not reentrant (the same constraint memory.Record's ledger bump documents),
-// so "apply the memory change" and "index it for future pulls" are
-// necessarily two commits, not one atomic unit. A crash between them leaves
-// the memory applied but not yet indexed — self-healing, since the next push
-// of the same (now-idempotent) record is a genuine SyncNoop only for OTHER
-// peers who already saw the seq; the pusher's own outbox entry is only
-// cleared after the HTTP response succeeds, so a client retries until both
-// steps have happened at least once.
-func bumpSyncIndex(ctx context.Context, st *store.Store, id string, deleted bool, updatedAt int64) (int64, error) {
+// bumpSyncIndexTx records that repoKey's canonical row id changed, assigning
+// it the next monotonic seq. It must run on the SAME store.Conn (the same
+// open WriteTx) as the memory.SyncApply call that produced the change —
+// memory.Engine.SyncApplyTx's afterApply hook is what wires that up — so the
+// two commit together or neither does. A prior version ran this in its own,
+// separate WriteTx after SyncApply's had already committed; a crash or error
+// between the two left the memory applied but never indexed for future
+// pulls, with no way to recover it (a client re-push of the identical record
+// is a genuine SyncNoop, since the memory side already matches).
+func bumpSyncIndexTx(ctx context.Context, c store.Conn, id string, deleted bool, updatedAt int64) (int64, error) {
+	if _, err := c.ExecContext(ctx,
+		`INSERT INTO counters(scope, metric, value) VALUES ('sync', 'seq', 1)
+		 ON CONFLICT(scope, metric) DO UPDATE SET value = value + 1`); err != nil {
+		return 0, err
+	}
 	var seq int64
-	err := st.WriteTx(ctx, func(c store.Conn) error {
-		if _, err := c.ExecContext(ctx,
-			`INSERT INTO counters(scope, metric, value) VALUES ('sync', 'seq', 1)
-			 ON CONFLICT(scope, metric) DO UPDATE SET value = value + 1`); err != nil {
-			return err
-		}
-		if err := c.QueryRowContext(ctx,
-			`SELECT value FROM counters WHERE scope='sync' AND metric='seq'`).Scan(&seq); err != nil {
-			return err
-		}
-		deletedInt := 0
-		if deleted {
-			deletedInt = 1
-		}
-		_, err := c.ExecContext(ctx,
-			`INSERT INTO sync_index(memory_id, seq, deleted, updated_at) VALUES (?,?,?,?)
-			 ON CONFLICT(memory_id) DO UPDATE SET
-			   seq = excluded.seq, deleted = excluded.deleted, updated_at = excluded.updated_at`,
-			id, seq, deletedInt, updatedAt)
-		return err
-	})
+	if err := c.QueryRowContext(ctx,
+		`SELECT value FROM counters WHERE scope='sync' AND metric='seq'`).Scan(&seq); err != nil {
+		return 0, err
+	}
+	deletedInt := 0
+	if deleted {
+		deletedInt = 1
+	}
+	_, err := c.ExecContext(ctx,
+		`INSERT INTO sync_index(memory_id, seq, deleted, updated_at) VALUES (?,?,?,?)
+		 ON CONFLICT(memory_id) DO UPDATE SET
+		   seq = excluded.seq, deleted = excluded.deleted, updated_at = excluded.updated_at`,
+		id, seq, deletedInt, updatedAt)
 	return seq, err
 }

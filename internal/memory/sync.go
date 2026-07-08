@@ -51,6 +51,17 @@ const (
 // back out. Only local authoring paths (Record, ImportMemory, dedup merge)
 // call markDirty.
 func (e *Engine) SyncApply(ctx context.Context, rec syncwire.Record) (SyncOutcome, string, error) {
+	return e.SyncApplyTx(ctx, rec, nil)
+}
+
+// SyncApplyTx is SyncApply, but when the merge produces a genuine change
+// (outcome != SyncNoop) it runs afterApply — with the canonical outcome/id —
+// in the SAME write transaction before committing. This lets a caller couple
+// an atomic side effect to the merge: the sync server uses it to bump its
+// per-repo seq/sync_index bookkeeping in the identical transaction as the
+// memory change, so a crash or error between "apply the change" and "index it
+// for future pulls" is impossible — both commit together, or neither does.
+func (e *Engine) SyncApplyTx(ctx context.Context, rec syncwire.Record, afterApply func(c store.Conn, outcome SyncOutcome, canonID string) error) (SyncOutcome, string, error) {
 	if !rec.Deleted && !Kind(rec.Kind).Valid() {
 		return SyncNoop, "", errInvalidKind
 	}
@@ -64,34 +75,35 @@ func (e *Engine) SyncApply(ctx context.Context, rec syncwire.Record) (SyncOutcom
 			return err
 		}
 
-		if rec.Deleted {
-			out, err := e.applyTombstoneRow(ctx, c, rec, tombAt, hasTomb)
-			outcome = out
-			return err
-		}
-		if hasTomb && tombAt >= rec.UpdatedAt {
-			outcome = SyncNoop // a later (or equal) delete already wins; do not resurrect
-			return nil
-		}
-
-		var local localRow
-		serr := c.QueryRowContext(ctx,
-			`SELECT title, body, updated_at, confidence, reinforcement_count, pinned
-			   FROM memories WHERE id=?`, rec.ID).
-			Scan(&local.title, &local.body, &local.updatedAt, &local.confidence,
-				&local.reinforcementCount, &local.pinned)
 		switch {
-		case serr == nil:
-			out, err := e.syncApplyExisting(ctx, c, rec, local)
-			outcome = out
-			return err
-		case errors.Is(serr, sql.ErrNoRows):
-			out, id, err := e.syncApplyAbsent(ctx, c, rec, now)
-			outcome, canonID = out, id
-			return err
+		case rec.Deleted:
+			outcome, err = e.applyTombstoneRow(ctx, c, rec, tombAt, hasTomb)
+		case hasTomb && tombAt >= rec.UpdatedAt:
+			// A later (or equal) delete already wins; do not resurrect.
+			outcome = SyncNoop
 		default:
-			return serr
+			var local localRow
+			serr := c.QueryRowContext(ctx,
+				`SELECT title, body, updated_at, confidence, reinforcement_count, pinned
+				   FROM memories WHERE id=?`, rec.ID).
+				Scan(&local.title, &local.body, &local.updatedAt, &local.confidence,
+					&local.reinforcementCount, &local.pinned)
+			switch {
+			case serr == nil:
+				outcome, err = e.syncApplyExisting(ctx, c, rec, local)
+			case errors.Is(serr, sql.ErrNoRows):
+				outcome, canonID, err = e.syncApplyAbsent(ctx, c, rec, now)
+			default:
+				err = serr
+			}
 		}
+		if err != nil {
+			return err
+		}
+		if outcome != SyncNoop && afterApply != nil {
+			return afterApply(c, outcome, canonID)
+		}
+		return nil
 	})
 	if err != nil {
 		return SyncNoop, "", err
@@ -231,6 +243,22 @@ func (e *Engine) syncApplyAbsent(ctx context.Context, c store.Conn, rec syncwire
 		clampConfidence(rec.Confidence), rec.ReinforcementCount, rec.ID); err != nil {
 		return SyncNoop, "", err
 	}
+	// insert() always lands a fresh row as status='active'. A record whose
+	// origin machine had already moved it on (done/resolved/superseded — e.g. a
+	// completed todo this machine never had before bootstrap) must land in that
+	// same state, not resurrect as active, and must drop out of the lexical
+	// index exactly like the local completion paths (CompleteTodo,
+	// ResolveFeedback, supersede) already do.
+	if status := rec.Status; status != "" && status != "active" {
+		if _, err := c.ExecContext(ctx,
+			`UPDATE memories SET status=?, superseded_by=? WHERE id=?`,
+			status, nullStr(rec.SupersededBy), rec.ID); err != nil {
+			return SyncNoop, "", err
+		}
+		if err := e.lex.Delete(ctx, c, rec.ID); err != nil {
+			return SyncNoop, "", err
+		}
+	}
 	return SyncInserted, rec.ID, nil
 }
 
@@ -349,11 +377,18 @@ func (e *Engine) markDirty(ctx context.Context, c store.Conn, id string, updated
 	return err
 }
 
-// PendingPush returns active memories with a pending local change (present in
-// memory_sync_outbox), as wire records ready to POST to the sync server.
+// PendingPush returns memories with a pending local change (present in
+// memory_sync_outbox), as wire records ready to POST to the sync server. This
+// is NOT filtered to status='active': the outbox is populated only by
+// explicit local-authoring writes (Record, ImportMemory, the dedup merge's
+// canonical bump, CompleteTodo, ResolveFeedback, an explicit supersede), and
+// those status transitions (active -> done/resolved/superseded) must
+// propagate just as much as a still-active row's content does — a completed
+// todo that fails to sync would keep surfacing as open work on every other
+// machine.
 func (e *Engine) PendingPush(ctx context.Context) ([]syncwire.Record, error) {
 	rows, err := e.st.DB.QueryContext(ctx, selectMemoriesSQL+
-		` WHERE status='active' AND id IN (SELECT memory_id FROM memory_sync_outbox)`)
+		` WHERE id IN (SELECT memory_id FROM memory_sync_outbox)`)
 	if err != nil {
 		return nil, err
 	}

@@ -42,6 +42,26 @@ type App struct {
 	// cross-machine identity). Every caller must nil-check before use — sync is
 	// entirely optional, and its absence must never be an error.
 	Sync *remotesync.Syncer
+	// SyncTrigger is signaled (non-blocking, via SignalSync) by write paths that
+	// want a long-lived `recarto serve` process to sync sooner than its next
+	// periodic tick — e.g. an MCP record_memory/complete_todo/forget_memory call,
+	// so an interactive session converges within seconds rather than waiting up
+	// to RECARTO_SYNC_INTERVAL. Always allocated (even when Sync is nil) so
+	// callers never need a nil check before signaling; nothing consumes it when
+	// sync is unconfigured.
+	SyncTrigger chan struct{}
+}
+
+// SignalSync requests an out-of-band sync cycle from a long-lived process's
+// background sync loop (see mcp.Serve) as soon as possible, instead of
+// waiting for the next periodic tick. Non-blocking: the channel is buffered
+// to depth 1, and a pending signal already covers any additional calls before
+// it is consumed, so this never piles up or blocks a write-tool handler.
+func (a *App) SignalSync() {
+	select {
+	case a.SyncTrigger <- struct{}{}:
+	default:
+	}
 }
 
 // Open resolves identity, opens the per-repo store at the global cache path (which
@@ -88,7 +108,10 @@ func Open(cfg Config) (*App, error) {
 	eng.SetRefResolver(graphRefResolver{st: st})
 	syncer, _ := remotesync.New(remotesync.ConfigFromEnv(), gc, eng, st)
 
-	a := &App{Git: gc, Runner: runner, Store: st, Ledger: led, Engine: eng, Graph: gr, Clock: clk, Sync: syncer}
+	a := &App{
+		Git: gc, Runner: runner, Store: st, Ledger: led, Engine: eng, Graph: gr, Clock: clk,
+		Sync: syncer, SyncTrigger: make(chan struct{}, 1),
+	}
 	if err := a.writeMeta(context.Background()); err != nil {
 		_ = st.Close()
 		return nil, err

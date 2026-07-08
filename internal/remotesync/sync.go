@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"time"
 
 	"git.gerwim.nl/gerwim/recarto/internal/gitctx"
 	"git.gerwim.nl/gerwim/recarto/internal/memory"
@@ -29,10 +30,11 @@ const pushBatchSize = 200
 
 // Syncer orchestrates pull-then-push for one repo against one server.
 type Syncer struct {
-	repoKey string
-	client  *Client
-	eng     *memory.Engine
-	st      *store.Store
+	repoKey  string
+	client   *Client
+	eng      *memory.Engine
+	st       *store.Store
+	interval time.Duration
 }
 
 // New returns a Syncer for gc, or ok=false when sync is not configured (no
@@ -50,13 +52,23 @@ func New(cfg Config, gc gitctx.Context, eng *memory.Engine, st *store.Store) (*S
 	if timeout <= 0 {
 		timeout = defaultTimeout
 	}
+	interval := cfg.Interval
+	if interval <= 0 {
+		interval = defaultInterval
+	}
 	return &Syncer{
-		repoKey: key,
-		eng:     eng,
-		st:      st,
-		client:  &Client{BaseURL: cfg.URL, Key: cfg.Key, HTTP: &http.Client{Timeout: timeout}},
+		repoKey:  key,
+		eng:      eng,
+		st:       st,
+		client:   &Client{BaseURL: cfg.URL, Key: cfg.Key, HTTP: &http.Client{Timeout: timeout}},
+		interval: interval,
 	}, true
 }
+
+// Interval returns the configured poll period (RECARTO_SYNC_INTERVAL;
+// default 60s) for a long-lived process's periodic sync loop (`recarto
+// serve`'s background ticker).
+func (s *Syncer) Interval() time.Duration { return s.interval }
 
 // Pull applies remote changes since the local cursor into the local store,
 // paging until the server reports no more, advancing the cursor after each

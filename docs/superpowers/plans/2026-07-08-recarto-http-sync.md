@@ -43,3 +43,67 @@ full suite green throughout).
   loopback TCP connections entirely (confirmed with a minimal `httptest`-only
   reproduction) — unrelated to this change.
 - `-race` clean on `internal/memory`, `internal/remotesync`.
+
+## Round 2 — review fixes
+
+A review pass found three correctness gaps before merge; all three are fixed:
+
+1. **Server apply + seq/index bump were not atomic.** `handlePostChanges` ran
+   `memory.SyncApply` in one `WriteTx`, then `bumpSyncIndex` in a second, separate
+   `WriteTx` — a crash or error between the two left a change applied but never
+   indexed for future pulls, with no way to recover it. Fixed by generalizing
+   `SyncApply` into `SyncApplyTx(ctx, rec, afterApply)`: when the merge produces a
+   genuine change, `afterApply` runs on the SAME `store.Conn` before the transaction
+   commits. `bumpSyncIndex` became `bumpSyncIndexTx`, called from that hook — the
+   memory change and its `sync_index`/`seq` bump are now one commit, or neither
+   happens. `SyncApply` is now a thin wrapper (`SyncApplyTx(ctx, rec, nil)`) so every
+   existing caller is unaffected. New test:
+   `TestSyncApplyTxHookFailureRollsBackTheMerge` proves a failing hook rolls back the
+   merge too.
+2. **Completed todos (and other explicit status transitions) never synced.**
+   `CompleteTodo` didn't call `markDirty`, and `PendingPush` filtered to
+   `status='active'`, so even a queued completion would have been excluded. Fixed:
+   `CompleteTodo` and `ResolveFeedback` (the identical pattern one kind over) now
+   `markDirty` on their explicit write; `PendingPush`'s `status='active'` filter is
+   removed (the outbox itself is the gate — only explicit local-authoring paths ever
+   populate it, compaction never does, so removing the filter is safe). An explicit
+   `supersedes_id` write in `Record` now also marks the superseded row dirty, for the
+   same reason. While fixing this, found and fixed a related bootstrap bug:
+   `syncApplyAbsent` (the insert-via-sync path) always landed a fresh row as
+   `status='active'`, so a machine bootstrapping a memory whose origin had already
+   moved it on (e.g. pulling an already-completed todo for the first time) would
+   have resurrected it as active — now the incoming non-active status/`superseded_by`
+   is applied immediately after insert, and the row drops out of the lexical index
+   exactly like the local completion paths do. New tests:
+   `TestCompleteTodoQueuesForPushWithDoneStatus`, `TestResolveFeedbackQueuesForPush`,
+   `TestSupersedeQueuesOldMemoryForPush`,
+   `TestSyncApplyBootstrapInsertLandsNonActiveStatus`.
+3. **`recarto serve` (MCP) had no periodic sync loop or write-triggered push, and
+   session-start only pulled.** Fixed: `Syncer` now carries its configured
+   `Interval()`; `mcp.Serve` starts a background goroutine (`runSyncLoop`) that runs
+   `Sync.Once` on that interval AND on a signal from `app.App.SyncTrigger` (a
+   buffered, always-allocated channel; `App.SignalSync()` is a non-blocking send).
+   `record_memory`, `record_bug`, `complete_todo` (only when it actually completed
+   something), and `forget_memory` (only when it actually deleted something) now call
+   `a.SignalSync()` after a successful write, so an interactive MCP session converges
+   within seconds instead of waiting up to `RECARTO_SYNC_INTERVAL`. Session-start now
+   pushes (in addition to the existing pull) so a prior session's un-flushed outbox
+   (e.g. one that crashed before its Stop hook fired) catches up at the next session,
+   not just at the next Stop. New tests: `TestRecordMemorySignalsSyncLoop`,
+   `TestRecordBugSignalsSyncLoop`, `TestCompleteTodoSignalsSyncLoopOnlyWhenCompleted`,
+   `TestForgetMemorySignalsSyncLoopOnlyWhenFound`.
+
+Not added: an end-to-end test of the session-start/Stop hook wiring driving a real
+`Syncer` against a live server. `internal/remotesync/sync_test.go`'s integration tests
+already exercise `Syncer.Pull`/`Push` end-to-end (two-machine convergence, offline
+catch-up, bootstrap) via a unix-socket server (this sandbox blocks loopback TCP); doing
+the same from `internal/agents` would require adding transport injection to
+`remotesync.Client` purely for that test, which felt like more surface than the
+two-line hook change (`boundedSync` for `Push`, mirroring the already-shipped `Pull`)
+warranted this pass — flagging it rather than silently skipping it.
+
+Verification after round 2: `go build ./...`, `go vet ./...` clean; `gofmt -l .`
+clean except the same pre-existing unrelated file; `go test ./...` green except the
+same pre-existing `internal/update` `TestHTTPFetcher` failure; `-race` clean on
+`internal/memory`, `internal/remotesync`, `internal/syncserver`, `internal/mcp`,
+`internal/agents` (+ its `claudecode`/`copilot`/`opencode` subpackages), `internal/app`.

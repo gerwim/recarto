@@ -91,6 +91,7 @@ func recordMemory(ctx context.Context, a *app.App, in RecordMemoryInput) (Record
 	if err != nil {
 		return RecordMemoryOutput{}, err
 	}
+	a.SignalSync()
 	out := RecordMemoryOutput{ID: id, Reinforced: reinforced}
 	for _, c := range conflicts {
 		out.ConflictCandidates = append(out.ConflictCandidates, ConflictCandidateOut{
@@ -182,6 +183,9 @@ func completeTodo(ctx context.Context, a *app.App, in CompleteTodoInput) (Comple
 	if err != nil {
 		return CompleteTodoOutput{}, err
 	}
+	if ok {
+		a.SignalSync()
+	}
 	return CompleteTodoOutput{Completed: ok}, nil
 }
 
@@ -253,6 +257,7 @@ func recordBug(ctx context.Context, a *app.App, in RecordBugInput) (RecordBugOut
 	if err != nil {
 		return RecordBugOutput{}, err
 	}
+	a.SignalSync()
 	return RecordBugOutput{ID: id, Reinforced: reinforced}, nil
 }
 
@@ -356,6 +361,9 @@ func forgetMemory(ctx context.Context, a *app.App, in ForgetMemoryInput) (Forget
 	ok, err := a.Engine.Forget(ctx, in.ID, in.Reason)
 	if err != nil {
 		return ForgetMemoryOutput{}, err
+	}
+	if ok {
+		a.SignalSync()
 	}
 	return ForgetMemoryOutput{Forgotten: ok}, nil
 }

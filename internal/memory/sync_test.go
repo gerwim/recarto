@@ -2,10 +2,12 @@ package memory
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
 	"git.gerwim.nl/gerwim/recarto/internal/clock"
+	"git.gerwim.nl/gerwim/recarto/internal/store"
 	"git.gerwim.nl/gerwim/recarto/internal/syncwire"
 )
 
@@ -402,5 +404,157 @@ func TestPendingPushClearedAfterPush(t *testing.T) {
 	}
 	if len(pending) != 0 {
 		t.Fatalf("ClearPushed must empty the outbox, got %+v", pending)
+	}
+}
+
+func TestCompleteTodoQueuesForPushWithDoneStatus(t *testing.T) {
+	e := newTestEngine(t, clock.NewFake(time.UnixMilli(1_000_000)))
+	ctx := context.Background()
+
+	id, _, _, err := e.Record(ctx, NewMemory{Kind: KindTodo, Title: "t", Body: "ship the feature"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := e.ClearPushed(ctx, []string{id}); err != nil {
+		t.Fatal(err)
+	}
+
+	if ok, err := e.CompleteTodo(ctx, id); err != nil || !ok {
+		t.Fatalf("CompleteTodo: ok=%v err=%v", ok, err)
+	}
+
+	pending, err := e.PendingPush(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 1 || pending[0].ID != id {
+		t.Fatalf("completing a todo must queue it for push, got %+v", pending)
+	}
+	if pending[0].Status != "done" {
+		t.Fatalf("pushed record must carry the done status, got %+v", pending[0])
+	}
+}
+
+func TestResolveFeedbackQueuesForPush(t *testing.T) {
+	e := newTestEngine(t, clock.NewFake(time.UnixMilli(1_000_000)))
+	ctx := context.Background()
+
+	id, _, _, err := e.Record(ctx, NewMemory{Kind: KindFeedback, Title: "t", Body: "recarto ranked the wrong result first"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := e.ClearPushed(ctx, []string{id}); err != nil {
+		t.Fatal(err)
+	}
+
+	if ok, err := e.ResolveFeedback(ctx, id, "fixed in v2"); err != nil || !ok {
+		t.Fatalf("ResolveFeedback: ok=%v err=%v", ok, err)
+	}
+
+	pending, err := e.PendingPush(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 1 || pending[0].ID != id || pending[0].Status != "resolved" {
+		t.Fatalf("resolving feedback must queue it for push as resolved, got %+v", pending)
+	}
+}
+
+func TestSupersedeQueuesOldMemoryForPush(t *testing.T) {
+	e := newTestEngine(t, clock.NewFake(time.UnixMilli(1_000_000)))
+	ctx := context.Background()
+
+	oldID, _, _, err := e.Record(ctx, NewMemory{Kind: KindDecision, Title: "t", Body: "use sqlite directly"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := e.ClearPushed(ctx, []string{oldID}); err != nil {
+		t.Fatal(err)
+	}
+
+	newID, _, _, err := e.Record(ctx, NewMemory{
+		Kind: KindDecision, Title: "t2", Body: "use a query builder instead", SupersedesID: oldID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	pending, err := e.PendingPush(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byID := map[string]syncwire.Record{}
+	for _, p := range pending {
+		byID[p.ID] = p
+	}
+	if _, ok := byID[newID]; !ok {
+		t.Fatalf("the new superseding record must be queued for push, got %+v", pending)
+	}
+	old, ok := byID[oldID]
+	if !ok {
+		t.Fatalf("an explicitly superseded record must also be queued for push (other machines must stop treating it as active), got %+v", pending)
+	}
+	if old.Status != "superseded" || old.SupersededBy != newID {
+		t.Fatalf("superseded record's wire status must reflect the supersede, got %+v", old)
+	}
+}
+
+func TestSyncApplyBootstrapInsertLandsNonActiveStatus(t *testing.T) {
+	e := newTestEngine(t, clock.NewFake(time.UnixMilli(1_000_000)))
+	ctx := context.Background()
+
+	// Simulates a fresh machine bootstrapping (pulling for the very first time)
+	// a todo that was already completed on the origin machine before this one
+	// ever saw it: the id has never existed locally, so SyncApply takes the
+	// insert path — it must not resurrect the todo as active.
+	rec := syncwire.Record{
+		ID: "todo-done-1", Kind: string(KindTodo), Title: "t", Body: "ship the feature",
+		Status: "done", CreatedAt: 500, UpdatedAt: 700,
+	}
+	out, id, err := e.SyncApply(ctx, rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != SyncInserted || id != "todo-done-1" {
+		t.Fatalf("want inserted todo-done-1, got %v %s", out, id)
+	}
+	got, err := e.GetByID(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != "done" {
+		t.Fatalf("bootstrap insert must preserve the incoming non-active status, got %+v", got)
+	}
+	active, err := e.ActiveTodos(ctx, "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range active {
+		if a.ID == id {
+			t.Fatalf("a bootstrapped done todo must not surface as an active todo: %+v", a)
+		}
+	}
+}
+
+func TestSyncApplyTxHookFailureRollsBackTheMerge(t *testing.T) {
+	e := newTestEngine(t, clock.NewFake(time.UnixMilli(1_000_000)))
+	ctx := context.Background()
+
+	rec := syncwire.Record{
+		ID: "r1", Kind: string(KindLearning), Title: "t", Body: "a durable learning about retries",
+		CreatedAt: 500, UpdatedAt: 700,
+	}
+	hookErr := errors.New("simulated index-bump failure")
+	_, _, err := e.SyncApplyTx(ctx, rec, func(c store.Conn, outcome SyncOutcome, canonID string) error {
+		return hookErr
+	})
+	if !errors.Is(err, hookErr) {
+		t.Fatalf("SyncApplyTx must surface the hook's error, got %v", err)
+	}
+	// The whole write transaction — merge AND hook — must roll back together:
+	// this is the atomicity the hook exists to provide (the sync server's
+	// seq/sync_index bump must never be separable from the memory it indexes).
+	if got, _ := e.GetByID(ctx, "r1"); got != nil {
+		t.Fatalf("a failed afterApply hook must roll back the merge too, but the row was committed: %+v", got)
 	}
 }
