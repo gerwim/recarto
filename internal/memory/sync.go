@@ -495,6 +495,28 @@ func (e *Engine) upsertSyncMerge(ctx context.Context, c store.Conn, id, canonID 
 	return err
 }
 
+// tombstoneCovers reports whether a tombstone on id — or on the canonical id
+// that id was previously near-dup-merged into via memory_sync_merges — exists
+// at deleted_at >= clock. It mirrors SyncApplyTx's non-deleted resurrection
+// guard (lines 109-134 above) so ImportMemory's legacy committed-snapshot path
+// cannot reinsert a memory that HTTP sync has already forgotten elsewhere.
+func (e *Engine) tombstoneCovers(ctx context.Context, c store.Conn, id string, clock int64) (bool, error) {
+	tombAt, hasTomb, err := e.getTombstone(ctx, c, id)
+	if err != nil {
+		return false, err
+	}
+	if canonID, _, ok, err := e.getSyncMerge(ctx, c, id); err != nil {
+		return false, err
+	} else if ok {
+		if aliasTombAt, aliasHasTomb, err := e.getTombstone(ctx, c, canonID); err != nil {
+			return false, err
+		} else if aliasHasTomb && (!hasTomb || aliasTombAt > tombAt) {
+			tombAt, hasTomb = aliasTombAt, aliasHasTomb
+		}
+	}
+	return hasTomb && tombAt >= clock, nil
+}
+
 // clearSyncMerge retires any recorded "id merged into some canonical row"
 // alias for id. Called when id is (re)inserted as an actual row of its own,
 // so a stale alias from a defunct prior merge can never misdirect a later

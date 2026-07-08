@@ -4,7 +4,9 @@ import (
 	"context"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -12,6 +14,7 @@ import (
 	"git.gerwim.nl/gerwim/recarto/internal/gitctx"
 	"git.gerwim.nl/gerwim/recarto/internal/ledger"
 	"git.gerwim.nl/gerwim/recarto/internal/memory"
+	"git.gerwim.nl/gerwim/recarto/internal/snapshot"
 	"git.gerwim.nl/gerwim/recarto/internal/store"
 	"git.gerwim.nl/gerwim/recarto/internal/syncserver"
 )
@@ -204,6 +207,89 @@ func TestForgetPropagatesAndDoesNotResurrect(t *testing.T) {
 	}
 	if got, _ := b.eng.GetByID(ctx, id); got != nil {
 		t.Fatalf("a later sync cycle resurrected the forgotten memory: %+v", got)
+	}
+}
+
+// TestForgetThenStaleSnapshotDoesNotResurrect reproduces the round-7 gap at
+// the full two-machine integration layer: the exact session-start sequence
+// (pull tombstone → import a stale committed snapshot) must not resurrect a
+// memory the fleet already forgot, and must not re-queue it for push.
+func TestForgetThenStaleSnapshotDoesNotResurrect(t *testing.T) {
+	httpClient := newSharedServer(t)
+	repoKey := "repo-forget-snapshot"
+
+	a := newMachine(t)
+	b := newMachine(t)
+	syncA := a.syncer(t, httpClient, repoKey)
+	syncB := b.syncer(t, httpClient, repoKey)
+	ctx := context.Background()
+
+	id, _, _, err := a.eng.Record(ctx, memory.NewMemory{Kind: memory.KindLearning, Title: "t", Body: "ephemeral shared note for snapshot test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := syncA.Push(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := syncB.Pull(ctx); err != nil {
+		t.Fatal(err)
+	}
+	before, err := b.eng.GetByID(ctx, id)
+	if err != nil || before == nil {
+		t.Fatalf("setup: B should have the memory before forgetting it: %v %v", before, err)
+	}
+
+	// B has a stale committed .recarto/memory.jsonl that still lists this id —
+	// e.g. checked into the repo before the memory was forgotten anywhere.
+	repoDir := t.TempDir()
+	snapPath := filepath.Join(repoDir, ".recarto", "memory.jsonl")
+	if err := os.MkdirAll(filepath.Dir(snapPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(snapPath, []byte(
+		`{"id":"`+id+`","kind":"learning","title":"t","body":"ephemeral shared note for snapshot test","confidence":1,"created_at":`+
+			strconv.FormatInt(before.CreatedAt, 10)+`}`+"\n",
+	), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// A forgets the memory and pushes the tombstone.
+	if ok, err := a.eng.Forget(ctx, id, "no longer relevant"); err != nil || !ok {
+		t.Fatalf("Forget: ok=%v err=%v", ok, err)
+	}
+	if err := syncA.Push(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	// B's session-start sequence: pull (learns the tombstone, deletes the row),
+	// then import the stale snapshot (must NOT resurrect it).
+	if err := syncB.Pull(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := b.eng.GetByID(ctx, id); got != nil {
+		t.Fatalf("setup: B should have deleted the memory after pulling the tombstone: %+v", got)
+	}
+	ins, err := snapshot.SyncOnSessionStart(ctx, b.eng, b.st, repoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ins != 0 {
+		t.Fatalf("importing the stale snapshot must not insert the forgotten memory, got %d", ins)
+	}
+	if got, _ := b.eng.GetByID(ctx, id); got != nil {
+		t.Fatalf("stale snapshot import resurrected a forgotten memory: %+v", got)
+	}
+
+	// B's subsequent push must not re-send it (the import must not have queued
+	// it in the outbox).
+	if err := syncB.Push(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := syncA.Pull(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := a.eng.GetByID(ctx, id); got != nil {
+		t.Fatalf("A must not see the forgotten memory reappear via B's push: %+v", got)
 	}
 }
 

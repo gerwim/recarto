@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"git.gerwim.nl/gerwim/recarto/internal/clock"
+	"git.gerwim.nl/gerwim/recarto/internal/syncwire"
 )
 
 func TestImportMemoryInsertReinforceSkip(t *testing.T) {
@@ -142,5 +143,214 @@ func TestImportMemoryQueuesRowsForHTTPPush(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("an ImportMemory reinforce must queue the canonical row for push, got %+v", pending)
+	}
+}
+
+// TestImportMemorySkipsTombstonedID reproduces the round-7 gap: a stale
+// committed .recarto/memory.jsonl snapshot still lists an id that was Forgotten
+// locally (the row and its MinHash bands are gone). Importing it must not
+// resurrect the memory.
+func TestImportMemorySkipsTombstonedID(t *testing.T) {
+	e := newTestEngine(t, clock.Real{})
+	ctx := context.Background()
+
+	id, _, _, err := e.Record(ctx, NewMemory{Kind: KindLearning, Title: "t", Body: "ephemeral note about caches"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, _ := e.GetByID(ctx, id)
+	clearOutbox(t, e, ctx, id)
+	if ok, err := e.Forget(ctx, id, "test"); err != nil || !ok {
+		t.Fatalf("Forget: ok=%v err=%v", ok, err)
+	}
+
+	stale := ImportMemory{
+		ID: id, Kind: KindLearning, Title: "t", Body: "ephemeral note about caches",
+		CreatedAt: before.CreatedAt,
+	}
+	out, _, err := e.ImportMemory(ctx, stale)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != ImportSkipped {
+		t.Fatalf("a stale snapshot record for a tombstoned id must be skipped, got %v", out)
+	}
+	if got, _ := e.GetByID(ctx, id); got != nil {
+		t.Fatalf("tombstoned id must not be resurrected: %+v", got)
+	}
+	pending, err := e.PendingPush(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range pending {
+		if p.Record.ID == id {
+			t.Fatalf("a skipped tombstoned import must not be queued for push: %+v", pending)
+		}
+	}
+	all, err := e.List(ctx, ListFilter{Kind: KindLearning})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range all {
+		if r.ID == id {
+			t.Fatalf("a tombstoned id must not surface after a stale import, got %+v", all)
+		}
+	}
+}
+
+// TestImportMemorySkipsTombstonedIDLearnedViaSyncApply is the same scenario,
+// but the tombstone was learned via the actual session-start pull mechanism
+// (SyncApply applying a remote delete), not a local Forget — this is the exact
+// "pull tombstone, then legacy snapshot still lists the id" sequence.
+func TestImportMemorySkipsTombstonedIDLearnedViaSyncApply(t *testing.T) {
+	e := newTestEngine(t, clock.Real{})
+	ctx := context.Background()
+
+	id, _, _, err := e.Record(ctx, NewMemory{Kind: KindLearning, Title: "t", Body: "always jitter retry backoff"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, _ := e.GetByID(ctx, id)
+	deleteAt := before.UpdatedAt + 1000
+	if out, _, err := e.SyncApply(ctx, syncwire.Record{ID: id, Deleted: true, UpdatedAt: deleteAt}); err != nil || out != SyncTombstoned {
+		t.Fatalf("setup tombstone via SyncApply: out=%v err=%v", out, err)
+	}
+
+	stale := ImportMemory{
+		ID: id, Kind: KindLearning, Title: "t", Body: "always jitter retry backoff",
+		CreatedAt: before.CreatedAt,
+	}
+	out, _, err := e.ImportMemory(ctx, stale)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != ImportSkipped {
+		t.Fatalf("a stale snapshot import of a remotely-tombstoned id must be skipped, got %v", out)
+	}
+	if got, _ := e.GetByID(ctx, id); got != nil {
+		t.Fatalf("id learned as tombstoned via sync pull must not be resurrected by snapshot import: %+v", got)
+	}
+}
+
+// TestImportMemoryAllowsReauthoredIDAfterTombstone guards against
+// over-blocking: an id whose alias was merged into a since-tombstoned
+// canonical row may legitimately reinsert as its own row when its CreatedAt is
+// newer than the tombstone — mirroring SyncApply's "a record strictly newer
+// than the tombstone may reinsert" rule. The reinsertion must also retire the
+// stale alias so a later tombstone for the same id deletes the right row.
+func TestImportMemoryAllowsReauthoredIDAfterTombstone(t *testing.T) {
+	e := newTestEngine(t, clock.Real{})
+	ctx := context.Background()
+
+	canonID, _, _, err := e.Record(ctx, NewMemory{
+		Kind: KindLearning, Title: "t", Body: "always cap goroutine pool size under load",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	clearOutbox(t, e, ctx, canonID)
+
+	// Merge alias "origin-b" -> canonID via SyncApply's near-dup reinforce path.
+	dup := syncwire.Record{
+		ID: "origin-b", Kind: string(KindLearning), Title: "t",
+		Body: "always cap goroutine pool size under load!", CreatedAt: 500, UpdatedAt: 500,
+	}
+	out, mergedInto, err := e.SyncApply(ctx, dup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != SyncReinforced || mergedInto != canonID {
+		t.Fatalf("setup: want reinforced into %s, got %v %s", canonID, out, mergedInto)
+	}
+
+	canonAfterMerge, _ := e.GetByID(ctx, canonID)
+	deleteAt := canonAfterMerge.UpdatedAt + 1000
+	if out, target, err := e.SyncApply(ctx, syncwire.Record{ID: "origin-b", Deleted: true, UpdatedAt: deleteAt}); err != nil || out != SyncTombstoned || target != canonID {
+		t.Fatalf("setup tombstone via alias: out=%v target=%s err=%v", out, target, err)
+	}
+
+	// A snapshot record for "origin-b" with a CreatedAt strictly NEWER than the
+	// tombstone must be allowed through (a genuine re-authoring), not blocked.
+	reauthored := ImportMemory{
+		ID: "origin-b", Kind: KindLearning, Title: "t",
+		Body: "always cap goroutine pool size under load, reborn", CreatedAt: deleteAt + 1000,
+	}
+	out2, id2, err := e.ImportMemory(ctx, reauthored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out2 != ImportInserted || id2 != "origin-b" {
+		t.Fatalf("a record newer than the tombstone must legitimately reinsert, got %v %s", out2, id2)
+	}
+	if got, _ := e.GetByID(ctx, "origin-b"); got == nil {
+		t.Fatal("reauthored id must exist as its own row")
+	}
+
+	// A later tombstone for "origin-b" must delete THAT row, not misdirect
+	// through the stale (pre-reinsertion) alias to the long-gone canonical id.
+	forgetAt := deleteAt + 2000
+	out3, target3, err := e.SyncApply(ctx, syncwire.Record{ID: "origin-b", Deleted: true, UpdatedAt: forgetAt})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out3 != SyncTombstoned || target3 != "origin-b" {
+		t.Fatalf("a stale alias must not misdirect the tombstone: want target=origin-b, got out=%v target=%s", out3, target3)
+	}
+	if got, _ := e.GetByID(ctx, "origin-b"); got != nil {
+		t.Fatalf("the reauthored row must be deleted, but survived: %+v", got)
+	}
+}
+
+// TestImportMemoryTombstoneGuardResolvesAlias exercises the aliased-canonical
+// branch of tombstoneCovers directly: the tombstone is recorded under the
+// CANONICAL id, and the import id is only linked to it via memory_sync_merges.
+func TestImportMemoryTombstoneGuardResolvesAlias(t *testing.T) {
+	e := newTestEngine(t, clock.Real{})
+	ctx := context.Background()
+
+	canonID, _, _, err := e.Record(ctx, NewMemory{
+		Kind: KindLearning, Title: "t", Body: "always vendor go modules for reproducible builds",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	clearOutbox(t, e, ctx, canonID)
+
+	dup := syncwire.Record{
+		ID: "origin-c", Kind: string(KindLearning), Title: "t",
+		Body: "always vendor go modules for reproducible builds!", CreatedAt: 500, UpdatedAt: 500,
+	}
+	out, mergedInto, err := e.SyncApply(ctx, dup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != SyncReinforced || mergedInto != canonID {
+		t.Fatalf("setup: want reinforced into %s, got %v %s", canonID, out, mergedInto)
+	}
+
+	canonAfterMerge, _ := e.GetByID(ctx, canonID)
+	deleteAt := canonAfterMerge.UpdatedAt + 1000
+	if out, target, err := e.SyncApply(ctx, syncwire.Record{ID: "origin-c", Deleted: true, UpdatedAt: deleteAt}); err != nil || out != SyncTombstoned || target != canonID {
+		t.Fatalf("setup tombstone via alias: out=%v target=%s err=%v", out, target, err)
+	}
+
+	// A snapshot import for "origin-c" whose CreatedAt is at-or-before the
+	// canonical tombstone must be dropped, resolved through the alias.
+	stale := ImportMemory{
+		ID: "origin-c", Kind: KindLearning, Title: "t",
+		Body: "always vendor go modules for reproducible builds!", CreatedAt: deleteAt - 1,
+	}
+	out2, _, err := e.ImportMemory(ctx, stale)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out2 != ImportSkipped {
+		t.Fatalf("import must resolve the alias to the canonical tombstone and skip, got %v", out2)
+	}
+	if got, _ := e.GetByID(ctx, "origin-c"); got != nil {
+		t.Fatalf("aliased id must not be resurrected: %+v", got)
+	}
+	if got, _ := e.GetByID(ctx, canonID); got != nil {
+		t.Fatalf("canonical row must stay deleted: %+v", got)
 	}
 }

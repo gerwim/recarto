@@ -65,6 +65,18 @@ func (e *Engine) ImportMemory(ctx context.Context, im ImportMemory) (ImportOutco
 			return err
 		}
 
+		// A stale committed .recarto/memory.jsonl snapshot may still list an id
+		// that HTTP sync has since forgotten elsewhere (the row and its MinHash
+		// bands were already deleted, so findNearDup below has nothing left to
+		// match against). Without this guard, that id would look identical to a
+		// fresh insert and resurrect a memory the fleet already agreed to forget.
+		if covered, terr := e.tombstoneCovers(ctx, c, im.ID, im.CreatedAt); terr != nil {
+			return terr
+		} else if covered {
+			outcome = ImportSkipped
+			return nil
+		}
+
 		candID, found, _, ferr := e.findNearDup(ctx, c, im.Kind, bands, set)
 		if ferr != nil {
 			return ferr
@@ -92,6 +104,13 @@ func (e *Engine) ImportMemory(ctx context.Context, im ImportMemory) (ImportOutco
 		// imported memory preserves its original timestamps rather than appearing
 		// artificially fresh in recency-ranked recall.
 		if err := e.insert(ctx, c, im.ID, nm, searchText, sim, bands, im.CreatedAt); err != nil {
+			return err
+		}
+		// im.ID may carry a stale memory_sync_merges alias from an earlier merge
+		// (see syncApplyAbsent's identical precaution): retire it now that im.ID
+		// is a real row again, so a later tombstone for im.ID resolves to im.ID
+		// itself rather than being misdirected through a defunct alias.
+		if err := e.clearSyncMerge(ctx, c, im.ID); err != nil {
 			return err
 		}
 		if _, err := c.ExecContext(ctx,

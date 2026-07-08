@@ -599,3 +599,77 @@ this change); `-race` clean on `internal/memory`, `internal/remotesync`,
 `internal/syncserver`, `internal/agents` (+ subpackages), `internal/mcp`,
 `internal/app`, `internal/cli`, `internal/snapshot`, `internal/store`. Go
 was available in this session (`/usr/local/go/bin`, not on default `PATH`).
+
+## Round 13 — review fix: legacy snapshot import resurrected tombstoned memories
+
+A review pass found that the legacy `.recarto/memory.jsonl` snapshot-import
+path (`internal/snapshot` → `internal/memory.ImportMemory`) never consulted
+`memory_tombstones`. Session start runs pull → snapshot import → push
+(`internal/agents/handle.go`); the pull applies a remote tombstone via
+`SyncApply` (deleting the row and its MinHash bands), but a stale committed
+snapshot that still lists the same id would then look, to `ImportMemory`,
+identical to a fresh insert: the existence check misses (the row was just
+deleted) and `findNearDup` finds nothing (its bands are gone too), so the id
+was reinserted and queued for push — resurrecting a memory the fleet had
+already agreed to forget.
+
+Fixed by giving `ImportMemory` the same resurrection guard `SyncApply`
+already applies to non-deleted records: a new `Engine.tombstoneCovers`
+helper (`internal/memory/sync.go`) resolves the incoming id through
+`memory_sync_merges` to its canonical id (an id may be a non-canonical alias
+from an earlier near-dup reinforce, which never creates its own row), reads
+the tombstone at both the raw id and the resolved canonical id, and reports
+whether the later of the two is `>= clock`. `ImportMemory` calls it, keyed
+on `im.CreatedAt` (the snapshot record's authored logical clock, since the
+wire snapshot shape carries no `updated_at`), immediately after the
+existence check and before `findNearDup` — a covered id is dropped as
+`ImportSkipped` before any insert or reinforce, so it never `markDirty`s and
+is never queued for push. A genuinely newer re-authoring (`CreatedAt` after
+the tombstone) is still allowed through, mirroring `SyncApply`'s "strictly
+newer than the tombstone may reinsert" rule; on that insert branch,
+`ImportMemory` also now calls `clearSyncMerge` (mirroring `syncApplyAbsent`'s
+identical precaution) so a stale pre-tombstone alias can never misdirect a
+later tombstone for the same id to the wrong, already-deleted canonical row.
+
+New tests: `TestImportMemorySkipsTombstonedID` and
+`TestImportMemorySkipsTombstonedIDLearnedViaSyncApply`
+(`internal/memory/importmem_test.go`) cover the same-id guard, the latter via
+the actual pull mechanism (`SyncApply` applying a remote delete);
+`TestImportMemoryAllowsReauthoredIDAfterTombstone` and
+`TestImportMemoryTombstoneGuardResolvesAlias` cover the alias-resolution
+branch and the over-blocking guard (a legitimately newer re-authoring must
+still succeed, and must retire its stale alias). `internal/snapshot`'s
+`TestSyncOnSessionStartDoesNotResurrectForgottenMemory` exercises the real
+`Import → ImportMemory` path end-to-end within the package.
+`internal/remotesync`'s `TestForgetThenStaleSnapshotDoesNotResurrect` drives
+the full two-machine sequence against a real server/client: machine A
+records and pushes a memory, B pulls it, B has a stale snapshot listing the
+same id, A forgets it and pushes the tombstone, B's session-start sequence
+(pull, then stale-snapshot import) leaves the memory deleted and does not
+re-push it.
+
+**Known residual limitation (not a regression, out of scope for this fix):**
+the id-based guard cannot catch a snapshot record under a *different* id
+whose body is a near-duplicate of a memory that was forgotten elsewhere —
+the forgotten row's MinHash bands were deleted along with it, so
+`findNearDup` has nothing left to match, and there is no `memory_sync_merges`
+alias linking the two ids (that alias is only created when a near-dup
+reinforce actually happens against a still-live row). Closing this would
+require retaining a forgotten row's content fingerprints after deletion,
+which is both extra storage and a privacy question (keeping forgotten
+content's shingles around). In practice this is second-order:
+`.recarto/memory.jsonl` is a periodically-refreshed export of one machine's
+*active* memories, and the forget tombstone itself already propagates over
+HTTP to every machine that syncs, so the window in which a stale snapshot
+under a fresh id could reintroduce equivalent content is narrow.
+
+Verification after round 13: `go build ./...`, `go vet ./...` clean;
+`gofmt -l .` clean on all touched files (same pre-existing unrelated
+exception as before, `internal/mcp/handlers_feedback_test.go`); new tests
+confirmed to fail against a stash of the pre-fix `internal/memory/sync.go`
+and `internal/memory/importmem.go`, and pass after; `go test ./...` green
+except the same pre-existing, environment-specific `internal/update`
+`TestHTTPFetcher` loopback failure; `-race` clean on `internal/memory`,
+`internal/snapshot`, `internal/remotesync`, `internal/agents`,
+`internal/syncserver`. Full targeted regression re-run (all prior-round
+tests) green throughout.
