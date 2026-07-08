@@ -155,8 +155,15 @@ func (e *Engine) syncApplyExisting(ctx context.Context, c store.Conn, rec syncwi
 	}
 
 	if rec.UpdatedAt > local.updatedAt {
-		refs := refsFromWire(rec.Refs)
-		searchText := BuildSearchText(rec.Title, rec.Body, refs)
+		// search_text must reflect the UNIONED ref set (local ∪ incoming, just
+		// written above), not merely rec.Refs — otherwise a newer remote update
+		// that omits a ref the local row already had would silently drop that
+		// ref from lexical recall/FTS even though memory_refs still lists it.
+		unionedRefs, err := e.loadRefsTx(ctx, c, rec.ID)
+		if err != nil {
+			return SyncNoop, err
+		}
+		searchText := BuildSearchText(rec.Title, rec.Body, unionedRefs)
 		set := shingleSet(rec.Body)
 		bands := bandHashes(minHashSignature(set))
 		sim := simHash64(set)
@@ -343,6 +350,26 @@ func (e *Engine) rewriteMinhash(ctx context.Context, c store.Conn, id string, ba
 		}
 	}
 	return nil
+}
+
+// loadRefsTx reads id's current ref set on c (the same open transaction that
+// just unioned incoming refs into memory_refs via INSERT OR IGNORE), so a
+// search_text rebuild sees local ∪ incoming refs rather than only one side.
+func (e *Engine) loadRefsTx(ctx context.Context, c store.Conn, id string) ([]Ref, error) {
+	rows, err := c.QueryContext(ctx, `SELECT ref_type, ref_value FROM memory_refs WHERE memory_id = ?`, id)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var refs []Ref
+	for rows.Next() {
+		var t, v string
+		if err := rows.Scan(&t, &v); err != nil {
+			return nil, err
+		}
+		refs = append(refs, Ref{Type: RefType(t), Value: v})
+	}
+	return refs, rows.Err()
 }
 
 // refsFromWire converts wire refs to the engine's Ref type.

@@ -3,6 +3,7 @@ package memory
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -130,6 +131,57 @@ func TestSyncApplyLWWUpdateNewerWins(t *testing.T) {
 	}
 	if after.ReinforcementCount != 5 {
 		t.Fatalf("reinforcement_count must take the incoming MAX: %+v", after)
+	}
+}
+
+// TestSyncApplyLWWUpdatePreservesUnionedRefsInSearchText proves a same-id
+// newer-wins update reindexes search_text/FTS from the UNIONED ref set (local
+// ∪ incoming), not merely the incoming record's refs. memory_refs itself is
+// already unioned (INSERT OR IGNORE); before this fix, a newer remote update
+// carrying fewer/different refs than the local row would still union the DB
+// rows but silently drop the local-only ref from lexical recall, since
+// search_text/FTS were rebuilt from rec.Refs alone.
+func TestSyncApplyLWWUpdatePreservesUnionedRefsInSearchText(t *testing.T) {
+	e := newTestEngine(t, clock.NewFake(time.UnixMilli(1_000_000)))
+	ctx := context.Background()
+
+	id, _, _, err := e.Record(ctx, NewMemory{
+		Kind: KindLearning, Title: "t", Body: "retry storage writes on conflict",
+		Refs: []Ref{{Type: RefType("file"), Value: "storage/local_only_ref.go"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, _ := e.GetByID(ctx, id)
+
+	rec := syncwire.Record{
+		ID: id, Kind: string(KindLearning), Title: "t", Body: "retry storage writes on conflict, revised",
+		Refs:      []syncwire.Ref{{Type: "file", Value: "storage/remote_only_ref.go"}},
+		CreatedAt: before.CreatedAt, UpdatedAt: before.UpdatedAt + 1000,
+	}
+	out, canon, err := e.SyncApply(ctx, rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != SyncUpdated || canon != id {
+		t.Fatalf("want updated %s, got %v %s", id, out, canon)
+	}
+	after, err := e.GetByID(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(after.SearchText, "local_only_ref") {
+		t.Fatalf("search_text must still contain the pre-existing local ref after a newer sync update, got %q", after.SearchText)
+	}
+	if !strings.Contains(after.SearchText, "remote_only_ref") {
+		t.Fatalf("search_text must contain the incoming ref, got %q", after.SearchText)
+	}
+	refValues := map[string]bool{}
+	for _, r := range after.Refs {
+		refValues[r.Value] = true
+	}
+	if !refValues["storage/local_only_ref.go"] || !refValues["storage/remote_only_ref.go"] {
+		t.Fatalf("memory_refs must contain both refs (already unioned), got %+v", after.Refs)
 	}
 }
 
