@@ -289,6 +289,115 @@ func TestSyncApplyExistingOlderKeepsLocalButMaxesSoftSignals(t *testing.T) {
 	}
 }
 
+// ftsCount reports how many memories_fts rows exist for id (0 or 1 — Index/
+// Delete never leave duplicates).
+func ftsCount(t *testing.T, e *Engine, id string) int {
+	t.Helper()
+	var n int
+	if err := e.st.DB.QueryRow(`SELECT COUNT(*) FROM memories_fts WHERE memory_id=?`, id).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+// TestSyncApplyLWWUpdateWithTerminalStatusDropsFromFTS proves a newer-wins
+// same-id update that carries a terminal incoming status (done/resolved/
+// superseded — e.g. a todo completed on another machine, pulled in here)
+// removes the row from the lexical FTS index, exactly like the local
+// completion paths (CompleteTodo/ResolveFeedback/an explicit supersede)
+// already do. Before this fix, syncApplyExisting's newer-wins branch always
+// re-indexed FTS regardless of status, so a remote completion pulled in here
+// would keep crowding active memories out of lexical recall's ranked
+// candidates even though recall's status filter would eventually exclude it.
+func TestSyncApplyLWWUpdateWithTerminalStatusDropsFromFTS(t *testing.T) {
+	e := newTestEngine(t, clock.NewFake(time.UnixMilli(1_000_000)))
+	ctx := context.Background()
+
+	id, _, _, err := e.Record(ctx, NewMemory{Kind: KindTodo, Title: "t", Body: "ship the feature"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, _ := e.GetByID(ctx, id)
+	if ftsCount(t, e, id) != 1 {
+		t.Fatal("setup: an active todo must be FTS-indexed")
+	}
+
+	rec := syncwire.Record{
+		ID: id, Kind: string(KindTodo), Title: "t", Body: "ship the feature",
+		Status: "done", CreatedAt: before.CreatedAt, UpdatedAt: before.UpdatedAt + 1000,
+	}
+	out, canon, err := e.SyncApply(ctx, rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != SyncUpdated || canon != id {
+		t.Fatalf("want updated %s, got %v %s", id, out, canon)
+	}
+	after, _ := e.GetByID(ctx, id)
+	if after.Status != "done" {
+		t.Fatalf("status must adopt the incoming terminal status: %+v", after)
+	}
+	if ftsCount(t, e, id) != 0 {
+		t.Fatal("a same-id sync update landing a terminal status must drop the row from memories_fts")
+	}
+}
+
+// TestSyncApplyStaleRecordAddingRefRebuildsSearchTextAndFTS proves the
+// keep-local-content branch (incoming record not newer than local) still
+// rebuilds search_text/FTS when the incoming record contributes a NEW ref —
+// memory_refs is unioned regardless of which side is newer, and before this
+// fix only the newer-wins branch kept search_text/FTS in step with that
+// union, leaving the index silently behind memory_refs whenever a stale/
+// equal record was the one carrying a new ref.
+func TestSyncApplyStaleRecordAddingRefRebuildsSearchTextAndFTS(t *testing.T) {
+	e := newTestEngine(t, clock.NewFake(time.UnixMilli(5_000_000)))
+	ctx := context.Background()
+
+	id, _, _, err := e.Record(ctx, NewMemory{
+		Kind: KindLearning, Title: "t", Body: "retry storage writes on conflict",
+		Refs: []Ref{{Type: RefType("file"), Value: "storage/local_only_ref.go"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, _ := e.GetByID(ctx, id)
+
+	// Older (or equal) incoming record — content must NOT change — but it
+	// carries a ref the local row doesn't have yet.
+	rec := syncwire.Record{
+		ID: id, Kind: string(KindLearning), Title: "should not appear", Body: "should not appear either",
+		Refs:      []syncwire.Ref{{Type: "file", Value: "storage/stale_side_ref.go"}},
+		CreatedAt: before.CreatedAt, UpdatedAt: before.UpdatedAt - 1,
+	}
+	out, canon, err := e.SyncApply(ctx, rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != SyncUpdated || canon != id {
+		t.Fatalf("want updated (ref-only merge) %s, got %v %s", id, out, canon)
+	}
+	after, err := e.GetByID(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Title != before.Title || after.Body != before.Body {
+		t.Fatalf("a stale incoming record must not overwrite content: %+v", after)
+	}
+	if !strings.Contains(after.SearchText, "local_only_ref") || !strings.Contains(after.SearchText, "stale_side_ref") {
+		t.Fatalf("search_text must be rebuilt from the unioned refs even on the stale-record path, got %q", after.SearchText)
+	}
+	if ftsCount(t, e, id) != 1 {
+		t.Fatal("the row is still active, so it must remain FTS-indexed")
+	}
+	var ftsText string
+	if err := e.st.DB.QueryRow(`SELECT search_text FROM memories_fts WHERE memory_id=?`, id).Scan(&ftsText); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(ftsText, "stale_side_ref") {
+		t.Fatalf("FTS entry must reflect the newly unioned ref, got %q", ftsText)
+	}
+}
+
 func TestSyncApplyIdempotentReapplyIsNoop(t *testing.T) {
 	e := newTestEngine(t, clock.NewFake(time.UnixMilli(1_000_000)))
 	ctx := context.Background()

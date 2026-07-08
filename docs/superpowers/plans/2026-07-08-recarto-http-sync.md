@@ -228,3 +228,56 @@ same pre-existing, environment-specific `internal/update` `TestHTTPFetcher`
 failure (confirmed unchanged on `master` too — this sandbox blocks loopback
 TCP); `-race` clean on `internal/memory`, `internal/remotesync`,
 `internal/syncserver`.
+
+## Round 6 — review fixes: terminal-status FTS leak and stale-record ref/FTS drift
+
+A review pass found two remaining gaps in `memory.syncApplyExisting`
+(`internal/memory/sync.go`), both in how the same-id merge path keeps
+`search_text`/FTS in step with `status` and `memory_refs` — round 5 only
+fixed the ref-union case for the newer-wins branch:
+
+1. **Newer-wins update landing a terminal status stayed FTS-indexed.** When
+   an incoming record was strictly newer and carried a terminal `status`
+   (`done`/`resolved`/`superseded` — e.g. a todo completed on another
+   machine, pulled in here), the branch unconditionally called
+   `e.lex.Delete` followed by `e.lex.Index`, re-adding the row to
+   `memories_fts` regardless of its new status. Every local completion path
+   (`CompleteTodo`, `ResolveFeedback`, an explicit supersede, and
+   `syncApplyAbsent`'s own bootstrap-insert handling of a non-active incoming
+   status) deletes from FTS and never re-indexes; this same-id sync path was
+   the one place that didn't match, so a remote completion pulled in here
+   would keep crowding active memories out of lexical recall's ranked
+   top-N candidates (recall's status filter only runs after FTS ranking).
+   Fixed: the newer-wins branch now always deletes the FTS entry, and only
+   re-indexes when the incoming (defaulted) status is `"active"`. New test:
+   `TestSyncApplyLWWUpdateWithTerminalStatusDropsFromFTS`.
+2. **A stale/equal record contributing a new ref never touched
+   `search_text`/FTS.** `memory_refs` is unioned via `INSERT OR IGNORE`
+   regardless of which side is newer (by design — refs never regress), but
+   only the newer-wins branch rebuilt `search_text`/FTS from that unioned
+   set (round 5's fix). The keep-local-content branch (incoming record not
+   newer) merged confidence/reinforcement/pinned but left `search_text`/FTS
+   built from whatever the row already had, even when the loop just above it
+   had inserted a genuinely new `memory_refs` row — silently drifting the
+   lexical index behind the structural ref set whenever the *older* side of
+   a sync happened to be the one carrying the new ref. Fixed: the branch now
+   tracks `refsChanged` separately from the general `changed` flag: when a
+   ref was newly unioned, it rebuilds `search_text` from local title/body
+   (unchanged) plus the unioned ref set, writes it back, and — only when the
+   row is still `active` — deletes and re-indexes the FTS entry (mirroring
+   the terminal-status guard from fix 1, so a completed/resolved/superseded
+   row never gets pulled back into the lexical pool by a later ref-only
+   sync). New test: `TestSyncApplyStaleRecordAddingRefRebuildsSearchTextAndFTS`.
+
+Both fixes share the same underlying rule, now applied consistently across
+every same-id sync branch: **`memories_fts` must contain a row for id if and
+only if the row's current status is `active`**, and whenever `search_text`
+is rebuilt it must be built from the unioned ref set, never one side alone.
+
+Verification after round 6: `go build ./...`, `go vet ./...` clean; `gofmt -l .`
+clean on all touched files (same pre-existing unrelated exception as before,
+`internal/mcp/handlers_feedback_test.go`); `go test ./...` green except the
+same pre-existing, environment-specific `internal/update` `TestHTTPFetcher`
+failure (confirmed unchanged on `master` too — this sandbox blocks loopback
+TCP); `-race` clean on `internal/memory`, `internal/remotesync`,
+`internal/syncserver`.

@@ -84,10 +84,10 @@ func (e *Engine) SyncApplyTx(ctx context.Context, rec syncwire.Record, afterAppl
 		default:
 			var local localRow
 			serr := c.QueryRowContext(ctx,
-				`SELECT title, body, updated_at, confidence, reinforcement_count, pinned
+				`SELECT title, body, updated_at, confidence, reinforcement_count, pinned, status
 				   FROM memories WHERE id=?`, rec.ID).
 				Scan(&local.title, &local.body, &local.updatedAt, &local.confidence,
-					&local.reinforcementCount, &local.pinned)
+					&local.reinforcementCount, &local.pinned, &local.status)
 			switch {
 			case serr == nil:
 				outcome, err = e.syncApplyExisting(ctx, c, rec, local)
@@ -119,6 +119,7 @@ type localRow struct {
 	confidence         float64
 	reinforcementCount int
 	pinned             bool
+	status             string
 }
 
 // syncApplyExisting merges rec into the local row at rec.ID (already
@@ -128,6 +129,7 @@ type localRow struct {
 // fingerprints) is overwritten only when rec is strictly newer (LWW).
 func (e *Engine) syncApplyExisting(ctx context.Context, c store.Conn, rec syncwire.Record, local localRow) (SyncOutcome, error) {
 	changed := false
+	refsChanged := false
 
 	newConfidence := local.confidence
 	if c2 := clampConfidence(rec.Confidence); c2 > newConfidence {
@@ -150,7 +152,7 @@ func (e *Engine) syncApplyExisting(ctx context.Context, c store.Conn, rec syncwi
 			return SyncNoop, err
 		}
 		if n, _ := res.RowsAffected(); n > 0 {
-			changed = true
+			changed, refsChanged = true, true
 		}
 	}
 
@@ -188,11 +190,19 @@ func (e *Engine) syncApplyExisting(ctx context.Context, c store.Conn, rec syncwi
 		if err := e.rewriteMinhash(ctx, c, rec.ID, bands); err != nil {
 			return SyncNoop, err
 		}
+		// A terminal incoming status (done/resolved/superseded) must drop out of
+		// the lexical index exactly like the local completion paths
+		// (CompleteTodo/ResolveFeedback/an explicit supersede) already do —
+		// otherwise a remote completion/resolution/supersede pulled in here
+		// would keep crowding active memories out of lexical recall's top-N FTS
+		// candidates (recall filters by status too, but only after FTS ranking).
 		if err := e.lex.Delete(ctx, c, rec.ID); err != nil {
 			return SyncNoop, err
 		}
-		if err := e.lex.Index(ctx, c, rec.ID, searchText); err != nil {
-			return SyncNoop, err
+		if status == "active" {
+			if err := e.lex.Index(ctx, c, rec.ID, searchText); err != nil {
+				return SyncNoop, err
+			}
 		}
 		return SyncUpdated, nil
 	}
@@ -204,6 +214,31 @@ func (e *Engine) syncApplyExisting(ctx context.Context, c store.Conn, rec syncwi
 		`UPDATE memories SET confidence=?, reinforcement_count=?, pinned=? WHERE id=?`,
 		newConfidence, newReinforcement, boolToInt(newPinned), rec.ID); err != nil {
 		return SyncNoop, err
+	}
+	// The incoming record was not newer, so title/body/status were kept as-is —
+	// but if it contributed a new ref, memory_refs is now unioned and
+	// search_text/FTS must follow, or the index silently falls out of sync with
+	// the ref set the row actually reports (structural recall would see the new
+	// ref; lexical would not). Only reindex FTS when the row is still active —
+	// a terminal row must stay out of the lexical candidate pool regardless.
+	if refsChanged {
+		unionedRefs, err := e.loadRefsTx(ctx, c, rec.ID)
+		if err != nil {
+			return SyncNoop, err
+		}
+		searchText := BuildSearchText(local.title, local.body, unionedRefs)
+		if _, err := c.ExecContext(ctx,
+			`UPDATE memories SET search_text=? WHERE id=?`, searchText, rec.ID); err != nil {
+			return SyncNoop, err
+		}
+		if local.status == "active" {
+			if err := e.lex.Delete(ctx, c, rec.ID); err != nil {
+				return SyncNoop, err
+			}
+			if err := e.lex.Index(ctx, c, rec.ID, searchText); err != nil {
+				return SyncNoop, err
+			}
+		}
 	}
 	return SyncUpdated, nil
 }
