@@ -205,3 +205,26 @@ failure (confirmed unchanged on `master` too — this sandbox blocks loopback
 TCP); `-race` clean on `internal/syncserver`, `internal/remotesync`,
 `internal/memory`, `internal/agents` (+ subpackages), `internal/app`,
 `internal/mcp`, `internal/store`, `internal/cli`, `internal/snapshot`.
+
+## Round 5 — review fix: unioned refs dropped from search_text on LWW update
+
+A review pass found that `memory.syncApplyExisting`'s newer-wins branch
+(`internal/memory/sync.go`) already unions incoming refs into `memory_refs`
+(`INSERT OR IGNORE`, so a local-only ref survives), but rebuilt
+`search_text`/FTS from `rec.Refs` alone — a newer remote update carrying
+fewer or different refs than the local row silently dropped the local-only
+ref from lexical recall, even though `memory_refs` still listed it. Fixed by
+adding `Engine.loadRefsTx`, which reads back id's ref set on the same
+transaction connection right after the union write, and using that unioned
+set (not `rec.Refs`) to rebuild `search_text` and the FTS entry. New test:
+`TestSyncApplyLWWUpdatePreservesUnionedRefsInSearchText` asserts both a
+pre-existing local-only ref and a newly-arriving remote-only ref appear in
+`search_text` (and in `memory_refs`) after a same-id newer-wins update.
+
+Verification after round 5: `go build ./...`, `go vet ./...` clean; `gofmt -l .`
+clean on all touched files (same pre-existing unrelated exception as before,
+`internal/mcp/handlers_feedback_test.go`); `go test ./...` green except the
+same pre-existing, environment-specific `internal/update` `TestHTTPFetcher`
+failure (confirmed unchanged on `master` too — this sandbox blocks loopback
+TCP); `-race` clean on `internal/memory`, `internal/remotesync`,
+`internal/syncserver`.
