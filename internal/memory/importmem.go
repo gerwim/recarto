@@ -94,6 +94,17 @@ func (e *Engine) ImportMemory(ctx context.Context, im ImportMemory) (ImportOutco
 				boolToInt(im.Pinned), clampConfidence(im.Confidence), candID); uerr != nil {
 				return uerr
 			}
+			// im.ID never becomes its own row (candID absorbs it), but a later HTTP
+			// sync tombstone for im.ID — authored on the machine that originated
+			// this snapshot record under its own id — must still resolve to and
+			// delete candID, exactly like SyncApply's identical alias recording
+			// (syncApplyAbsent) already does for an HTTP-sourced near-dup merge.
+			// Without this, SyncApply's tombstone branch finds no memory_sync_merges
+			// row for im.ID, tombstones a non-existent id, and leaves candID live
+			// and recallable forever.
+			if merr := e.upsertSyncMerge(ctx, c, im.ID, candID, im.CreatedAt); merr != nil {
+				return merr
+			}
 			// This machine now holds content a remote sync peer may not have yet
 			// (the snapshot could have arrived via the committed .recarto/memory.jsonl
 			// file, not via HTTP sync) — queue it for the next push.

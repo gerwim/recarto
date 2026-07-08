@@ -354,3 +354,67 @@ func TestImportMemoryTombstoneGuardResolvesAlias(t *testing.T) {
 		t.Fatalf("canonical row must stay deleted: %+v", got)
 	}
 }
+
+// TestImportMemoryReinforceRecordsSyncMergeAlias proves ImportMemory's
+// near-duplicate reinforce path records a memory_sync_merges alias (im.ID ->
+// candID), mirroring syncApplyAbsent's identical precaution for an
+// HTTP-sourced near-dup merge. Without it, a later HTTP-pulled tombstone
+// authored against the snapshot's own id (the id used by the machine that
+// originated this snapshot record) has no alias to resolve through: it
+// tombstones a non-existent id and leaves the canonical, snapshot-reinforced
+// row live and recallable forever. Scenario: a teammate's committed
+// .recarto/memory.jsonl imports a near-duplicate of an existing local memory
+// (reinforcing it under the LOCAL canonical id), then a pulled tombstone for
+// the SNAPSHOT's own id must resolve through the alias and delete the
+// canonical row.
+func TestImportMemoryReinforceRecordsSyncMergeAlias(t *testing.T) {
+	e := newTestEngine(t, clock.Real{})
+	ctx := context.Background()
+
+	canonID, _, _, err := e.Record(ctx, NewMemory{
+		Kind: KindLearning, Title: "t", Body: "always cap goroutine pool size under load",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	clearOutbox(t, e, ctx, canonID)
+
+	// A teammate's committed snapshot lists this memory under a DIFFERENT id
+	// (the id it was originally authored under on their machine) — it
+	// near-dup-reinforces the local canonical row rather than becoming its own.
+	snapImport := ImportMemory{
+		ID: "snapshot-origin-id", Kind: KindLearning, Title: "t",
+		Body: "always cap goroutine pool size under load!", CreatedAt: 500,
+	}
+	out, mergedInto, err := e.ImportMemory(ctx, snapImport)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != ImportReinforced || mergedInto != canonID {
+		t.Fatalf("setup: want reinforced into %s, got %v %s", canonID, out, mergedInto)
+	}
+	if got, _ := e.GetByID(ctx, "snapshot-origin-id"); got != nil {
+		t.Fatalf("setup: snapshot-origin-id must never become its own row: %+v", got)
+	}
+
+	// A later HTTP pull delivers a tombstone authored against the snapshot's
+	// own id (e.g. the originating machine explicitly Forgot it and pushed).
+	// This must resolve through the alias ImportMemory just recorded and
+	// delete the CANONICAL row — not silently no-op against an id that was
+	// never a row on this store.
+	canonAfterMerge, _ := e.GetByID(ctx, canonID)
+	deleteAt := canonAfterMerge.UpdatedAt + 1000
+	out2, target, err := e.SyncApply(ctx, syncwire.Record{ID: "snapshot-origin-id", Deleted: true, UpdatedAt: deleteAt})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out2 != SyncTombstoned {
+		t.Fatalf("want tombstoned, got %v", out2)
+	}
+	if target != canonID {
+		t.Fatalf("tombstone must resolve to the canonical id %s via the snapshot-recorded alias, got %s", canonID, target)
+	}
+	if got, _ := e.GetByID(ctx, canonID); got != nil {
+		t.Fatalf("the canonical row must be deleted, but survived: %+v", got)
+	}
+}

@@ -673,3 +673,57 @@ except the same pre-existing, environment-specific `internal/update`
 `internal/snapshot`, `internal/remotesync`, `internal/agents`,
 `internal/syncserver`. Full targeted regression re-run (all prior-round
 tests) green throughout.
+
+## Round 14 — review fix: snapshot-import near-dup reinforce never recorded a merge alias
+
+A review pass found that round 13's `ImportMemory` fix closed the
+tombstone-resurrection gap but left an adjacent alias-recording gap open:
+when a snapshot record reinforces an existing near-duplicate row under a
+DIFFERENT id (`ImportMemory`'s `found` branch, `internal/memory/importmem.go`
+— e.g. a teammate's committed `.recarto/memory.jsonl` lists a memory under
+the id it was originally authored with on their machine, and that id has no
+local row but content-matches an existing local memory), the snapshot's id
+never became its own row here — exactly like `syncApplyAbsent`'s identical
+near-dup reinforce path for HTTP-sourced records. But unlike
+`syncApplyAbsent` (which calls `upsertSyncMerge` immediately after
+reinforcing), `ImportMemory`'s reinforce branch never recorded a
+`memory_sync_merges` alias for the snapshot's id. So when that same memory's
+originating machine later `Forget`s it under its own id and the tombstone
+reaches this store over HTTP (pull, or the server applying a push),
+`SyncApplyTx`'s deleted branch resolves the incoming id through
+`memory_sync_merges`, finds no alias, and tombstones/deletes a non-existent
+id — leaving the canonical, snapshot-reinforced row live and recallable
+forever. This is the same alias/tombstone class round 8 fixed for HTTP
+near-dup merges, but the snapshot-import near-dup reinforce path could still
+bypass it entirely.
+
+Fixed by calling `e.upsertSyncMerge(ctx, c, im.ID, candID, im.CreatedAt)` in
+`ImportMemory`'s reinforce branch (`internal/memory/importmem.go`), right
+after the pinned/confidence ratchet and before `markDirty` — mirroring
+`syncApplyAbsent`'s call exactly, with `im.CreatedAt` standing in for
+`rec.UpdatedAt` since the snapshot wire shape has no separate `updated_at`
+(consistent with round 13's choice of `im.CreatedAt` as `ImportMemory`'s
+logical clock elsewhere, e.g. `tombstoneCovers`). This value is inert for
+tombstone resolution itself (`SyncApplyTx`'s deleted-branch alias lookup only
+uses the alias's existence, never its recorded `updated_at`) and only matters
+if the alias id is later independently pushed/pulled through
+`syncApplyAbsent`'s own replay guard — where using the snapshot's authored
+clock is the same conservative choice round 13 already made. New test:
+`TestImportMemoryReinforceRecordsSyncMergeAlias`
+(`internal/memory/importmem_test.go`) — a snapshot import reinforces a local
+canonical row under a different id, then a `SyncApply`'d tombstone for that
+snapshot id resolves through the newly-recorded alias and deletes the
+canonical row (manually confirmed to fail — resolving to the wrong,
+non-existent id — against a stash of the pre-fix `importmem.go`, and pass
+after).
+
+Verification after round 14: `go build ./...`, `go vet ./...` clean;
+`gofmt -l .` clean on all touched files (same pre-existing unrelated
+exception as before, `internal/mcp/handlers_feedback_test.go`); new test
+confirmed to fail against a stash of the pre-fix `internal/memory/importmem.go`
+and pass after; `go test ./...` green except the same pre-existing,
+environment-specific `internal/update` `TestHTTPFetcher` loopback failure;
+`-race` clean on `internal/memory`, `internal/snapshot`, `internal/remotesync`,
+`internal/syncserver`. Full targeted regression re-run (`internal/memory`,
+`internal/snapshot`, `internal/remotesync`, `internal/syncserver`,
+`internal/agents` + subpackages) green throughout.
