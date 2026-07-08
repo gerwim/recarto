@@ -150,6 +150,6 @@ func usage(w io.Writer) error {
 	fmt.Fprintln(w, "  sync              manual HTTP memory sync (--pull --push --full); auto-runs at session-start/stop")
 	fmt.Fprintln(w, "  server            run the HTTP memory-sync server (--addr --data-dir --tls-cert --tls-key; needs RECARTO_SERVER_KEY)")
 	fmt.Fprintln(w, "  export            export every project's full memory history to an archive (--out --repo --push --url --key)")
-	fmt.Fprintln(w, "  import <file>     upload a previously written export archive to the sync server (--url --key)")
+	fmt.Fprintln(w, "  import [--url --key] <file>  upload a previously written export archive to the sync server")
 	return nil
 }

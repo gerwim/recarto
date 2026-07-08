@@ -13,6 +13,11 @@ import (
 // the other half of `recarto export --push`, for when the archive is
 // uploaded from a different machine than the one that wrote it, or uploaded
 // later rather than in the same command.
+//
+// Like every other recarto subcommand, flags must precede the positional
+// argument (Go's flag.Parse stops at the first non-flag token) — so the
+// invocation shape is `recarto import [--url --key] <archive.ndjson.gz>`,
+// not the reverse.
 func Import(ctx context.Context, w io.Writer, args []string) error {
 	fs := flag.NewFlagSet("import", flag.ContinueOnError)
 	url := fs.String("url", "", "sync server URL (default: $RECARTO_SYNC_URL)")
@@ -22,7 +27,7 @@ func Import(ctx context.Context, w io.Writer, args []string) error {
 	}
 	rest := fs.Args()
 	if len(rest) != 1 {
-		return fmt.Errorf("usage: recarto import <archive.ndjson.gz> [--url --key]")
+		return fmt.Errorf("usage: recarto import [--url --key] <archive.ndjson.gz>")
 	}
 
 	client, err := importClient(*url, *key)

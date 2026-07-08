@@ -53,7 +53,7 @@ func Export(ctx context.Context, w io.Writer, args []string) error {
 		return fmt.Errorf("recarto export: --push cannot be combined with --out -; write to a file first, then `recarto import` it")
 	}
 
-	var only string
+	var only, onlyKey string
 	if *repoOnly {
 		cwd, err := os.Getwd()
 		if err != nil {
@@ -64,6 +64,13 @@ func Export(ctx context.Context, w io.Writer, args []string) error {
 			return err
 		}
 		only = gc.RepoID
+		// Resolve the key live, the same way `recarto sync` does (honoring
+		// RECARTO_SYNC_REPO) — a store the whole-cache-dir sweep would have to
+		// skip for lacking a cached root commit can still be scoped to and
+		// exported directly, by setting the override in this shell.
+		if key, ok := remotesync.RepoKey(gc); ok {
+			onlyKey = key
+		}
 	}
 
 	cacheDir, err := cache.Dir()
@@ -83,7 +90,7 @@ func Export(ctx context.Context, w io.Writer, args []string) error {
 	}
 
 	gw := gzip.NewWriter(f)
-	stats, err := fullexport.ExportAll(ctx, cacheDir, clock.Real{}, gw, fullexport.Options{Only: only})
+	stats, err := fullexport.ExportAll(ctx, cacheDir, clock.Real{}, gw, fullexport.Options{Only: only, OnlyKey: onlyKey})
 	if err != nil {
 		gw.Close()
 		return err
@@ -102,7 +109,8 @@ func Export(ctx context.Context, w io.Writer, args []string) error {
 		stats.Repos, stats.Records, stats.Tombstones, outPath)
 	if stats.Skipped > 0 {
 		fmt.Fprintf(logw, "skipped %d repo(s) with no resolvable server key (shallow clone / no root commit; "+
-			"set RECARTO_SYNC_REPO for these before re-running): %s\n",
+			"cd into each and run `RECARTO_SYNC_REPO=<key> recarto export --repo --push` to export it on its own "+
+			"— a whole-machine export can't apply one override across many unrelated projects): %s\n",
 			stats.Skipped, strings.Join(stats.SkippedRepos, ", "))
 	}
 

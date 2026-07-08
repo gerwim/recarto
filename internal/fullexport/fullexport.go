@@ -40,6 +40,19 @@ type Options struct {
 	// Only, when non-empty, restricts the export to the single per-repo cache
 	// dir with this name (a gitctx.RepoID) — recarto export --repo.
 	Only string
+	// OnlyKey, when set alongside Only, overrides server-key resolution for
+	// that single project instead of deriving it from the store's cached
+	// root_commit meta. recarto export --repo resolves this live (via
+	// gitctx + remotesync.RepoKey, which honors RECARTO_SYNC_REPO) before
+	// calling ExportAll, so a shallow clone — one with no reachable root
+	// commit, and thus no resolvable key from cache-dir metadata alone — can
+	// still be exported by scoping to it directly and setting the env
+	// override, exactly like an ordinary `recarto sync` from that checkout.
+	// It is meaningless (and ignored) for a whole-cache-dir sweep: applying
+	// one override to every unrelated project it enumerates would collide
+	// their buckets, so an unscoped export always derives each project's key
+	// from its own stored root_commit and skips what it can't resolve.
+	OnlyKey string
 }
 
 // Stats tallies one ExportAll run.
@@ -53,9 +66,10 @@ type Stats struct {
 
 // project is one cache-dir store ExportAll has resolved a server key for.
 type project struct {
-	dirName  string
-	repoName string
-	repoKey  string
+	dirName    string
+	repoName   string
+	repoKey    string
+	rootCommit string
 }
 
 // ExportAll walks every per-repo store under cacheDir and writes a
@@ -79,7 +93,7 @@ func ExportAll(ctx context.Context, cacheDir string, clk clock.Clock, w io.Write
 		Format: syncwire.ExportFormat, CreatedAt: clk.Now().UnixMilli(), RecartoVersion: version.Version,
 	}
 	for _, p := range projects {
-		header.Repos = append(header.Repos, syncwire.ExportRepoMeta{Key: p.repoKey, Name: p.repoName})
+		header.Repos = append(header.Repos, syncwire.ExportRepoMeta{Key: p.repoKey, Name: p.repoName, RootCommit: p.rootCommit})
 	}
 	enc := json.NewEncoder(w)
 	if err := enc.Encode(&header); err != nil {
@@ -139,7 +153,13 @@ func resolveProjects(ctx context.Context, cacheDir string, opts Options, stats *
 			return nil, fmt.Errorf("read meta %s: %w", dbPath, err)
 		}
 
-		key, ok := serverKeyFor(de.Name(), rootCommit)
+		var key string
+		var ok bool
+		if opts.Only != "" && opts.OnlyKey != "" && de.Name() == opts.Only {
+			key, ok = opts.OnlyKey, true
+		} else {
+			key, ok = serverKeyFor(de.Name(), rootCommit)
+		}
 		if !ok {
 			stats.Skipped++
 			name := repoName
@@ -156,7 +176,7 @@ func resolveProjects(ctx context.Context, cacheDir string, opts Options, stats *
 				repoName = de.Name()
 			}
 		}
-		projects = append(projects, project{dirName: de.Name(), repoName: repoName, repoKey: key})
+		projects = append(projects, project{dirName: de.Name(), repoName: repoName, repoKey: key, rootCommit: rootCommit})
 	}
 	sort.Slice(projects, func(i, j int) bool { return projects[i].dirName < projects[j].dirName })
 	return projects, nil

@@ -44,3 +44,23 @@ func TestImportRejectsMissingFile(t *testing.T) {
 		t.Fatal("expected an error for a missing archive file")
 	}
 }
+
+// TestImportFlagsMustPrecedeFile pins the documented invocation shape
+// (`recarto import [--url --key] <file>`, matching the usage string and the
+// Import doc comment): Go's flag.Parse stops at the first non-flag
+// argument, so flags placed AFTER the file path are treated as extra
+// positional args and rejected, not silently accepted.
+func TestImportFlagsMustPrecedeFile(t *testing.T) {
+	t.Setenv("RECARTO_SYNC_URL", "")
+	t.Setenv("RECARTO_SYNC_KEY", "")
+	path := filepath.Join(t.TempDir(), "archive.ndjson.gz")
+	if err := os.WriteFile(path, []byte{}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	err := Import(context.Background(), &out, []string{path, "--url", "http://example.invalid", "--key", "s3cret"})
+	if err == nil {
+		t.Fatal("expected flags placed after the file path to be rejected as extra positional args")
+	}
+}

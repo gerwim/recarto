@@ -38,6 +38,11 @@ const (
 func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 	body, err := gzipRequestBody(w, r, maxImportWireBytes, maxImportBytes)
 	if err != nil {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			httpError(w, http.StatusRequestEntityTooLarge, "request body exceeds limit")
+			return
+		}
 		httpError(w, http.StatusBadRequest, "bad request body: "+err.Error())
 		return
 	}
@@ -65,17 +70,34 @@ func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 		return nil
 	})
 	if err != nil {
-		if errors.Is(err, errBadRepoKey) {
-			httpError(w, http.StatusBadRequest, err.Error())
-			return
-		}
-		var syntaxErr *json.SyntaxError
-		if errors.As(err, &syntaxErr) {
-			httpError(w, http.StatusBadRequest, "bad request body: "+err.Error())
-			return
-		}
-		httpError(w, http.StatusInternalServerError, err.Error())
+		status, msg := importErrorStatus(err)
+		httpError(w, status, msg)
 		return
 	}
 	writeJSON(w, resp)
+}
+
+// importErrorStatus maps an error surfaced while streaming
+// fullexport.Read over a POST /v1/import body to the HTTP status and message
+// handleImport should respond with. A compressed body that exceeds
+// maxImportWireBytes can trip the http.MaxBytesReader wrapped around r.Body
+// mid-stream (not just up front in gzipRequestBody) and surfaces here as
+// *http.MaxBytesError — that MUST map to 413 like the decompressed-size
+// limit does, not fall through to the 500 default.
+func importErrorStatus(err error) (int, string) {
+	if errors.Is(err, errBadRepoKey) {
+		return http.StatusBadRequest, err.Error()
+	}
+	if errors.Is(err, errDecompressedTooLarge) {
+		return http.StatusRequestEntityTooLarge, err.Error()
+	}
+	var maxBytesErr *http.MaxBytesError
+	if errors.As(err, &maxBytesErr) {
+		return http.StatusRequestEntityTooLarge, "request body exceeds limit"
+	}
+	var syntaxErr *json.SyntaxError
+	if errors.As(err, &syntaxErr) {
+		return http.StatusBadRequest, "bad request body: " + err.Error()
+	}
+	return http.StatusInternalServerError, err.Error()
 }

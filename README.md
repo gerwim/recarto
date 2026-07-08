@@ -415,8 +415,15 @@ picks up the seeded history automatically.
 Each project's server key is derived the same way an ordinary client push derives it (the
 repo's root commit, not its local path — see above), computed offline from each store's
 recorded metadata. A store with no resolvable root commit (a shallow clone) is skipped and
-named in the summary — set `RECARTO_SYNC_REPO` on that project before re-running, exactly
-as ordinary sync requires.
+named in the summary. A whole-machine export can't apply `RECARTO_SYNC_REPO` to fix this —
+one override would collide every unrelated project it enumerates into the same bucket — so
+export that project on its own instead, from inside its checkout, exactly like ordinary sync
+requires:
+
+```sh
+cd path/to/that/shallow/clone
+RECARTO_SYNC_REPO=<key> recarto export --repo --push
+```
 
 ## Development
 

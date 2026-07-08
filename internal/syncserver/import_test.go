@@ -3,6 +3,8 @@ package syncserver
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -206,5 +208,37 @@ func TestImportSkipsFeedbackReservedKeyLikeAnyOtherRepo(t *testing.T) {
 	json.NewDecoder(resp.Body).Decode(&ir)
 	if ir.TotalAccepted != 1 {
 		t.Fatalf("import response = %+v, want 1 accepted", ir)
+	}
+}
+
+// TestImportErrorStatusMapsMaxBytesErrorTo413 pins the fix for a gap where a
+// compressed request body over maxImportWireBytes surfaced from
+// http.MaxBytesReader mid-stream (inside fullexport.Read, not just up front
+// in gzipRequestBody) as *http.MaxBytesError, and previously fell through
+// importErrorStatus's default case to 500 instead of the correct 413.
+func TestImportErrorStatusMapsMaxBytesErrorTo413(t *testing.T) {
+	status, _ := importErrorStatus(&http.MaxBytesError{Limit: maxImportWireBytes})
+	if status != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want 413 for *http.MaxBytesError", status)
+	}
+
+	status, _ = importErrorStatus(fmt.Errorf("wrapped: %w", &http.MaxBytesError{Limit: maxImportWireBytes}))
+	if status != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want 413 for a wrapped *http.MaxBytesError", status)
+	}
+
+	status, _ = importErrorStatus(errBadRepoKey)
+	if status != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 for errBadRepoKey", status)
+	}
+
+	status, _ = importErrorStatus(errDecompressedTooLarge)
+	if status != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want 413 for errDecompressedTooLarge", status)
+	}
+
+	status, _ = importErrorStatus(errors.New("some unexpected failure"))
+	if status != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500 for an unrecognized error", status)
 	}
 }

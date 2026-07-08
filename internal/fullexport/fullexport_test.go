@@ -3,6 +3,7 @@ package fullexport
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"path/filepath"
 	"testing"
 	"time"
@@ -165,10 +166,27 @@ func TestExportAllGroupsByServerKeyAndCoversAllStatuses(t *testing.T) {
 		t.Fatal("expected the forgotten memory's tombstone to round-trip")
 	}
 
-	// The header (first line) must be self-identifying and skip-able.
+	// The header (first line) must be self-identifying and skip-able, and
+	// must carry each project's root_commit (not just its key/name) — that
+	// is the metadata that lets a reader/operator confirm which live repo an
+	// opaque key corresponds to.
 	firstLine := bytes.SplitN(buf.Bytes(), []byte("\n"), 2)[0]
 	if !bytes.Contains(firstLine, []byte(syncwire.ExportFormat)) {
 		t.Fatalf("first line missing format marker: %s", firstLine)
+	}
+	var header syncwire.ExportHeader
+	if err := json.Unmarshal(firstLine, &header); err != nil {
+		t.Fatal(err)
+	}
+	rootCommitsByKey := map[string]string{}
+	for _, r := range header.Repos {
+		rootCommitsByKey[r.Key] = r.RootCommit
+	}
+	if rootCommitsByKey[keyA] != "rootcommitA" {
+		t.Fatalf("header root_commit for repoA = %q, want rootcommitA", rootCommitsByKey[keyA])
+	}
+	if rootCommitsByKey[keyB] != "rootcommitB" {
+		t.Fatalf("header root_commit for repoB = %q, want rootcommitB", rootCommitsByKey[keyB])
 	}
 }
 
@@ -211,6 +229,35 @@ func TestExportAllOnlyRestrictsToOneRepo(t *testing.T) {
 	entries := readAllEntries(t, buf.Bytes())
 	if len(entries) != 1 || entries[0].Record.Body != "repo A only content" {
 		t.Fatalf("entries = %+v, want only repo A's record", entries)
+	}
+}
+
+// TestExportAllOnlyKeyOverridesShallowCloneSkip pins that scoping to a single
+// project with an explicit OnlyKey (as `recarto export --repo` does when
+// RECARTO_SYNC_REPO is set, resolved live via remotesync.RepoKey) exports a
+// store that an unscoped, whole-cache-dir sweep would otherwise have to skip
+// for lacking a resolvable root commit.
+func TestExportAllOnlyKeyOverridesShallowCloneSkip(t *testing.T) {
+	cacheDir := t.TempDir()
+	ctx := context.Background()
+
+	st, eng := seedStore(t, cacheDir, "dirShallow", "shallowRepo", "")
+	if _, _, _, err := eng.Record(ctx, memory.NewMemory{Kind: memory.KindLearning, Title: "s", Body: "shallow clone content"}); err != nil {
+		t.Fatal(err)
+	}
+	st.Close()
+
+	var buf bytes.Buffer
+	stats, err := ExportAll(ctx, cacheDir, clock.Real{}, &buf, Options{Only: "dirShallow", OnlyKey: "manual-override-key"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Skipped != 0 || stats.Repos != 1 || stats.Records != 1 {
+		t.Fatalf("stats = %+v, want the shallow clone exported via the override, not skipped", stats)
+	}
+	entries := readAllEntries(t, buf.Bytes())
+	if len(entries) != 1 || entries[0].RepoKey != "manual-override-key" {
+		t.Fatalf("entries = %+v, want 1 entry tagged with the override key", entries)
 	}
 }
 
