@@ -34,8 +34,13 @@ const (
 // Semantics, in priority order (mirrors ImportMemory's insert-or-reinforce
 // convergence, extended with update-by-id and tombstones for sync):
 //
-//  1. rec.Deleted (tombstone): delete the local row if one exists and is not
-//     newer than the tombstone, then record/extend the tombstone.
+//  1. rec.Deleted (tombstone): resolve rec.ID through memory_sync_merges to
+//     its canonical id first (rec.ID may be a non-canonical id this store
+//     previously merged into another row via a near-duplicate reinforce,
+//     which never creates a row at rec.ID — deleting rec.ID verbatim would
+//     then silently no-op while the real row survives), delete that row if
+//     it exists and is not newer than the tombstone, then record/extend the
+//     tombstone at the resolved (canonical) id.
 //  2. A tombstone already covers rec.ID at >= rec.UpdatedAt: drop rec — an
 //     older non-deleted record must never resurrect a later delete.
 //  3. rec.ID exists locally: LWW-overwrite content when rec is newer, else
@@ -70,14 +75,40 @@ func (e *Engine) SyncApplyTx(ctx context.Context, rec syncwire.Record, afterAppl
 	canonID := rec.ID
 
 	err := e.st.WriteTx(ctx, func(c store.Conn) error {
+		if rec.Deleted {
+			// rec.ID may be a non-canonical id this store previously merged into
+			// another row via a near-duplicate reinforce (syncApplyAbsent):
+			// that reinforce never creates a row at rec.ID, so a delete must
+			// resolve through memory_sync_merges to the row that actually needs
+			// deleting, or the tombstone silently no-ops against an id that was
+			// never a row here while the real (canonical) memory survives.
+			target := rec.ID
+			if aliasCanon, _, ok, err := e.getSyncMerge(ctx, c, rec.ID); err != nil {
+				return err
+			} else if ok {
+				target = aliasCanon
+			}
+			tombAt, hasTomb, err := e.getTombstone(ctx, c, target)
+			if err != nil {
+				return err
+			}
+			outcome, err = e.applyTombstoneRow(ctx, c, target, rec.UpdatedAt, tombAt, hasTomb)
+			if err != nil {
+				return err
+			}
+			canonID = target
+			if outcome != SyncNoop && afterApply != nil {
+				return afterApply(c, outcome, canonID)
+			}
+			return nil
+		}
+
 		tombAt, hasTomb, err := e.getTombstone(ctx, c, rec.ID)
 		if err != nil {
 			return err
 		}
 
 		switch {
-		case rec.Deleted:
-			outcome, err = e.applyTombstoneRow(ctx, c, rec, tombAt, hasTomb)
 		case hasTomb && tombAt >= rec.UpdatedAt:
 			// A later (or equal) delete already wins; do not resurrect.
 			outcome = SyncNoop
@@ -327,34 +358,41 @@ func (e *Engine) syncApplyAbsent(ctx context.Context, c store.Conn, rec syncwire
 	return SyncInserted, rec.ID, nil
 }
 
-// applyTombstoneRow deletes the local row for rec.ID (unless a newer local
-// edit beats the incoming delete) and records/extends the tombstone. pushed=true
-// because a tombstone reaching SyncApply always originates elsewhere (a pull
-// from the server, or the server applying a client's push) — it is already
-// known on at least one other side, so this side must never re-push it as if
-// it were freshly authored here. Only Forget's direct call to upsertTombstone
-// (pushed=false) marks a tombstone as needing an outbound push.
-func (e *Engine) applyTombstoneRow(ctx context.Context, c store.Conn, rec syncwire.Record, tombAt int64, hasTomb bool) (SyncOutcome, error) {
+// applyTombstoneRow deletes the local row for targetID (unless a newer local
+// edit beats the incoming delete) and records/extends the tombstone at
+// targetID. targetID is the CANONICAL id to delete — the caller has already
+// resolved rec.ID through memory_sync_merges when rec.ID was itself a
+// non-canonical id previously merged into another row (a near-duplicate
+// reinforce never creates a row at the incoming id, so deleting "rec.ID"
+// verbatim would silently no-op while the real row survives under a
+// different id). updatedAt is the tombstone's logical clock (rec.UpdatedAt).
+// pushed=true because a tombstone reaching SyncApply always originates
+// elsewhere (a pull from the server, or the server applying a client's push)
+// — it is already known on at least one other side, so this side must never
+// re-push it as if it were freshly authored here. Only Forget's direct call
+// to upsertTombstone (pushed=false) marks a tombstone as needing an outbound
+// push.
+func (e *Engine) applyTombstoneRow(ctx context.Context, c store.Conn, targetID string, updatedAt int64, tombAt int64, hasTomb bool) (SyncOutcome, error) {
 	var localUpdatedAt int64
-	err := c.QueryRowContext(ctx, `SELECT updated_at FROM memories WHERE id=?`, rec.ID).Scan(&localUpdatedAt)
+	err := c.QueryRowContext(ctx, `SELECT updated_at FROM memories WHERE id=?`, targetID).Scan(&localUpdatedAt)
 	switch {
 	case err == nil:
-		if rec.UpdatedAt < localUpdatedAt {
+		if updatedAt < localUpdatedAt {
 			// A later local edit beats a stale tombstone: keep the local row and
 			// do not record a tombstone that would shadow it.
 			return SyncNoop, nil
 		}
-		if err := e.deleteMemoryRows(ctx, c, []string{rec.ID}); err != nil {
+		if err := e.deleteMemoryRows(ctx, c, []string{targetID}); err != nil {
 			return SyncNoop, err
 		}
 	case errors.Is(err, sql.ErrNoRows):
-		if hasTomb && tombAt >= rec.UpdatedAt {
+		if hasTomb && tombAt >= updatedAt {
 			return SyncNoop, nil // already recorded at least this recent; nothing changed
 		}
 	default:
 		return SyncNoop, err
 	}
-	if err := e.upsertTombstone(ctx, c, rec.ID, rec.UpdatedAt, true); err != nil {
+	if err := e.upsertTombstone(ctx, c, targetID, updatedAt, true); err != nil {
 		return SyncNoop, err
 	}
 	return SyncTombstoned, nil

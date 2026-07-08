@@ -334,3 +334,58 @@ exception as before, `internal/mcp/handlers_feedback_test.go`);
 clean stash of this branch — this sandbox blocks loopback TCP, unrelated to
 this change); `-race` clean on `internal/memory`, `internal/remotesync`,
 `internal/syncserver`, `internal/store`.
+
+## Round 8 — review fix: tombstones ignored a prior near-duplicate merge alias
+
+A review pass found that `memory.SyncApplyTx`'s deleted branch
+(`internal/memory/sync.go`) applied a tombstone against `rec.ID` verbatim,
+never checking `memory_sync_merges` — the alias table round 7 added so a
+*non-deleted* replay of an id that was previously merged into a different
+canonical row (via `syncApplyAbsent`'s near-dup reinforce, which never
+creates a row at the incoming id) could be recognized as already-applied.
+Tombstones need that same alias resolution for a different reason: if id
+`B` was previously merged into canonical id `A` on this store, `B` was
+never its own row here, so a later tombstone for `B` (an explicit `Forget`
+authored by the machine that owns `B` as *its* canonical id, propagating
+here via pull or a server-applied push) looked up `memories WHERE id='B'`,
+found nothing, and simply recorded an inert tombstone row for `B` — the
+real, live memory under `A` was never touched. This is directly reachable
+in practice: any two peers (including the sync server itself, which is
+structurally just another `SyncApply` caller) that independently received
+two near-duplicate memories under different ids will each pick their own
+canonical id via `findNearDup`, so an explicit forget authored against the
+*non-canonical* id on one peer would silently fail to delete the
+*canonical* row everywhere else.
+
+Fixed by resolving `rec.ID` through `memory_sync_merges` at the top of the
+deleted branch in `SyncApplyTx`, before any tombstone lookup or memories
+query: when an alias exists, every subsequent step (the tombstone-guard
+read, the existing-row delete, and the tombstone write itself) operates on
+the resolved canonical id, and the outcome's reported id (`canonID`, used
+both as the `SyncApply`/`SyncApplyTx` return value and as the id the sync
+server indexes in `sync_index`) is the canonical id too — so a client or
+the server correctly propagates the delete under the id that actually has
+(or had) a row, not the alias. `applyTombstoneRow`'s signature changed from
+taking the full wire `Record` to taking an explicit `targetID` (the
+already-resolved id) plus `updatedAt`, making the resolution point
+unambiguous at the call site. A replay of the *original* near-duplicate
+push after the delete remains correctly blocked from resurrecting anything:
+`syncApplyAbsent`'s existing `memory_sync_merges` replay guard (unchanged)
+Noops any at-or-before-merge-time replay of the non-canonical id regardless
+of whether the canonical row currently exists, since that guard compares
+timestamps, not row existence. New test:
+`TestSyncApplyTombstoneResolvesNearDupMergeAlias` — merges a
+differently-id'd near-duplicate into a local canonical row, tombstones the
+non-canonical id, and asserts the canonical row is deleted, the tombstone
+is recorded under the canonical id (not the alias), and a subsequent replay
+of the original merge push stays a no-op rather than resurrecting the
+canonical row.
+
+Verification after round 8: `go build ./...`, `go vet ./...` clean;
+`gofmt -l .` clean on all touched files (same pre-existing unrelated
+exception as before, `internal/mcp/handlers_feedback_test.go`);
+`go test ./...` green except the same pre-existing, environment-specific
+`internal/update` `TestHTTPFetcher` failure (reconfirmed unchanged on a
+clean stash of this branch — this sandbox blocks loopback TCP, unrelated to
+this change); `-race` clean on `internal/memory`, `internal/remotesync`,
+`internal/syncserver`, `internal/store`.

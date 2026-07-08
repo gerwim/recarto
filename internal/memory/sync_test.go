@@ -572,6 +572,96 @@ func TestSyncApplyTombstoneOlderThanLocalEditKeepsLocal(t *testing.T) {
 	}
 }
 
+// TestSyncApplyTombstoneResolvesNearDupMergeAlias covers the scenario a
+// review pass flagged: a tombstone arriving for an id that was previously
+// merged into a different canonical row (via syncApplyAbsent's near-dup
+// reinforce path, which never creates a row at the incoming id) must delete
+// and tombstone the CANONICAL row, not silently no-op against an id that was
+// never a row on this store. This is reachable in practice whenever a peer
+// (including the sync server itself) receives two independently-authored
+// near-duplicates under different ids and merges the later-seen one into the
+// earlier — a subsequent Forget of the original id, authored on the machine
+// that owns it, must still take effect here.
+func TestSyncApplyTombstoneResolvesNearDupMergeAlias(t *testing.T) {
+	e := newTestEngine(t, clock.NewFake(time.UnixMilli(1_000_000)))
+	ctx := context.Background()
+
+	// This store's own canonical row (e.g. authored locally, or pulled first).
+	canonID, _, _, err := e.Record(ctx, NewMemory{
+		Kind: KindLearning, Title: "t", Body: "always jitter retry backoff to avoid thundering herds",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A near-duplicate arrives under a DIFFERENT id ("origin-1" — this is the
+	// id the AUTHORING machine considers its own canonical row for this
+	// memory). It has no local match by id, but content-matches canonID, so it
+	// reinforces canonID and is recorded as an alias in memory_sync_merges
+	// rather than ever becoming its own row.
+	dup := syncwire.Record{
+		ID: "origin-1", Kind: string(KindLearning), Title: "t",
+		Body: "always jitter retry backoff to avoid thundering herds!", CreatedAt: 500, UpdatedAt: 500,
+	}
+	out, mergedInto, err := e.SyncApply(ctx, dup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != SyncReinforced || mergedInto != canonID {
+		t.Fatalf("setup: want reinforced into %s, got %v %s", canonID, out, mergedInto)
+	}
+	if got, _ := e.GetByID(ctx, "origin-1"); got != nil {
+		t.Fatalf("setup: origin-1 must never become its own row: %+v", got)
+	}
+
+	canonAfterMerge, _ := e.GetByID(ctx, canonID)
+
+	// The authoring machine later Forgets its own row (id "origin-1") and that
+	// tombstone reaches this store via sync (pull, or the server applying a
+	// push) — it must resolve through the alias and delete the CANONICAL row.
+	// The delete's clock must be newer than the reinforce's own updated_at
+	// bump above, or it is (correctly) treated as a stale tombstone losing to
+	// a later local edit — not the scenario under test here.
+	deleteAt := canonAfterMerge.UpdatedAt + 1000
+	out, target, err := e.SyncApply(ctx, syncwire.Record{ID: "origin-1", Deleted: true, UpdatedAt: deleteAt})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != SyncTombstoned {
+		t.Fatalf("want tombstoned, got %v", out)
+	}
+	if target != canonID {
+		t.Fatalf("tombstone must resolve to the canonical id %s, got %s", canonID, target)
+	}
+	if got, _ := e.GetByID(ctx, canonID); got != nil {
+		t.Fatalf("the canonical row must be deleted, but survived: %+v", got)
+	}
+
+	tombAt, hasTomb, err := e.getTombstone(ctx, e.st.DB, canonID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasTomb || tombAt != deleteAt {
+		t.Fatalf("the tombstone must be recorded at the CANONICAL id, got hasTomb=%v at=%d", hasTomb, tombAt)
+	}
+
+	// A later independent push of the same near-duplicate content, still under
+	// the original id, must not resurrect the canonical row: the replay guard
+	// in syncApplyAbsent (memory_sync_merges, checked before any tombstone
+	// lookup) already Noops an at-or-before-merge-time replay of "origin-1"
+	// regardless of the delete.
+	out, _, err = e.SyncApply(ctx, dup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != SyncNoop {
+		t.Fatalf("a replay of the original near-dup push must not resurrect the deleted canonical row, got %v", out)
+	}
+	if got, _ := e.GetByID(ctx, canonID); got != nil {
+		t.Fatalf("canonical row must stay deleted after a replayed near-dup push: %+v", got)
+	}
+}
+
 func TestSyncApplyTombstoneNotPushedBack(t *testing.T) {
 	e := newTestEngine(t, clock.NewFake(time.UnixMilli(1_000_000)))
 	ctx := context.Background()

@@ -103,6 +103,13 @@ the shipped implementation:
   incoming id last merged into; a replay at the same or older `updated_at` returns
   `SyncNoop` before `findNearDup` runs, so it neither reinforces again nor advances the
   server's `sync_index`/seq.
+- **Tombstone alias resolution.** A delete for an incoming id that was previously merged
+  into a different canonical row (via the reinforce-merge path above) must resolve through
+  `memory_sync_merges` to that canonical id before the delete/tombstone is applied — the
+  incoming id was never its own row here, so applying the delete verbatim would silently
+  no-op while the real (canonical) row survives. Reachable whenever two peers (including
+  the server) independently converge two near-duplicates onto different canonical ids and
+  one is later `Forget`-ten by its authoring id.
 - **Tombstone GC.** Given "full offline mode" is a hard requirement, the server does
   **not** default to any tombstone GC horizon (a machine offline longer than a fixed TTL
   would silently miss a delete and resurrect it later). No GC ships in this cut; add one
