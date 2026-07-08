@@ -7,22 +7,27 @@ import (
 	"strings"
 )
 
-// maxDecompressedBytes bounds a request body AFTER gzip decompression,
-// independent of maxPushBytes (which bounds the compressed wire size). A
-// compressed body can expand far beyond its wire size (a degenerate "bomb"),
-// so both limits apply: the wire size is capped first via
+// maxDecompressedBytes bounds a /changes push request body AFTER gzip
+// decompression, independent of maxPushBytes (which bounds the compressed
+// wire size). A compressed body can expand far beyond its wire size (a
+// degenerate "bomb"), so both limits apply: the wire size is capped first via
 // http.MaxBytesReader, then the decompressed stream is capped again. Sync
 // payloads are always small, text-only memory rows (never the code graph),
-// so 64MB decompressed is generous headroom for legitimate use.
+// so 64MB decompressed is generous headroom for legitimate use. /v1/import
+// bounds its (much larger, legitimately multi-project) body with its own,
+// separate pair of limits — see maxImportWireBytes/maxImportBytes.
 const maxDecompressedBytes = 64 << 20
 
 // gzipRequestBody prepares r.Body for reading: the wire size is always capped
-// at maxPushBytes, and when the client marked the body gzip-compressed
+// at wireLimit, and when the client marked the body gzip-compressed
 // (Content-Encoding: gzip — set unconditionally by internal/remotesync.Client
-// for pushes), it is transparently decompressed with the expansion capped at
-// maxDecompressedBytes.
-func gzipRequestBody(w http.ResponseWriter, r *http.Request) (io.ReadCloser, error) {
-	body := http.MaxBytesReader(w, r.Body, maxPushBytes)
+// for both pushes and imports), it is transparently decompressed with the
+// expansion capped at decompressedLimit. Both limits are enforced
+// independently (wire size via http.MaxBytesReader before any decompression
+// happens at all, decompressed size via a further io.LimitReader on the gzip
+// stream) so a small compressed body cannot "bomb" past decompressedLimit.
+func gzipRequestBody(w http.ResponseWriter, r *http.Request, wireLimit, decompressedLimit int64) (io.ReadCloser, error) {
+	body := http.MaxBytesReader(w, r.Body, wireLimit)
 	if r.Header.Get("Content-Encoding") != "gzip" {
 		return body, nil
 	}
@@ -30,7 +35,7 @@ func gzipRequestBody(w http.ResponseWriter, r *http.Request) (io.ReadCloser, err
 	if err != nil {
 		return nil, err
 	}
-	return limitedGzipReader{r: io.LimitReader(gzr, maxDecompressedBytes), gz: gzr}, nil
+	return limitedGzipReader{r: io.LimitReader(gzr, decompressedLimit), gz: gzr}, nil
 }
 
 // limitedGzipReader closes the underlying gzip.Reader (which in turn closes

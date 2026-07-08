@@ -53,8 +53,20 @@ func Run(args []string, out io.Writer) error {
 		return ServerCmd(context.Background(), out, rest)
 	}
 
+	// export walks every per-repo store under the cache dir (plus the global
+	// feedback store) directly — no single git repo to resolve into an App.
+	if cmd == "export" {
+		return Export(context.Background(), out, rest)
+	}
+
+	// import uploads a previously written export archive; it needs a file path
+	// and sync server config, not a git repo or per-repo App.
+	if cmd == "import" {
+		return Import(context.Background(), out, rest)
+	}
+
 	if !known(cmd) {
-		return fmt.Errorf("unknown command %q (try: init serve hook status doctor remember forget recall bug feedback memory index graph compact snapshot todo sync server)", cmd)
+		return fmt.Errorf("unknown command %q (try: init serve hook status doctor remember forget recall bug feedback memory index graph compact snapshot todo sync server export import)", cmd)
 	}
 
 	a, err := app.Open(app.Config{})
@@ -137,5 +149,7 @@ func usage(w io.Writer) error {
 	fmt.Fprintln(w, "  update            self-update to the latest (or a chosen) release (--version --list --check --yes)")
 	fmt.Fprintln(w, "  sync              manual HTTP memory sync (--pull --push --full); auto-runs at session-start/stop")
 	fmt.Fprintln(w, "  server            run the HTTP memory-sync server (--addr --data-dir --tls-cert --tls-key; needs RECARTO_SERVER_KEY)")
+	fmt.Fprintln(w, "  export            export every project's full memory history to an archive (--out --repo --push --url --key)")
+	fmt.Fprintln(w, "  import <file>     upload a previously written export archive to the sync server (--url --key)")
 	return nil
 }

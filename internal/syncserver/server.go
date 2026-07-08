@@ -81,6 +81,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/repos/{key}/changes", s.rateLimit(s.requireKey(withGzipResponse(s.handleGetChanges))))
 	mux.HandleFunc("POST /v1/repos/{key}/changes", s.rateLimit(s.requireKey(withGzipResponse(s.handlePostChanges))))
+	mux.HandleFunc("POST /v1/import", s.rateLimit(s.requireKey(s.handleImport)))
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	return mux
 }

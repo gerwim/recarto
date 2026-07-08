@@ -153,3 +153,32 @@ func (c *Client) Push(ctx context.Context, repoKey string, records []syncwire.Re
 	}
 	return out, nil
 }
+
+// Import uploads a bulk, multi-project export archive (see
+// internal/fullexport) to the server's POST /v1/import endpoint — the
+// one-shot bulk migration path for a machine's pre-existing history,
+// distinct from Push (which sends only the local outbox of one repo). gz
+// must already be a gzip-compressed recarto-export/v1 stream (fullexport
+// writes directly to a gzip.Writer; the CLI just reopens that file and
+// streams it here as-is) — unlike Push, Import never buffers or re-encodes
+// the body, since a full-history archive can be far larger than a single
+// push batch.
+func (c *Client) Import(ctx context.Context, gz io.Reader) (syncwire.ImportResponse, error) {
+	u := strings.TrimRight(c.BaseURL, "/") + "/v1/import"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, gz)
+	if err != nil {
+		return syncwire.ImportResponse{}, err
+	}
+	req.Header.Set("Content-Type", "application/x-ndjson")
+	req.Header.Set("Content-Encoding", "gzip")
+	resp, err := c.do(req)
+	if err != nil {
+		return syncwire.ImportResponse{}, err
+	}
+	defer resp.Body.Close()
+	var out syncwire.ImportResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return syncwire.ImportResponse{}, err
+	}
+	return out, nil
+}

@@ -380,6 +380,44 @@ within headroom; it only matters if you're fronting a large fleet.
 State lives entirely in the named `recarto-sync-data` volume — back it up like any other
 SQLite data directory, and it survives `docker compose restart`/upgrades.
 
+### Seed the server from an existing local history
+
+Ordinary sync (above) only ever ships a store's **outbox** — writes made after sync was
+configured. If you've been using Recarto on one machine for a long time before setting up
+a server, that pre-existing history never automatically travels: the outbox never saw it.
+`recarto export` is the one-shot bulk migration path for that case — it reads every
+per-repo store under the cache dir directly (every status, including archived/done/
+superseded rows, not just what recall currently surfaces; plus the global feedback store,
+under a fixed key), never the code graph, and writes it all to one portable archive.
+
+Export and upload in one step:
+
+```sh
+recarto export --push   # writes recarto-export-<date>.ndjson.gz, then uploads it
+```
+
+Or split across two steps (e.g. write the archive on a laptop, upload from elsewhere):
+
+```sh
+recarto export --out history.ndjson.gz
+recarto import history.ndjson.gz
+```
+
+`--push`/`import` reuse `RECARTO_SYNC_URL`/`RECARTO_SYNC_KEY` (or `--url`/`--key`), so no
+extra server-side configuration is needed: the same `POST /v1/import` endpoint authenticates
+with the existing `RECARTO_SERVER_KEY` and merges every entry through the identical
+MinHash/LWW/tombstone core an ordinary push uses — so a memory that already converged
+elsewhere reinforces rather than duplicates, and an import is safely re-runnable. Because
+each accepted entry bumps the target repo's sync cursor exactly like a push, **no other
+client needs any change to benefit**: every machine's next ordinary session-start pull
+picks up the seeded history automatically.
+
+Each project's server key is derived the same way an ordinary client push derives it (the
+repo's root commit, not its local path — see above), computed offline from each store's
+recorded metadata. A store with no resolvable root commit (a shallow clone) is skipped and
+named in the summary — set `RECARTO_SYNC_REPO` on that project before re-running, exactly
+as ordinary sync requires.
+
 ## Development
 
 ```sh

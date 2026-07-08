@@ -59,3 +59,46 @@ type PushResponse struct {
 	Cursor   int64 `json:"cursor"`   // the repo's current max seq, for diagnostics
 	Accepted int   `json:"accepted"` // records that produced a genuine change
 }
+
+// ExportFormat identifies a recarto-export/v1 archive (see ExportHeader).
+const ExportFormat = "recarto-export/v1"
+
+// ExportRepoMeta describes one project in an export archive's header.
+type ExportRepoMeta struct {
+	Key        string `json:"key"`
+	Name       string `json:"name,omitempty"`
+	RootCommit string `json:"root_commit,omitempty"`
+}
+
+// ExportHeader is the first line of a recarto-export/v1 archive (see
+// internal/fullexport): informational metadata about every project the
+// archive covers. It carries no records of its own — the importer detects it
+// by Format and skips it.
+type ExportHeader struct {
+	Format         string           `json:"format"`
+	CreatedAt      int64            `json:"created_at"`
+	RecartoVersion string           `json:"recarto_version"`
+	Repos          []ExportRepoMeta `json:"repos"`
+}
+
+// ExportEntry is one non-header line of an export archive: a single memory
+// record (or tombstone), tagged with the server repo key it belongs to. Every
+// entry is self-describing, so the server applies it without buffering the
+// whole archive.
+type ExportEntry struct {
+	RepoKey string `json:"repo_key"`
+	Record  Record `json:"record"`
+}
+
+// ImportResponse answers POST /v1/import.
+type ImportResponse struct {
+	Repos         map[string]RepoImportStat `json:"repos"`
+	TotalEntries  int                       `json:"total_entries"`
+	TotalAccepted int                       `json:"total_accepted"`
+}
+
+// RepoImportStat tallies one repo key's share of an import.
+type RepoImportStat struct {
+	Entries  int `json:"entries"`
+	Accepted int `json:"accepted"`
+}

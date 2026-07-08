@@ -1,11 +1,10 @@
 package remotesync
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"os"
 
 	"git.gerwim.nl/gerwim/recarto/internal/gitctx"
+	"git.gerwim.nl/gerwim/recarto/internal/repokey"
 )
 
 // RepoKey resolves the cross-machine sync identity for gc. gitctx.RepoID
@@ -18,7 +17,7 @@ import (
 //  1. RECARTO_SYNC_REPO env override, verbatim — for shallow clones (no
 //     reachable root commit), repos with multiple roots, or intentional
 //     grouping of otherwise-unrelated repos onto one sync key.
-//  2. sha256(RootCommit)[:16] when RootCommit is non-empty.
+//  2. sha256(RootCommit)[:16] when RootCommit is non-empty (repokey.Hash).
 //  3. Neither: ok=false. Sync stays disabled rather than guessing a
 //     machine-local identity that would defeat the whole point.
 func RepoKey(gc gitctx.Context) (string, bool) {
@@ -28,6 +27,5 @@ func RepoKey(gc gitctx.Context) (string, bool) {
 	if gc.RootCommit == "" {
 		return "", false
 	}
-	sum := sha256.Sum256([]byte(gc.RootCommit))
-	return hex.EncodeToString(sum[:])[:16], true
+	return repokey.Hash(gc.RootCommit), true
 }
