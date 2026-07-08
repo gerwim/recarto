@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -240,5 +242,50 @@ func TestImportErrorStatusMapsMaxBytesErrorTo413(t *testing.T) {
 	status, _ = importErrorStatus(errors.New("some unexpected failure"))
 	if status != http.StatusInternalServerError {
 		t.Fatalf("status = %d, want 500 for an unrecognized error", status)
+	}
+}
+
+// TestImportOversizedDecompressedBodyAppliesNothing pins the fix for a gap
+// where an over-limit archive's entries preceding the cutoff were already
+// applied to their stores before fullexport.Read's scan discovered the
+// decompressed size violation and handleImport returned 413 — a partial,
+// silently-committed import masquerading as a rejected one. handleImport now
+// spools the whole bounded body into memory (io.ReadAll) before applying any
+// entry, so an over-limit archive is rejected atomically: nothing it
+// contains — not even entries earlier in the stream — is ever applied.
+//
+// doImport is called directly (bypassing the requireKey/rateLimit
+// middleware, irrelevant here) with a deliberately tiny decompressed limit,
+// so the test archive can stay small and fast rather than needing to exceed
+// the real 256MB maxImportBytes.
+func TestImportOversizedDecompressedBodyAppliesNothing(t *testing.T) {
+	srv := New("s3cret", filepath.Join(t.TempDir(), "data"))
+	t.Cleanup(func() { _ = srv.Close() })
+
+	entries := []syncwire.ExportEntry{
+		{RepoKey: "repoA", Record: syncwire.Record{ID: "a1", Kind: "learning", Title: "t", Body: "small entry that must not survive a rejected import", CreatedAt: 100, UpdatedAt: 100}},
+		{RepoKey: "repoA", Record: syncwire.Record{ID: "a2", Kind: "learning", Title: "t", Body: strings.Repeat("x", 1<<20), CreatedAt: 200, UpdatedAt: 200}},
+	}
+	body := importArchive(t, entries)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/import", bytes.NewReader(body))
+	req.Header.Set("Content-Encoding", "gzip")
+	rec := httptest.NewRecorder()
+
+	const tinyDecompressedLimit = 512 // far smaller than the archive's ~1MB decompressed size
+	srv.doImport(rec, req, int64(len(body))+1, tinyDecompressedLimit)
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want 413", rec.Code)
+	}
+
+	client, base := unixHTTPClient(t, srv.Handler())
+	resp := doReq(t, client, http.MethodGet, base+"/v1/repos/repoA/changes?since=0", "s3cret", nil)
+	defer resp.Body.Close()
+	var cr syncwire.ChangesResponse
+	if err := json.NewDecoder(resp.Body).Decode(&cr); err != nil {
+		t.Fatal(err)
+	}
+	if len(cr.Records) != 0 {
+		t.Fatalf("changes after a rejected oversized import = %+v, want none: a rejected import must not partially apply", cr.Records)
 	}
 }
