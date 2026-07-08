@@ -353,6 +353,18 @@ func (e *Engine) syncApplyAbsent(ctx context.Context, c store.Conn, rec syncwire
 	if err := e.insert(ctx, c, rec.ID, nm, searchText, sim, bands, rec.CreatedAt); err != nil {
 		return SyncNoop, "", err
 	}
+	// rec.ID may carry a STALE memory_sync_merges alias from an earlier merge
+	// (it previously reinforced some other canonical row — one that has since
+	// been deleted, e.g. via a tombstone, which is exactly why findNearDup just
+	// above found no surviving twin to reinforce and fell through to this
+	// insert instead: a legitimate resurrection of rec.ID as its own row).
+	// Retire that alias now: rec.ID is a real row again, so a LATER tombstone
+	// for rec.ID must resolve to rec.ID itself, not silently redirect through
+	// the defunct alias to a canonical id that no longer has (and, after this
+	// insert, never will have) anything to do with rec.ID.
+	if err := e.clearSyncMerge(ctx, c, rec.ID); err != nil {
+		return SyncNoop, "", err
+	}
 	if rec.UpdatedAt != rec.CreatedAt {
 		if _, err := c.ExecContext(ctx,
 			`UPDATE memories SET updated_at=? WHERE id=?`, rec.UpdatedAt, rec.ID); err != nil {
@@ -480,6 +492,15 @@ func (e *Engine) upsertSyncMerge(ctx context.Context, c store.Conn, id, canonID 
 		   canonical_id = excluded.canonical_id,
 		   updated_at = MAX(memory_sync_merges.updated_at, excluded.updated_at)`,
 		id, canonID, updatedAt)
+	return err
+}
+
+// clearSyncMerge retires any recorded "id merged into some canonical row"
+// alias for id. Called when id is (re)inserted as an actual row of its own,
+// so a stale alias from a defunct prior merge can never misdirect a later
+// tombstone for id to the wrong (possibly already-deleted) canonical id.
+func (e *Engine) clearSyncMerge(ctx context.Context, c store.Conn, id string) error {
+	_, err := c.ExecContext(ctx, `DELETE FROM memory_sync_merges WHERE id=?`, id)
 	return err
 }
 

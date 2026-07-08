@@ -749,6 +749,93 @@ func TestSyncApplyNonDeletedAliasRecordDoesNotResurrectAfterCanonicalTombstone(t
 	}
 }
 
+// TestSyncApplyStaleMergeAliasDoesNotMisdirectTombstoneAfterResurrection
+// covers a gap a review pass found in the legitimate-reinsertion path
+// TestSyncApplyNonDeletedAliasRecordDoesNotResurrectAfterCanonicalTombstone
+// exercises only up to the reinsert itself: once alias "origin-3" legitimately
+// reinserts as its OWN row after its old canonical merge target was deleted,
+// the STALE memory_sync_merges("origin-3" -> old canonical) row must not
+// survive that reinsertion. Before this fix it did, so a LATER tombstone for
+// "origin-3" (deleting the newly resurrected row) resolved through the stale
+// alias to the old, already-deleted canonical id instead — re-tombstoning a
+// row that no longer exists while leaving the actually-live resurrected row
+// under "origin-3" undeletable forever, and (on the sync server) indexing the
+// delete under the wrong id entirely.
+func TestSyncApplyStaleMergeAliasDoesNotMisdirectTombstoneAfterResurrection(t *testing.T) {
+	e := newTestEngine(t, clock.NewFake(time.UnixMilli(1_000_000)))
+	ctx := context.Background()
+
+	canonID, _, _, err := e.Record(ctx, NewMemory{
+		Kind: KindLearning, Title: "t", Body: "always cap goroutine pool size under load",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Merge alias "origin-3" -> canonID at updated_at=500.
+	dup := syncwire.Record{
+		ID: "origin-3", Kind: string(KindLearning), Title: "t",
+		Body: "always cap goroutine pool size under load!", CreatedAt: 500, UpdatedAt: 500,
+	}
+	out, mergedInto, err := e.SyncApply(ctx, dup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != SyncReinforced || mergedInto != canonID {
+		t.Fatalf("setup: want reinforced into %s, got %v %s", canonID, out, mergedInto)
+	}
+
+	// Delete the canonical row via a tombstone for the alias (resolves through
+	// memory_sync_merges, as TestSyncApplyTombstoneResolvesNearDupMergeAlias
+	// already proves).
+	canonAfterMerge, _ := e.GetByID(ctx, canonID)
+	deleteAt := canonAfterMerge.UpdatedAt + 1000
+	out, target, err := e.SyncApply(ctx, syncwire.Record{ID: "origin-3", Deleted: true, UpdatedAt: deleteAt})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != SyncTombstoned || target != canonID {
+		t.Fatalf("setup: want tombstoned %s, got %v %s", canonID, out, target)
+	}
+
+	// A genuinely newer, non-deleted record for "origin-3" legitimately
+	// resurrects it as its OWN row (the canonical row is gone, so there is no
+	// surviving near-duplicate to reinforce).
+	resurrectAt := deleteAt + 1000
+	resurrected := syncwire.Record{
+		ID: "origin-3", Kind: string(KindLearning), Title: "t",
+		Body: "always cap goroutine pool size under load, reborn", CreatedAt: resurrectAt, UpdatedAt: resurrectAt,
+	}
+	out, id, err := e.SyncApply(ctx, resurrected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != SyncInserted || id != "origin-3" {
+		t.Fatalf("setup: want a legitimate reinsert at origin-3, got %v %s", out, id)
+	}
+	if got, _ := e.GetByID(ctx, "origin-3"); got == nil {
+		t.Fatal("setup: the resurrected row must exist at origin-3")
+	}
+
+	// A later forget of the resurrected row arrives as a tombstone for
+	// "origin-3" — it must delete THAT row, not silently redirect through the
+	// stale (pre-resurrection) alias to the long-gone canonical id.
+	forgetAt := resurrectAt + 1000
+	out, target, err = e.SyncApply(ctx, syncwire.Record{ID: "origin-3", Deleted: true, UpdatedAt: forgetAt})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != SyncTombstoned {
+		t.Fatalf("want tombstoned, got %v", out)
+	}
+	if target != "origin-3" {
+		t.Fatalf("a stale alias must not misdirect the tombstone: want target=origin-3, got %s", target)
+	}
+	if got, _ := e.GetByID(ctx, "origin-3"); got != nil {
+		t.Fatalf("the resurrected row must be deleted, but survived: %+v", got)
+	}
+}
+
 func TestSyncApplyTombstoneNotPushedBack(t *testing.T) {
 	e := newTestEngine(t, clock.NewFake(time.UnixMilli(1_000_000)))
 	ctx := context.Background()

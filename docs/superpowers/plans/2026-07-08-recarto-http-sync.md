@@ -439,3 +439,52 @@ exception as before, `internal/mcp/handlers_feedback_test.go`);
 clean stash of this branch — this sandbox blocks loopback TCP, unrelated to
 this change); `-race` clean on `internal/memory`, `internal/remotesync`,
 `internal/syncserver`, `internal/store`.
+
+## Round 10 — review fix: stale merge alias misdirected a tombstone after a legitimate resurrection
+
+A review pass found a gap in round 8/9's alias-resolution fixes:
+`memory_sync_merges(id -> canonical_id)` rows, written by
+`syncApplyAbsent`'s near-duplicate reinforce path, were never retired once
+`id` legitimately became a real row of its own again. Concretely: alias `B`
+merges into canonical `A` at `updated_at=500` (`memory_sync_merges: B->A`);
+`A` is later deleted via a tombstone for `B` (round 8's fix correctly
+resolves and deletes `A`); a genuinely newer, non-deleted record for `B`
+then arrives (newer than both the merge and the delete) and legitimately
+reinserts as its own row at `B` — `findNearDup` finds nothing to reinforce
+since `A` is gone, so `syncApplyAbsent` falls through to its insert branch,
+exactly as designed. But the `B->A` alias row was never cleared by that
+insert, so it stayed on record. A subsequent tombstone for `B` (deleting the
+just-resurrected row) resolved `rec.ID` through the still-present, now-stale
+alias straight to `A` — a canonical id that no longer exists and, after the
+resurrection, has nothing to do with `B` anymore — so the tombstone silently
+re-recorded a delete for the defunct `A` while the live, resurrected `B` row
+was never touched and stayed permanently un-deletable. On the sync server
+this also meant the delete would be indexed under the wrong id entirely.
+
+Fixed by adding `Engine.clearSyncMerge`, called from `syncApplyAbsent`'s
+insert branch (`internal/memory/sync.go`) immediately after `insert()`
+lands a fresh row at `rec.ID`: it deletes any `memory_sync_merges` row keyed
+on `rec.ID`, so a subsequent tombstone for that id resolves to the id
+itself rather than a defunct alias target. This only fires on a genuine
+fresh insert (not on the reinforce branch, which doesn't change what `id`
+means), so it can't interfere with the replay guard at the top of
+`syncApplyAbsent` (which runs, and is evaluated, before this insert ever
+happens) or with any other alias still pointing at a *different*,
+still-relevant canonical id. New test:
+`TestSyncApplyStaleMergeAliasDoesNotMisdirectTombstoneAfterResurrection` —
+merges an alias into a canonical row, tombstones it through the alias (as
+in round 8), lets a newer record legitimately resurrect the alias id as its
+own row, then tombstones that alias id again and asserts the delete targets
+the resurrected row itself (not the stale, already-deleted canonical id) and
+that the resurrected row is actually gone afterward. Manually verified the
+new test fails (`target` resolves to the stale canonical id instead of the
+alias id) against the pre-fix code and passes against the fix.
+
+Verification after round 10: `go build ./...`, `go vet ./...` clean;
+`gofmt -l .` clean on all touched files (same pre-existing unrelated
+exception as before, `internal/mcp/handlers_feedback_test.go`);
+`go test ./...` green except the same pre-existing, environment-specific
+`internal/update` `TestHTTPFetcher` failure (reconfirmed unchanged on a
+clean stash of this branch — this sandbox blocks loopback TCP, unrelated to
+this change); `-race` clean on `internal/memory`, `internal/remotesync`,
+`internal/syncserver`, `internal/store`.
