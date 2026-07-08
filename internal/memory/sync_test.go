@@ -133,6 +133,70 @@ func TestSyncApplyLWWUpdateNewerWins(t *testing.T) {
 	}
 }
 
+func TestSyncApplyLWWUpdatePersistsExtraMetadata(t *testing.T) {
+	e := newTestEngine(t, clock.NewFake(time.UnixMilli(1_000_000)))
+	ctx := context.Background()
+
+	// A row that already exists locally (e.g. bootstrapped from an earlier
+	// pull) with no extra metadata yet.
+	id, _, _, err := e.Record(ctx, NewMemory{Kind: KindFeedback, Title: "t", Body: "recarto ranked the wrong result first"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, _ := e.GetByID(ctx, id)
+
+	// A newer incoming record — e.g. a resolved feedback report pushed from
+	// another machine — carries kind-specific extra metadata (mirrors what
+	// ResolveFeedback stores under extra.resolution_note).
+	rec := syncwire.Record{
+		ID: id, Kind: string(KindFeedback), Title: "t", Body: "recarto ranked the wrong result first",
+		Status: "resolved", Extra: map[string]any{"resolution_note": "fixed in v2"},
+		CreatedAt: before.CreatedAt, UpdatedAt: before.UpdatedAt + 1000,
+	}
+	out, canon, err := e.SyncApply(ctx, rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != SyncUpdated || canon != id {
+		t.Fatalf("want updated %s, got %v %s", id, out, canon)
+	}
+	after, err := e.GetByID(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if note, _ := after.Extra["resolution_note"].(string); note != "fixed in v2" {
+		t.Fatalf("a newer incoming record's extra metadata must be persisted, got %+v", after.Extra)
+	}
+}
+
+func TestSyncApplyAbsentInsertPersistsExtraMetadata(t *testing.T) {
+	e := newTestEngine(t, clock.NewFake(time.UnixMilli(1_000_000)))
+	ctx := context.Background()
+
+	// Bootstrap: this id has never existed locally, so SyncApply takes the
+	// insert path — extra metadata must still survive (mirrors ImportMemory's
+	// insert path, which already preserves it).
+	rec := syncwire.Record{
+		ID: "fb-1", Kind: string(KindFeedback), Title: "t", Body: "recarto ranked the wrong result first",
+		Status: "resolved", Extra: map[string]any{"resolution_note": "fixed in v2"},
+		CreatedAt: 500, UpdatedAt: 700,
+	}
+	out, id, err := e.SyncApply(ctx, rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != SyncInserted || id != "fb-1" {
+		t.Fatalf("want inserted fb-1, got %v %s", out, id)
+	}
+	got, err := e.GetByID(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if note, _ := got.Extra["resolution_note"].(string); note != "fixed in v2" {
+		t.Fatalf("a bootstrap insert must preserve extra metadata, got %+v", got.Extra)
+	}
+}
+
 func TestSyncApplyExistingOlderKeepsLocalButMaxesSoftSignals(t *testing.T) {
 	e := newTestEngine(t, clock.NewFake(time.UnixMilli(5_000_000)))
 	ctx := context.Background()

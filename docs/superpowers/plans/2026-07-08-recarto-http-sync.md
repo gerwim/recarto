@@ -107,3 +107,33 @@ clean except the same pre-existing unrelated file; `go test ./...` green except 
 same pre-existing `internal/update` `TestHTTPFetcher` failure; `-race` clean on
 `internal/memory`, `internal/remotesync`, `internal/syncserver`, `internal/mcp`,
 `internal/agents` (+ its `claudecode`/`copilot`/`opencode` subpackages), `internal/app`.
+
+## Round 3 — review fix: `extra` metadata dropped by sync
+
+A review pass found that `memory.SyncApply`'s same-id merge path
+(`syncApplyExisting`) overwrote title/body/status/etc. on a newer incoming
+record but never touched the `extra` column, silently dropping kind-specific
+metadata (e.g. a feedback report's `resolution_note`, set by `ResolveFeedback`)
+whenever the row already existed on the peer being synced to/from. The
+insert path (`syncApplyAbsent`, used for a never-before-seen id — the common
+bootstrap case) had the same gap: it built a `NewMemory` without copying
+`rec.Extra`, so `insert()` always wrote `extra="{}"`, unlike `ImportMemory`'s
+insert path, which already sets `Extra: im.Extra`. Fixed both: the LWW-update
+branch now marshals and writes `rec.Extra` alongside the other overwritten
+columns, and `syncApplyAbsent`'s `NewMemory` now carries `Extra: rec.Extra`.
+The near-dup reinforce path is unchanged by design (reinforcing, like
+`ImportMemory`'s reinforce path, never touches `extra` — only content-owning
+paths do). New tests: `TestSyncApplyLWWUpdatePersistsExtraMetadata`,
+`TestSyncApplyAbsentInsertPersistsExtraMetadata`.
+
+Verification after round 3: `go build ./...`, `go vet ./...` clean; `gofmt -l .`
+clean on all touched files (same pre-existing unrelated exception as before);
+`go test ./...` green except the same pre-existing `internal/update`
+`TestHTTPFetcher` failure (confirmed environment-specific: this sandbox
+blocks loopback TCP, unrelated to this change); `-race` clean on
+`internal/memory`, `internal/remotesync`, `internal/syncserver`,
+`internal/mcp`, `internal/agents` (+ subpackages), `internal/app`,
+`internal/store`, `internal/cli`, `internal/snapshot`. Unlike the prior two
+rounds, `go` was available in this session (`/usr/local/go/bin`, not on
+`PATH` by default) — all of the above was actually executed, not just
+inspected.

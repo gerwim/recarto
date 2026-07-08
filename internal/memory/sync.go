@@ -164,13 +164,17 @@ func (e *Engine) syncApplyExisting(ctx context.Context, c store.Conn, rec syncwi
 		if status == "" {
 			status = "active"
 		}
+		extraJSON, err := marshalExtra(rec.Extra)
+		if err != nil {
+			return SyncNoop, err
+		}
 		if _, err := c.ExecContext(ctx,
 			`UPDATE memories
 			    SET title=?, body=?, search_text=?, status=?, superseded_by=?, branch=?,
-			        confidence=?, reinforcement_count=?, pinned=?, simhash=?, updated_at=?
+			        confidence=?, reinforcement_count=?, pinned=?, simhash=?, updated_at=?, extra=?
 			  WHERE id=?`,
 			rec.Title, rec.Body, searchText, status, nullStr(rec.SupersededBy), nullStr(rec.Branch),
-			newConfidence, newReinforcement, boolToInt(newPinned), int64(sim), rec.UpdatedAt, rec.ID,
+			newConfidence, newReinforcement, boolToInt(newPinned), int64(sim), rec.UpdatedAt, extraJSON, rec.ID,
 		); err != nil {
 			return SyncNoop, err
 		}
@@ -207,6 +211,7 @@ func (e *Engine) syncApplyAbsent(ctx context.Context, c store.Conn, rec syncwire
 	nm := NewMemory{
 		Kind: Kind(rec.Kind), Title: rec.Title, Body: rec.Body, Refs: refs,
 		Branch: rec.Branch, Author: rec.Author, Source: rec.Source, Pinned: rec.Pinned,
+		Extra: rec.Extra,
 	}
 	set := shingleSet(rec.Body)
 	bands := bandHashes(minHashSignature(set))
