@@ -255,10 +255,16 @@ func (e *Engine) Record(ctx context.Context, nm NewMemory) (id string, reinforce
 		}
 		if found {
 			id, reinforced = candID, true
-			return e.reinforce(ctx, c, candID, nm, now)
+			if err := e.reinforce(ctx, c, candID, nm, now); err != nil {
+				return err
+			}
+			return e.markDirty(ctx, c, candID, now)
 		}
 		id, reinforced = ids.New(), false
 		if err := e.insert(ctx, c, id, nm, searchText, sim, bands, now); err != nil {
+			return err
+		}
+		if err := e.markDirty(ctx, c, id, now); err != nil {
 			return err
 		}
 		// Advisory contradiction suspects, judged by the recording agent. Same

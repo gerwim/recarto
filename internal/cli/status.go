@@ -78,5 +78,29 @@ func Status(ctx context.Context, a *app.App, w io.Writer) error {
 		}
 		fmt.Fprintf(w, "  %-24s %d\n", m, v)
 	}
+
+	fmt.Fprintln(w, "sync:")
+	if a.Sync == nil {
+		fmt.Fprintln(w, "  disabled (set RECARTO_SYNC_URL/RECARTO_SYNC_KEY; repo needs a root commit or RECARTO_SYNC_REPO)")
+		return nil
+	}
+	var cursor string
+	if err := a.Store.DB.QueryRowContext(ctx, `SELECT value FROM meta WHERE key='sync_cursor'`).Scan(&cursor); err != nil {
+		cursor = "0"
+	}
+	var pending int
+	if err := a.Store.DB.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM memory_sync_outbox`).Scan(&pending); err != nil {
+		return err
+	}
+	var pendingTombs int
+	if err := a.Store.DB.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM memory_tombstones WHERE pushed=0`).Scan(&pendingTombs); err != nil {
+		return err
+	}
+	fmt.Fprintf(w, "  %-24s %s\n", "repo key", a.Sync.RepoKeyValue())
+	fmt.Fprintf(w, "  %-24s %s\n", "cursor", cursor)
+	fmt.Fprintf(w, "  %-24s %d\n", "pending push", pending)
+	fmt.Fprintf(w, "  %-24s %d\n", "pending tombstones", pendingTombs)
 	return nil
 }

@@ -41,6 +41,32 @@ func Handle(ctx context.Context, a *app.App, ev Event) (Result, error) {
 // var so tests can shrink it.
 var sessionStartIndexBudget = 15 * time.Second
 
+// syncPullBudget / syncPushBudget bound the best-effort HTTP memory-sync pull
+// (session-start, before recall) and push (Stop). Sync payloads are small
+// text-only memory rows (never the code graph), so these are much shorter
+// than the graph warm-up budget; a wedged or unreachable sync server must
+// never delay the agent. Vars so tests can shrink them.
+var syncPullBudget = 5 * time.Second
+var syncPushBudget = 5 * time.Second
+
+// boundedSync runs fn (a Syncer.Pull or Syncer.Push call) with a hard
+// deadline, exactly like the graph warm-up goroutine below: abandoning a slow
+// or unreachable server is safe because sync is best-effort and additive —
+// nothing local depends on it completing.
+func boundedSync(ctx context.Context, budget time.Duration, fn func(context.Context) error) {
+	sctx, cancel := context.WithTimeout(ctx, budget)
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		_ = fn(sctx)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-sctx.Done():
+	}
+}
+
 // newGraphSource builds the file source for the session-start warm-up; a var so
 // tests can substitute a controllable source.
 var newGraphSource = graph.NewSource
@@ -101,6 +127,14 @@ func handleSessionStart(ctx context.Context, a *app.App, ev Event) (Result, erro
 	select {
 	case <-warmed:
 	case <-sctx.Done():
+	}
+
+	// Pull remote memory changes before recall, so this session's injected
+	// context reflects other machines' work (best-effort, bounded — a wedged or
+	// unreachable sync server must never delay the agent). No-op when sync is
+	// unconfigured (a.Sync == nil).
+	if a.Sync != nil {
+		boundedSync(ctx, syncPullBudget, a.Sync.Pull)
 	}
 
 	// Absorb a teammate's committed memory snapshot when it changed (best-effort).
@@ -450,6 +484,13 @@ func handleStop(ctx context.Context, a *app.App, ev Event) (Result, error) {
 	// Turn boundary: the agent is idle, so a TRUNCATE checkpoint can actually
 	// win the WAL (mid-session it silently yields to concurrent readers).
 	_ = a.Store.Checkpoint(ctx)
+	// Flush anything recorded this session to the remote sync server
+	// (best-effort, bounded). This is the linchpin for an ephemeral host (e.g. a
+	// ForgeBoard microVM): without it, memories recorded in a session that is
+	// about to be destroyed would never leave this machine.
+	if a.Sync != nil {
+		boundedSync(ctx, syncPushBudget, a.Sync.Push)
+	}
 	if ev.StopActive {
 		return Result{}, nil
 	}

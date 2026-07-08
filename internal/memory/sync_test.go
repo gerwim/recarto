@@ -1,0 +1,406 @@
+package memory
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	"git.gerwim.nl/gerwim/recarto/internal/clock"
+	"git.gerwim.nl/gerwim/recarto/internal/syncwire"
+)
+
+func TestSyncApplyInsertsNewRecord(t *testing.T) {
+	e := newTestEngine(t, clock.NewFake(time.UnixMilli(1_000_000)))
+	ctx := context.Background()
+
+	rec := syncwire.Record{
+		ID: "r1", Kind: string(KindLearning), Title: "t", Body: "a durable learning about retries",
+		Confidence: 0.8, ReinforcementCount: 2, CreatedAt: 500, UpdatedAt: 700,
+		Refs: []syncwire.Ref{{Type: "file", Value: "a.go"}},
+	}
+	out, id, err := e.SyncApply(ctx, rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != SyncInserted || id != "r1" {
+		t.Fatalf("want inserted r1, got %v %s", out, id)
+	}
+	got, _ := e.GetByID(ctx, "r1")
+	if got == nil {
+		t.Fatal("record not found")
+	}
+	if got.CreatedAt != 500 || got.UpdatedAt != 700 {
+		t.Fatalf("timestamps not preserved: %+v", got)
+	}
+	if got.Confidence != 0.8 || got.ReinforcementCount != 2 {
+		t.Fatalf("metadata not preserved: %+v", got)
+	}
+	if len(got.Refs) != 1 || got.Refs[0].Value != "a.go" {
+		t.Fatalf("refs not persisted: %+v", got.Refs)
+	}
+
+	// An inserted-via-sync row must NOT be queued for push (it came from
+	// elsewhere — pushing it back would echo it straight to the server).
+	pending, err := e.PendingPush(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 0 {
+		t.Fatalf("SyncApply insert must not dirty the outbox, got %v", pending)
+	}
+}
+
+func TestSyncApplyReinforcesNearDupAndReturnsCanonicalID(t *testing.T) {
+	e := newTestEngine(t, clock.NewFake(time.UnixMilli(1_000_000)))
+	ctx := context.Background()
+
+	local, _, _, err := e.Record(ctx, NewMemory{
+		Kind: KindLearning, Title: "t", Body: "a durable learning about retries and backoff",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Clear the outbox entry Record() created, so the test cleanly observes only
+	// what SyncApply itself does to the outbox below.
+	if err := e.ClearPushed(ctx, []string{local}); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := syncwire.Record{
+		ID: "remote-1", Kind: string(KindLearning), Title: "t",
+		Body: "a durable learning about retries and backoff!", Confidence: 0.95, Pinned: true,
+		CreatedAt: 2000, UpdatedAt: 2000,
+	}
+	out, id, err := e.SyncApply(ctx, rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != SyncReinforced {
+		t.Fatalf("want reinforced, got %v", out)
+	}
+	if id != local {
+		t.Fatalf("canonical id must be the existing local row %q, got %q", local, id)
+	}
+	got, _ := e.GetByID(ctx, local)
+	if !got.Pinned || got.Confidence < 0.95 {
+		t.Fatalf("reinforce must MAX pinned/confidence: %+v", got)
+	}
+	// remote-1 never exists as its own row.
+	if r, _ := e.GetByID(ctx, "remote-1"); r != nil {
+		t.Fatalf("a reinforced near-dup must not create a row at the incoming id")
+	}
+	pending, err := e.PendingPush(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 0 {
+		t.Fatalf("SyncApply reinforce must not dirty the outbox, got %v", pending)
+	}
+}
+
+func TestSyncApplyLWWUpdateNewerWins(t *testing.T) {
+	e := newTestEngine(t, clock.NewFake(time.UnixMilli(1_000_000)))
+	ctx := context.Background()
+
+	id, _, _, err := e.Record(ctx, NewMemory{Kind: KindPreference, Title: "old", Body: "prefer tabs over spaces"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, _ := e.GetByID(ctx, id)
+
+	rec := syncwire.Record{
+		ID: id, Kind: string(KindPreference), Title: "new", Body: "prefer spaces over tabs, decided later",
+		Confidence: 1.0, ReinforcementCount: 5, CreatedAt: before.CreatedAt, UpdatedAt: before.UpdatedAt + 1000,
+	}
+	out, canon, err := e.SyncApply(ctx, rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != SyncUpdated || canon != id {
+		t.Fatalf("want updated %s, got %v %s", id, out, canon)
+	}
+	after, _ := e.GetByID(ctx, id)
+	if after.Title != "new" || after.Body != rec.Body {
+		t.Fatalf("newer incoming record must overwrite content: %+v", after)
+	}
+	if after.UpdatedAt != before.UpdatedAt+1000 {
+		t.Fatalf("updated_at must adopt the incoming (newer) value: %+v", after)
+	}
+	if after.ReinforcementCount != 5 {
+		t.Fatalf("reinforcement_count must take the incoming MAX: %+v", after)
+	}
+}
+
+func TestSyncApplyExistingOlderKeepsLocalButMaxesSoftSignals(t *testing.T) {
+	e := newTestEngine(t, clock.NewFake(time.UnixMilli(5_000_000)))
+	ctx := context.Background()
+
+	id, _, _, err := e.Record(ctx, NewMemory{Kind: KindPreference, Title: "keep me", Body: "prefer tabs over spaces"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, _ := e.GetByID(ctx, id)
+
+	// Incoming record is OLDER (updated_at in the past) but claims higher
+	// confidence/reinforcement/pinned — those must still ratchet up even though
+	// content is not overwritten.
+	rec := syncwire.Record{
+		ID: id, Kind: string(KindPreference), Title: "should not appear", Body: "should not appear either",
+		Confidence: 1.0, ReinforcementCount: before.ReinforcementCount + 10, Pinned: true,
+		CreatedAt: before.CreatedAt, UpdatedAt: before.UpdatedAt - 1,
+	}
+	out, canon, err := e.SyncApply(ctx, rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != SyncUpdated || canon != id {
+		t.Fatalf("want updated (soft-signal merge) %s, got %v %s", id, out, canon)
+	}
+	after, _ := e.GetByID(ctx, id)
+	if after.Title != before.Title || after.Body != before.Body {
+		t.Fatalf("an older incoming record must not overwrite content: %+v", after)
+	}
+	if !after.Pinned {
+		t.Fatalf("pinned must ratchet up even from a stale record: %+v", after)
+	}
+	if after.ReinforcementCount != before.ReinforcementCount+10 {
+		t.Fatalf("reinforcement_count must still take MAX: %+v", after)
+	}
+	if after.UpdatedAt != before.UpdatedAt {
+		t.Fatalf("updated_at must NOT change when content is not overwritten: %+v", after)
+	}
+}
+
+func TestSyncApplyIdempotentReapplyIsNoop(t *testing.T) {
+	e := newTestEngine(t, clock.NewFake(time.UnixMilli(1_000_000)))
+	ctx := context.Background()
+
+	rec := syncwire.Record{
+		ID: "r1", Kind: string(KindLearning), Title: "t", Body: "a durable learning about retries",
+		Confidence: 0.8, ReinforcementCount: 2, CreatedAt: 500, UpdatedAt: 700,
+	}
+	if out, _, err := e.SyncApply(ctx, rec); err != nil || out != SyncInserted {
+		t.Fatalf("setup insert: out=%v err=%v", out, err)
+	}
+	// Re-applying the exact same record (as a naive re-push/re-pull would) must
+	// be a genuine no-op: no content changed, so the server must not bump seq
+	// for it and the client outbox must stay empty.
+	out, canon, err := e.SyncApply(ctx, rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != SyncNoop {
+		t.Fatalf("idempotent re-apply must be a Noop, got %v (canon=%s)", out, canon)
+	}
+}
+
+func TestSyncApplyTombstoneDeletesLocalRow(t *testing.T) {
+	e := newTestEngine(t, clock.NewFake(time.UnixMilli(1_000_000)))
+	ctx := context.Background()
+
+	id, _, _, err := e.Record(ctx, NewMemory{Kind: KindLearning, Title: "t", Body: "ephemeral note"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, _ := e.GetByID(ctx, id)
+
+	out, canon, err := e.SyncApply(ctx, syncwire.Record{ID: id, Deleted: true, UpdatedAt: before.UpdatedAt + 1000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != SyncTombstoned || canon != id {
+		t.Fatalf("want tombstoned %s, got %v %s", id, out, canon)
+	}
+	if rec, _ := e.GetByID(ctx, id); rec != nil {
+		t.Fatalf("tombstone must delete the local row: %+v", rec)
+	}
+}
+
+func TestSyncApplyTombstoneGuardsAgainstResurrection(t *testing.T) {
+	e := newTestEngine(t, clock.NewFake(time.UnixMilli(1_000_000)))
+	ctx := context.Background()
+
+	id, _, _, err := e.Record(ctx, NewMemory{Kind: KindLearning, Title: "t", Body: "ephemeral note about caches"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, _ := e.GetByID(ctx, id)
+	deleteAt := before.UpdatedAt + 1000
+
+	if out, _, err := e.SyncApply(ctx, syncwire.Record{ID: id, Deleted: true, UpdatedAt: deleteAt}); err != nil || out != SyncTombstoned {
+		t.Fatalf("setup tombstone: out=%v err=%v", out, err)
+	}
+
+	// An older non-deleted record for the same id arrives after the tombstone
+	// (e.g. a stale, out-of-order pull page) — it must NOT resurrect the row.
+	stale := syncwire.Record{
+		ID: id, Kind: string(KindLearning), Title: "t", Body: "ephemeral note about caches",
+		CreatedAt: before.CreatedAt, UpdatedAt: deleteAt - 1,
+	}
+	out, _, err := e.SyncApply(ctx, stale)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != SyncNoop {
+		t.Fatalf("a record older than a recorded tombstone must be dropped as Noop, got %v", out)
+	}
+	if rec, _ := e.GetByID(ctx, id); rec != nil {
+		t.Fatalf("resurrection guard failed: row reappeared: %+v", rec)
+	}
+}
+
+func TestSyncApplyTombstoneOlderThanLocalEditKeepsLocal(t *testing.T) {
+	e := newTestEngine(t, clock.NewFake(time.UnixMilli(10_000_000)))
+	ctx := context.Background()
+
+	id, _, _, err := e.Record(ctx, NewMemory{Kind: KindLearning, Title: "t", Body: "still relevant note"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, _ := e.GetByID(ctx, id)
+
+	// A tombstone that predates the local row's last edit must lose: the local
+	// edit happened after the remote decided to delete it.
+	out, _, err := e.SyncApply(ctx, syncwire.Record{ID: id, Deleted: true, UpdatedAt: before.UpdatedAt - 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != SyncNoop {
+		t.Fatalf("a stale tombstone must not win over a newer local edit, got %v", out)
+	}
+	if rec, _ := e.GetByID(ctx, id); rec == nil {
+		t.Fatal("local row must survive a stale tombstone")
+	}
+}
+
+func TestSyncApplyTombstoneNotPushedBack(t *testing.T) {
+	e := newTestEngine(t, clock.NewFake(time.UnixMilli(1_000_000)))
+	ctx := context.Background()
+
+	id, _, _, err := e.Record(ctx, NewMemory{Kind: KindLearning, Title: "t", Body: "ephemeral note"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, _ := e.GetByID(ctx, id)
+
+	// Simulate learning about this delete via a PULL from the server (not a
+	// local Forget): the resulting local tombstone must be marked as already
+	// known remotely, so it never gets queued for an outbound push.
+	if out, _, err := e.SyncApply(ctx, syncwire.Record{ID: id, Deleted: true, UpdatedAt: before.UpdatedAt + 1}); err != nil || out != SyncTombstoned {
+		t.Fatalf("setup: out=%v err=%v", out, err)
+	}
+	pending, err := e.PendingTombstones(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range pending {
+		if p.ID == id {
+			t.Fatalf("a remote-learned tombstone must not be queued for push: %+v", p)
+		}
+	}
+}
+
+func TestForgetTombstoneIsQueuedForPush(t *testing.T) {
+	e := newTestEngine(t, clock.NewFake(time.UnixMilli(1_000_000)))
+	ctx := context.Background()
+
+	id, _, _, err := e.Record(ctx, NewMemory{Kind: KindLearning, Title: "t", Body: "forget me"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := e.ClearPushed(ctx, []string{id}); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := e.Forget(ctx, id, "test"); err != nil || !ok {
+		t.Fatalf("Forget: ok=%v err=%v", ok, err)
+	}
+	pending, err := e.PendingTombstones(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, p := range pending {
+		if p.ID == id {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("an explicit Forget must queue a tombstone for push, got %+v", pending)
+	}
+
+	if err := e.MarkTombstonesPushed(ctx, []string{id}); err != nil {
+		t.Fatal(err)
+	}
+	pending, err = e.PendingTombstones(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range pending {
+		if p.ID == id {
+			t.Fatalf("MarkTombstonesPushed must clear the pending queue: %+v", pending)
+		}
+	}
+}
+
+func TestCompactionNeverWritesTombstones(t *testing.T) {
+	clk := clock.NewFake(time.UnixMilli(1_000_000))
+	e := newTestEngine(t, clk)
+	ctx := context.Background()
+
+	// Two near-duplicate active learnings: dedupSweep should merge (supersede)
+	// one into the other without ever touching memory_tombstones.
+	if _, _, _, err := e.Record(ctx, NewMemory{Kind: KindLearning, Title: "t", Body: "always vendor go modules for reproducible builds"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := e.Record(ctx, NewMemory{Kind: KindLearning, Title: "t", Body: "always vendor go modules for reproducible builds!"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.dedupSweep(ctx, false, defaultDedupBuckets); err != nil {
+		t.Fatal(err)
+	}
+	// Also exercise archive/GC paths directly.
+	if _, err := e.gcSuperseded(ctx, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := e.evictToBudget(ctx, 1, 0, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.gcArchived(ctx, 1000, false); err != nil {
+		t.Fatal(err)
+	}
+
+	var n int
+	if err := e.st.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM memory_tombstones`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("compaction must never write tombstones (only explicit Forget does), found %d", n)
+	}
+}
+
+func TestPendingPushClearedAfterPush(t *testing.T) {
+	e := newTestEngine(t, clock.NewFake(time.UnixMilli(1_000_000)))
+	ctx := context.Background()
+
+	id, _, _, err := e.Record(ctx, NewMemory{Kind: KindLearning, Title: "t", Body: "locally authored knowledge"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, err := e.PendingPush(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 1 || pending[0].ID != id {
+		t.Fatalf("locally-authored Record must be queued for push, got %+v", pending)
+	}
+	if err := e.ClearPushed(ctx, []string{id}); err != nil {
+		t.Fatal(err)
+	}
+	pending, err = e.PendingPush(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 0 {
+		t.Fatalf("ClearPushed must empty the outbox, got %+v", pending)
+	}
+}

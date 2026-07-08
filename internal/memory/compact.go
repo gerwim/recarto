@@ -21,8 +21,8 @@ const (
 	// safety valve against runaway growth, not routine behavior.
 	DefaultBudgetTokens = 250_000
 
-	halfLifeStdEpochs = 30.0 // preference / learning / todo
-	archiveGraceEpochs   = 30   // archived -> hard-deleted after this many epochs
+	halfLifeStdEpochs  = 30.0 // preference / learning / todo
+	archiveGraceEpochs = 30   // archived -> hard-deleted after this many epochs
 
 	defaultDedupBuckets = 1000 // dedup sweep work budget per pass (cursor resumes)
 
@@ -475,6 +475,11 @@ func betterCanonical(a, b dedupMember) bool {
 }
 
 // applyMerge supersedes dups into canon and bumps canon's reinforcement_count.
+// dups are pure local housekeeping and are never tombstoned (a remote peer's
+// copy of a dup is a perfectly fine active memory on its own — dedup is a
+// per-store space optimization, not a delete other machines should learn of).
+// canon's reinforcement bump IS locally-authored content change, so it is
+// queued for the next push like any other local write.
 func (e *Engine) applyMerge(ctx context.Context, canonID string, dups []dedupMember, now int64) error {
 	return e.st.WriteTx(ctx, func(c store.Conn) error {
 		for _, d := range dups {
@@ -487,10 +492,12 @@ func (e *Engine) applyMerge(ctx context.Context, canonID string, dups []dedupMem
 				return err
 			}
 		}
-		_, err := c.ExecContext(ctx,
+		if _, err := c.ExecContext(ctx,
 			`UPDATE memories SET reinforcement_count = reinforcement_count + ?, updated_at=?
-			  WHERE id=? AND status='active'`, len(dups), now, canonID)
-		return err
+			  WHERE id=? AND status='active'`, len(dups), now, canonID); err != nil {
+			return err
+		}
+		return e.markDirty(ctx, c, canonID, now)
 	})
 }
 

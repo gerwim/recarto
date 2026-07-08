@@ -8,7 +8,7 @@ import (
 )
 
 // schemaVersion is the number of applied migrations.
-const schemaVersion = 19
+const schemaVersion = 20
 
 // migrations are applied in order; index+1 becomes user_version.
 var migrations = []string{
@@ -491,6 +491,39 @@ CREATE TABLE IF NOT EXISTS graph_deltas (
   at             INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_graph_deltas_wt_at ON graph_deltas(worktree, at);
+`,
+	// v20 (HTTP memory sync): two additive, non-graph tables supporting
+	// cross-machine memory sync over the HTTP API (internal/remotesync,
+	// internal/syncserver).
+	//
+	// memory_tombstones records explicit Forget()s so a hard delete can be
+	// propagated to remote peers (a bare DELETE leaves nothing to sync) and so an
+	// incoming non-deleted record older than a recorded delete does not
+	// resurrect it. `pushed` distinguishes a tombstone this machine authored and
+	// must still push (0) from one it learned about from a remote pull, which
+	// must never be pushed back (1) — see memory.SyncApply.
+	//
+	// memory_sync_outbox is the local push queue: a row is present exactly when
+	// that memory has a LOCALLY authored change (Record/ImportMemory/dedup
+	// merge) not yet confirmed pushed. It is populated only by local-authoring
+	// paths and cleared after a successful push, NEVER touched by SyncApply's
+	// own pull-merge writes — this is what makes push selection immune to
+	// clock skew and to echoing a just-pulled remote row back at the server
+	// (a naive `updated_at > watermark` selector could not tell the two apart).
+	// ON DELETE CASCADE keeps it tidy when a memory is later hard-deleted.
+	// Both tables start empty and are idempotent (IF NOT EXISTS) so the
+	// migration replays safely under the rollback tests.
+	`
+CREATE TABLE IF NOT EXISTS memory_tombstones (
+  id         TEXT PRIMARY KEY,
+  deleted_at INTEGER NOT NULL,
+  pushed     INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS memory_sync_outbox (
+  memory_id  TEXT PRIMARY KEY REFERENCES memories(id) ON DELETE CASCADE,
+  updated_at INTEGER NOT NULL
+);
 `,
 }
 

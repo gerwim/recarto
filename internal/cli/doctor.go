@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"git.gerwim.nl/gerwim/recarto/internal/app"
 )
@@ -59,6 +60,23 @@ func Doctor(ctx context.Context, a *app.App, w io.Writer) error {
 
 	check("git", a.Git.RepoID != "", fmt.Sprintf("id=%s repo=%s branch=%s nongit=%v",
 		a.Git.RepoID, a.Git.RepoName, a.Git.Branch, a.Git.NonGit))
+
+	// Sync reachability is diagnostic only: an unreachable server must never
+	// fail doctor (offline mode is the floor), so this check never flips allOK.
+	if a.Sync == nil {
+		fmt.Fprintln(w, "[ok] sync: disabled")
+	} else {
+		pctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		err := a.Sync.Ping(pctx)
+		cancel()
+		status := "ok"
+		detail := fmt.Sprintf("repo_key=%s reachable", a.Sync.RepoKeyValue())
+		if err != nil {
+			status = "warn"
+			detail = fmt.Sprintf("repo_key=%s unreachable: %v", a.Sync.RepoKeyValue(), err)
+		}
+		fmt.Fprintf(w, "[%s] sync: %s\n", status, detail)
+	}
 
 	if !allOK {
 		return fmt.Errorf("doctor: one or more checks failed")

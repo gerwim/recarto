@@ -12,7 +12,7 @@ import (
 // known reports whether cmd is a CLI command that needs an open App.
 func known(cmd string) bool {
 	switch cmd {
-	case "status", "doctor", "remember", "forget", "recall", "bug", "memory", "serve", "hook", "index", "graph", "compact", "snapshot", "todo":
+	case "status", "doctor", "remember", "forget", "recall", "bug", "memory", "serve", "hook", "index", "graph", "compact", "snapshot", "todo", "sync":
 		return true
 	}
 	return false
@@ -47,8 +47,14 @@ func Run(args []string, out io.Writer) error {
 		return Feedback(context.Background(), out, rest)
 	}
 
+	// server is a standalone daemon: no git repo, no per-repo App — it holds one
+	// store per repo key for whichever repos its clients push/pull.
+	if cmd == "server" {
+		return ServerCmd(context.Background(), out, rest)
+	}
+
 	if !known(cmd) {
-		return fmt.Errorf("unknown command %q (try: init serve hook status doctor remember forget recall bug feedback memory index graph compact snapshot todo)", cmd)
+		return fmt.Errorf("unknown command %q (try: init serve hook status doctor remember forget recall bug feedback memory index graph compact snapshot todo sync server)", cmd)
 	}
 
 	a, err := app.Open(app.Config{})
@@ -95,6 +101,8 @@ func Run(args []string, out io.Writer) error {
 		return Snapshot(ctx, a, out, rest)
 	case "todo":
 		return Todo(ctx, a, out, rest)
+	case "sync":
+		return Sync(ctx, a, out, rest)
 	}
 	return nil // unreachable: known() gates the switch
 }
@@ -127,5 +135,7 @@ func usage(w io.Writer) error {
 	fmt.Fprintln(w, "  snapshot          export|import the committable team memory (.recarto/memory.jsonl)")
 	fmt.Fprintln(w, "  todo list|done    list open todos, or mark one done")
 	fmt.Fprintln(w, "  update            self-update to the latest (or a chosen) release (--version --list --check --yes)")
+	fmt.Fprintln(w, "  sync              manual HTTP memory sync (--pull --push --full); auto-runs at session-start/stop")
+	fmt.Fprintln(w, "  server            run the HTTP memory-sync server (--addr --data-dir --tls-cert --tls-key; needs RECARTO_SERVER_KEY)")
 	return nil
 }

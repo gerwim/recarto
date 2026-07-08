@@ -332,12 +332,12 @@ func TestLatestCheckMigrationPreservesMemoriesAndColumns(t *testing.T) {
 		VALUES('t2','todo','done',1,1)`)
 }
 
-func TestSchemaVersionIs19(t *testing.T) {
-	if schemaVersion != 19 {
-		t.Fatalf("schemaVersion = %d, want 19", schemaVersion)
+func TestSchemaVersionIs20(t *testing.T) {
+	if schemaVersion != 20 {
+		t.Fatalf("schemaVersion = %d, want 20", schemaVersion)
 	}
-	if len(migrations) != 19 {
-		t.Fatalf("len(migrations) = %d, want 19", len(migrations))
+	if len(migrations) != 20 {
+		t.Fatalf("len(migrations) = %d, want 20", len(migrations))
 	}
 	st, err := Open(filepath.Join(t.TempDir(), "store.db"))
 	if err != nil {
@@ -348,8 +348,8 @@ func TestSchemaVersionIs19(t *testing.T) {
 	if err := st.DB.QueryRow("PRAGMA user_version").Scan(&v); err != nil {
 		t.Fatal(err)
 	}
-	if v != 19 {
-		t.Fatalf("user_version = %d, want 19", v)
+	if v != 20 {
+		t.Fatalf("user_version = %d, want 20", v)
 	}
 }
 

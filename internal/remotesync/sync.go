@@ -1,0 +1,172 @@
+package remotesync
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"net/http"
+	"strconv"
+
+	"git.gerwim.nl/gerwim/recarto/internal/gitctx"
+	"git.gerwim.nl/gerwim/recarto/internal/memory"
+	"git.gerwim.nl/gerwim/recarto/internal/store"
+)
+
+// metaCursor is the meta key holding the last-applied server seq (the pull
+// cursor). It is the ONLY sync-cursor mechanism — never a timestamp — because
+// updated_at is set by whichever machine authored a row and is therefore
+// clock-skew-sensitive; seq is assigned solely by the server and is
+// monotonic.
+const metaCursor = "sync_cursor"
+
+// pullPageLimit bounds each pull page so a huge bootstrap (a fresh clone, or a
+// fresh ForgeBoard microVM with cursor 0) makes bounded incremental progress
+// instead of one unbounded response.
+const pullPageLimit = 500
+
+// pushBatchSize bounds each push request body.
+const pushBatchSize = 200
+
+// Syncer orchestrates pull-then-push for one repo against one server.
+type Syncer struct {
+	repoKey string
+	client  *Client
+	eng     *memory.Engine
+	st      *store.Store
+}
+
+// New returns a Syncer for gc, or ok=false when sync is not configured (no
+// URL/key) or the repo has no resolvable cross-machine identity (RepoKey).
+// Either case means "stay local-only" — never an error.
+func New(cfg Config, gc gitctx.Context, eng *memory.Engine, st *store.Store) (*Syncer, bool) {
+	if !cfg.Enabled() {
+		return nil, false
+	}
+	key, ok := RepoKey(gc)
+	if !ok {
+		return nil, false
+	}
+	timeout := cfg.Timeout
+	if timeout <= 0 {
+		timeout = defaultTimeout
+	}
+	return &Syncer{
+		repoKey: key,
+		eng:     eng,
+		st:      st,
+		client:  &Client{BaseURL: cfg.URL, Key: cfg.Key, HTTP: &http.Client{Timeout: timeout}},
+	}, true
+}
+
+// Pull applies remote changes since the local cursor into the local store,
+// paging until the server reports no more, advancing the cursor after each
+// applied page so an interrupted pull resumes rather than restarting.
+func (s *Syncer) Pull(ctx context.Context) error {
+	cursor, err := s.getCursor(ctx)
+	if err != nil {
+		return err
+	}
+	for {
+		resp, err := s.client.Pull(ctx, s.repoKey, cursor, pullPageLimit)
+		if err != nil {
+			return err
+		}
+		for _, rec := range resp.Records {
+			if _, _, err := s.eng.SyncApply(ctx, rec); err != nil {
+				return err
+			}
+		}
+		cursor = resp.Cursor
+		if err := s.setCursor(ctx, cursor); err != nil {
+			return err
+		}
+		if !resp.More {
+			return nil
+		}
+	}
+}
+
+// Push sends every locally-authored change (the outbox) and pending tombstone
+// to the server, in bounded batches, clearing each batch's local queue entries
+// only after the server confirms it.
+func (s *Syncer) Push(ctx context.Context) error {
+	recs, err := s.eng.PendingPush(ctx)
+	if err != nil {
+		return err
+	}
+	tombs, err := s.eng.PendingTombstones(ctx)
+	if err != nil {
+		return err
+	}
+	all := append(recs, tombs...)
+	for start := 0; start < len(all); start += pushBatchSize {
+		end := min(start+pushBatchSize, len(all))
+		batch := all[start:end]
+		if _, err := s.client.Push(ctx, s.repoKey, batch); err != nil {
+			return err
+		}
+		var pushedIDs, tombIDs []string
+		for _, r := range batch {
+			if r.Deleted {
+				tombIDs = append(tombIDs, r.ID)
+			} else {
+				pushedIDs = append(pushedIDs, r.ID)
+			}
+		}
+		if err := s.eng.ClearPushed(ctx, pushedIDs); err != nil {
+			return err
+		}
+		if err := s.eng.MarkTombstonesPushed(ctx, tombIDs); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Once runs a bounded, best-effort pull then push. Callers (session-start /
+// Stop hooks, the `serve` background ticker) treat any returned error as
+// non-blocking: sync is additive, never load-bearing for local operation.
+func (s *Syncer) Once(ctx context.Context) error {
+	if err := s.Pull(ctx); err != nil {
+		return err
+	}
+	return s.Push(ctx)
+}
+
+func (s *Syncer) getCursor(ctx context.Context) (int64, error) {
+	var v string
+	err := s.st.DB.QueryRowContext(ctx, `SELECT value FROM meta WHERE key=?`, metaCursor).Scan(&v)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	n, _ := strconv.ParseInt(v, 10, 64)
+	return n, nil
+}
+
+func (s *Syncer) setCursor(ctx context.Context, cursor int64) error {
+	return s.st.WriteTx(ctx, func(c store.Conn) error {
+		_, err := c.ExecContext(ctx,
+			`INSERT INTO meta(key, value) VALUES (?, ?)
+			 ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+			metaCursor, strconv.FormatInt(cursor, 10))
+		return err
+	})
+}
+
+// ResetCursor rewinds the local pull cursor and outbox-independent watermark to
+// zero, forcing a full re-pull on the next Pull (used by `recarto sync --full`
+// to reconcile from scratch). It does not touch the outbox or tombstones — a
+// local push queue always reflects real pending local authorship regardless.
+func (s *Syncer) ResetCursor(ctx context.Context) error {
+	return s.setCursor(ctx, 0)
+}
+
+// RepoKeyValue returns the resolved repo key this Syncer talks to the server
+// with (for diagnostics: `recarto doctor`/`status`).
+func (s *Syncer) RepoKeyValue() string { return s.repoKey }
+
+// Ping checks server reachability (for `recarto doctor`).
+func (s *Syncer) Ping(ctx context.Context) error { return s.client.Healthz(ctx) }

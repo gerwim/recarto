@@ -35,6 +35,9 @@ feature parity across all three.
   [the design](docs/superpowers/specs/2026-06-04-query-guided-search-design.md).
 - **Session injection** — at session start Recarto injects the most relevant memories
   for the current branch, a compact module map, and recent bugs.
+- **HTTP memory sync** (optional) — converge memories across machines working the same
+  repo, while staying fully functional offline. See
+  [Sharing memory across machines](#sharing-memory-across-machines-http-sync).
 
 ## Install
 
@@ -252,6 +255,61 @@ Measure-Command { recarto recall "auth flow" }
 - **No daemon.** Hooks are pure exit-0 CLI invocations; the code graph reconciles
   lazily at session start and incrementally on each edit.
 - **Languages:** Go, C#, TypeScript (+TSX), JavaScript (+JSX) via tree-sitter.
+
+## Sharing memory across machines (HTTP sync)
+
+Recarto's store is per-machine: working the same repo from a laptop, a desktop, and an
+ephemeral CI/agent sandbox gives each one its own independent memory. HTTP sync converges
+just the **memory** (preferences, learnings, decisions, bugs, todos) across machines —
+never the code graph, which is derived from source, per-worktree, and rebuilt locally in
+seconds regardless of sync.
+
+**Run a server** (one instance is enough — this is per-user data, not a multi-tenant
+service):
+
+```sh
+RECARTO_SERVER_KEY=<a long random token> recarto server --addr :8080 --data-dir /var/lib/recarto-sync
+```
+
+Put it behind a TLS-terminating reverse proxy, or pass `--tls-cert`/`--tls-key` directly.
+`RECARTO_SERVER_KEY` is required — the process refuses to start without it.
+
+**Point every machine's client at it**, using the same static key:
+
+```sh
+export RECARTO_SYNC_URL=https://recarto-sync.internal
+export RECARTO_SYNC_KEY=<the same token>
+```
+
+That's it — with both set, sync is fully automatic:
+
+- **Session start**: a bounded pull merges remote changes in before recall runs, so
+  injected context reflects other machines' work.
+- **Session stop**: a bounded push sends anything recorded this session — the reason an
+  ephemeral sandbox that's about to be destroyed still contributes what it learned.
+- **`recarto serve` (MCP)**: also syncs on a `RECARTO_SYNC_INTERVAL`-second timer
+  (default 60s) for long-lived sessions.
+- `recarto sync [--pull] [--push] [--full]` runs it manually; `recarto status` and
+  `recarto doctor` show sync state (repo key, cursor, pending pushes, reachability).
+
+Sync is entirely optional and additive: with no `RECARTO_SYNC_URL`/`RECARTO_SYNC_KEY`,
+behavior is identical to today, and every sync attempt is best-effort and time-boxed — an
+unreachable or slow server is never allowed to block or fail a local operation. **Full
+offline mode keeps working exactly as before**; sync just catches up whenever the server
+is next reachable.
+
+Machines are matched up by the repo's first (root) commit, not by local path — so a
+laptop clone and a fresh ephemeral sandbox clone of the same repo converge automatically.
+For a shallow clone (no reachable root commit) or to intentionally group otherwise-
+unrelated repos onto one sync key, set `RECARTO_SYNC_REPO` explicitly on every machine
+that should share it.
+
+Under the hood: writes merge via the same MinHash near-duplicate detection Recarto
+already uses locally (an update wins on last-write-wins by timestamp; independently
+authored near-duplicate memories converge into one, reinforced), so two machines editing
+concurrently — including while offline — reconcile without conflicts to resolve by hand.
+An explicit `forget` propagates as a tombstone; routine local housekeeping (archiving,
+dedup, GC) never does, so one machine's cleanup can't delete another's memories.
 
 ## Development
 

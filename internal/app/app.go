@@ -15,6 +15,7 @@ import (
 	"git.gerwim.nl/gerwim/recarto/internal/graph"
 	"git.gerwim.nl/gerwim/recarto/internal/ledger"
 	"git.gerwim.nl/gerwim/recarto/internal/memory"
+	"git.gerwim.nl/gerwim/recarto/internal/remotesync"
 	"git.gerwim.nl/gerwim/recarto/internal/store"
 	"git.gerwim.nl/gerwim/recarto/internal/version"
 )
@@ -36,6 +37,11 @@ type App struct {
 	Engine *memory.Engine
 	Graph  *graph.Engine
 	Clock  clock.Clock
+	// Sync is the HTTP memory-sync client, or nil when unconfigured (no
+	// RECARTO_SYNC_URL/RECARTO_SYNC_KEY, or the repo has no resolvable
+	// cross-machine identity). Every caller must nil-check before use — sync is
+	// entirely optional, and its absence must never be an error.
+	Sync *remotesync.Syncer
 }
 
 // Open resolves identity, opens the per-repo store at the global cache path (which
@@ -80,8 +86,9 @@ func Open(cfg Config) (*App, error) {
 		return nil, err
 	}
 	eng.SetRefResolver(graphRefResolver{st: st})
+	syncer, _ := remotesync.New(remotesync.ConfigFromEnv(), gc, eng, st)
 
-	a := &App{Git: gc, Runner: runner, Store: st, Ledger: led, Engine: eng, Graph: gr, Clock: clk}
+	a := &App{Git: gc, Runner: runner, Store: st, Ledger: led, Engine: eng, Graph: gr, Clock: clk, Sync: syncer}
 	if err := a.writeMeta(context.Background()); err != nil {
 		_ = st.Close()
 		return nil, err

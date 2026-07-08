@@ -77,10 +77,15 @@ func (e *Engine) ImportMemory(ctx context.Context, im ImportMemory) (ImportOutco
 			// Spec §6: an incoming snapshot record keeps the HIGHER pinned/confidence
 			// of the two near-duplicates (reinforce alone only ratchets confidence +0.1
 			// and never pins).
-			_, uerr := c.ExecContext(ctx,
+			if _, uerr := c.ExecContext(ctx,
 				`UPDATE memories SET pinned = MAX(pinned, ?), confidence = MAX(confidence, ?) WHERE id=?`,
-				boolToInt(im.Pinned), clampConfidence(im.Confidence), candID)
-			return uerr
+				boolToInt(im.Pinned), clampConfidence(im.Confidence), candID); uerr != nil {
+				return uerr
+			}
+			// This machine now holds content a remote sync peer may not have yet
+			// (the snapshot could have arrived via the committed .recarto/memory.jsonl
+			// file, not via HTTP sync) — queue it for the next push.
+			return e.markDirty(ctx, c, candID, now)
 		}
 
 		// insert stamps both created_at and updated_at from im.CreatedAt, so an
@@ -95,7 +100,7 @@ func (e *Engine) ImportMemory(ctx context.Context, im ImportMemory) (ImportOutco
 			return err
 		}
 		outcome = ImportInserted
-		return nil
+		return e.markDirty(ctx, c, im.ID, now)
 	})
 	if err != nil {
 		return ImportSkipped, "", err
