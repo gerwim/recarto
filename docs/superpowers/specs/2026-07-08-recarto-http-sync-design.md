@@ -96,6 +96,13 @@ the shipped implementation:
   reinforces an existing near-duplicate, `SyncApply` returns the *existing* row's id, not
   the incoming one (which may never exist as a row) — both the server's `sync_index` and
   the client's outbox bookkeeping key off this canonical id.
+- **Reinforce-merge replay idempotency.** Because a reinforce-merge never creates a row at
+  the incoming id, nothing distinguished a fresh convergence from a replay of an already-
+  applied record (a retried push whose first response was lost, or a re-applied pull page).
+  `memory_sync_merges(id, canonical_id, updated_at)` (migration v21) records what an
+  incoming id last merged into; a replay at the same or older `updated_at` returns
+  `SyncNoop` before `findNearDup` runs, so it neither reinforces again nor advances the
+  server's `sync_index`/seq.
 - **Tombstone GC.** Given "full offline mode" is a hard requirement, the server does
   **not** default to any tombstone GC horizon (a machine offline longer than a fixed TTL
   would silently miss a delete and resurrect it later). No GC ships in this cut; add one
@@ -114,8 +121,9 @@ machine's live memories (`TestCompactionNeverWritesTombstones`).
   `PendingTombstones`/`MarkTombstonesPushed`, `markDirty`. `Forget` now also writes a
   tombstone; `Record`/`ImportMemory`/the dedup merge's canonical bump now call
   `markDirty`.
-- `internal/store/migrate.go` v20 — additive, idempotent: `memory_tombstones`,
-  `memory_sync_outbox`. Not a graph migration.
+- `internal/store/migrate.go` v20/v21 — additive, idempotent: `memory_tombstones`,
+  `memory_sync_outbox`, `memory_sync_merges` (the last guards reinforce-merge replay
+  idempotency, §6). Not a graph migration.
 - `internal/remotesync` — client: `config.go` (env), `identity.go` (`RepoKey`),
   `client.go` (HTTP `Pull`/`Push`/`Healthz`), `sync.go` (`Syncer`: `Pull`, `Push`,
   `Once`, cursor in `meta`).

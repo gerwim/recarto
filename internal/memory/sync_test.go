@@ -101,6 +101,78 @@ func TestSyncApplyReinforcesNearDupAndReturnsCanonicalID(t *testing.T) {
 	}
 }
 
+// TestSyncApplyReinforceReplayIsIdempotent proves that re-applying the exact
+// same wire record that previously reinforced a near-duplicate (a client
+// retry after a push whose response was lost, or a replayed pull page) is a
+// Noop, not a second reinforcement. A reinforce-merge never creates a row at
+// the incoming id, so without memory_sync_merges remembering "this id, at
+// this updated_at, already merged into canonical X", every replay looks
+// identical to a fresh independent-authoring convergence and would reinforce
+// the target again — inflating reinforcement_count and, on the server,
+// bumping sync_index.seq again on every retry.
+func TestSyncApplyReinforceReplayIsIdempotent(t *testing.T) {
+	e := newTestEngine(t, clock.NewFake(time.UnixMilli(1_000_000)))
+	ctx := context.Background()
+
+	local, _, _, err := e.Record(ctx, NewMemory{
+		Kind: KindLearning, Title: "t", Body: "always retry idempotent operations on timeout",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, _ := e.GetByID(ctx, local)
+
+	rec := syncwire.Record{
+		ID: "remote-1", Kind: string(KindLearning), Title: "t",
+		Body: "always retry idempotent operations on timeout!", CreatedAt: 2000, UpdatedAt: 2000,
+	}
+	out, id, err := e.SyncApply(ctx, rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != SyncReinforced || id != local {
+		t.Fatalf("setup: want reinforced %s, got %v %s", local, out, id)
+	}
+	afterFirst, _ := e.GetByID(ctx, local)
+	if afterFirst.ReinforcementCount != before.ReinforcementCount+1 {
+		t.Fatalf("setup: reinforce must bump the count once, got %+v", afterFirst)
+	}
+
+	// Replay the IDENTICAL record (same id, same updated_at) — simulates a
+	// retried push/pull of a change the peer already applied.
+	out, id, err = e.SyncApply(ctx, rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != SyncNoop {
+		t.Fatalf("a replayed reinforce-merge must be a Noop, got %v", out)
+	}
+	if id != local {
+		t.Fatalf("a Noop replay must still report the canonical id %s, got %s", local, id)
+	}
+	afterReplay, _ := e.GetByID(ctx, local)
+	if afterReplay.ReinforcementCount != afterFirst.ReinforcementCount {
+		t.Fatalf("a replayed reinforce-merge must not bump reinforcement_count again: before=%d after=%d",
+			afterFirst.ReinforcementCount, afterReplay.ReinforcementCount)
+	}
+
+	// A genuinely NEWER edit of the same origin row (later updated_at) must
+	// still reinforce again — only an exact-or-older replay is a Noop.
+	newer := rec
+	newer.UpdatedAt = 3000
+	out, id, err = e.SyncApply(ctx, newer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != SyncReinforced || id != local {
+		t.Fatalf("a newer edit of an already-merged id must reinforce again, got %v %s", out, id)
+	}
+	afterNewer, _ := e.GetByID(ctx, local)
+	if afterNewer.ReinforcementCount != afterFirst.ReinforcementCount+1 {
+		t.Fatalf("a newer edit must bump reinforcement_count again: got %+v", afterNewer)
+	}
+}
+
 func TestSyncApplyLWWUpdateNewerWins(t *testing.T) {
 	e := newTestEngine(t, clock.NewFake(time.UnixMilli(1_000_000)))
 	ctx := context.Background()

@@ -164,6 +164,84 @@ func TestPushIdempotentDoesNotBumpSeqTwice(t *testing.T) {
 	}
 }
 
+// TestPushNearDuplicateReinforceReplayDoesNotBumpSeqTwice covers the
+// idempotency gap a reviewer flagged in the near-duplicate reinforce-merge
+// path specifically: an incoming record whose id has no local match but
+// content-matches an EXISTING row never creates a row of its own (it
+// reinforces the existing one instead), so a naive "does this id already
+// exist" idempotency check can't catch a retried push of that same record.
+// Before the fix, retrying such a push (e.g. after the first response was
+// lost on the wire) would reinforce the target again and bump sync_index.seq
+// again on every retry, in violation of "an idempotent re-push must not
+// create new server changes forever".
+func TestPushNearDuplicateReinforceReplayDoesNotBumpSeqTwice(t *testing.T) {
+	client, base := testServer(t, "s3cret")
+	url := base + "/v1/repos/repo1/changes"
+
+	seed := syncwire.Record{
+		ID: "origin-1", Kind: "learning", Title: "t",
+		Body: "always jitter retry backoff to avoid thundering herds", CreatedAt: 100, UpdatedAt: 100,
+	}
+	body, _ := json.Marshal(syncwire.PushRequest{Records: []syncwire.Record{seed}})
+	resp := doReq(t, client, http.MethodPost, url, "s3cret", body)
+	var seedResp syncwire.PushResponse
+	json.NewDecoder(resp.Body).Decode(&seedResp)
+	resp.Body.Close()
+	if seedResp.Accepted != 1 {
+		t.Fatalf("seed: accepted = %d, want 1", seedResp.Accepted)
+	}
+
+	// A near-duplicate under a DIFFERENT id (independent authoring on another
+	// machine) — this merges into origin-1 rather than creating its own row.
+	dup := syncwire.Record{
+		ID: "dup-1", Kind: "learning", Title: "t",
+		Body: "always jitter retry backoff to avoid thundering herds!", CreatedAt: 200, UpdatedAt: 200,
+	}
+	body, _ = json.Marshal(syncwire.PushRequest{Records: []syncwire.Record{dup}})
+
+	resp = doReq(t, client, http.MethodPost, url, "s3cret", body)
+	var first syncwire.PushResponse
+	json.NewDecoder(resp.Body).Decode(&first)
+	resp.Body.Close()
+	if first.Accepted != 1 {
+		t.Fatalf("first push of the near-dup: accepted = %d, want 1", first.Accepted)
+	}
+
+	// Retry the IDENTICAL push (simulating a client that never saw the first
+	// response and retries).
+	resp = doReq(t, client, http.MethodPost, url, "s3cret", body)
+	var second syncwire.PushResponse
+	json.NewDecoder(resp.Body).Decode(&second)
+	resp.Body.Close()
+
+	if second.Accepted != 0 {
+		t.Fatalf("retrying an already-merged near-dup push must accept 0 (Noop), got %d", second.Accepted)
+	}
+	if second.Cursor != first.Cursor {
+		t.Fatalf("retrying an already-merged near-dup push must not advance the cursor: first=%d second=%d",
+			first.Cursor, second.Cursor)
+	}
+
+	// The origin row must only have been reinforced once, not twice.
+	resp = doReq(t, client, http.MethodGet, url+"?since=0", "s3cret", nil)
+	var cr syncwire.ChangesResponse
+	json.NewDecoder(resp.Body).Decode(&cr)
+	resp.Body.Close()
+	var origin *syncwire.Record
+	for i := range cr.Records {
+		if cr.Records[i].ID == "origin-1" {
+			origin = &cr.Records[i]
+		}
+	}
+	if origin == nil {
+		t.Fatal("origin-1 must still be present")
+	}
+	if origin.ReinforcementCount != 1 {
+		t.Fatalf("origin-1 must have been reinforced exactly once (not once per retry), got reinforcement_count=%d",
+			origin.ReinforcementCount)
+	}
+}
+
 func TestPushTombstonePropagatesAsDeletedChange(t *testing.T) {
 	client, base := testServer(t, "s3cret")
 	url := base + "/v1/repos/repo1/changes"

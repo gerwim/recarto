@@ -281,3 +281,56 @@ same pre-existing, environment-specific `internal/update` `TestHTTPFetcher`
 failure (confirmed unchanged on `master` too — this sandbox blocks loopback
 TCP); `-race` clean on `internal/memory`, `internal/remotesync`,
 `internal/syncserver`.
+
+## Round 7 — review fix: near-duplicate reinforce-merge was not idempotent under replay
+
+A review pass found that `memory.syncApplyAbsent`'s near-duplicate
+reinforce path (`internal/memory/sync.go`) — used both when the server
+applies a client's push and when a client applies a pulled record — never
+creates a row at the incoming record's own id (it reinforces the existing
+canonical row instead), so nothing distinguished a genuine fresh
+convergence from a REPLAY of a record that had already been merged in a
+prior call. Concretely: a client retries a push after the first response
+was lost on the wire (a real possibility over HTTP), and the server
+re-applies the identical record — `findNearDup` finds the same canonical
+row again, reinforces it a second time, and `handlePostChanges`'s
+`afterApply` hook (since the outcome was `SyncReinforced`, not `SyncNoop`)
+bumps `sync_index.seq` again. The same replay could happen client-side on a
+pull page re-applied after an interrupted `Pull` (the cursor advances only
+after a full page is applied). Both cases violate the amended plan's
+"idempotent re-application must be a Noop" requirement and the earlier,
+narrower fix that only covered same-id (not same-original-id-merged-
+elsewhere) replay (see `TestSyncApplyIdempotentReapplyIsNoop`, which never
+exercised the reinforce-merge branch).
+
+Fixed with a new additive, non-graph table, `memory_sync_merges(id,
+canonical_id, updated_at)` (migration v21 — `schemaVersion` is now 21),
+recording, for an incoming id that reinforced an existing canonical row,
+which canonical id it merged into and at what `updated_at`. On entry to
+`syncApplyAbsent`, a new incoming record whose id already has a
+`memory_sync_merges` row with `updated_at >= rec.UpdatedAt` is recognized
+as an exact-or-older replay and returned as `SyncNoop` (reporting the
+recorded canonical id, matching every other Noop path's contract) *before*
+`findNearDup` ever runs — so it never reinforces again and, since
+`SyncApplyTx` only invokes `afterApply` for a non-Noop outcome, the
+server's `sync_index`/seq bump is correctly skipped too. A genuinely
+*newer* edit of the same origin row (a later `updated_at` for the same
+incoming id — the origin machine editing it again after its first
+convergence) is intentionally NOT blocked: it still reinforces, and the
+merge record's `updated_at` watermark advances forward-only (mirroring
+`upsertTombstone`'s pattern), so only true replays are absorbed. New tests:
+`TestSyncApplyReinforceReplayIsIdempotent` (in `internal/memory`, proving
+replay-is-noop vs. newer-edit-still-reinforces at the merge-core level) and
+`TestPushNearDuplicateReinforceReplayDoesNotBumpSeqTwice` (in
+`internal/syncserver`, proving a retried HTTP push of an already-merged
+near-duplicate doesn't advance the server's cursor or double the target's
+`reinforcement_count`).
+
+Verification after round 7: `go build ./...`, `go vet ./...` clean;
+`gofmt -l .` clean on all touched files (same pre-existing unrelated
+exception as before, `internal/mcp/handlers_feedback_test.go`);
+`go test ./...` green except the same pre-existing, environment-specific
+`internal/update` `TestHTTPFetcher` failure (reconfirmed unchanged on a
+clean stash of this branch — this sandbox blocks loopback TCP, unrelated to
+this change); `-race` clean on `internal/memory`, `internal/remotesync`,
+`internal/syncserver`, `internal/store`.

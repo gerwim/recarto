@@ -8,7 +8,7 @@ import (
 )
 
 // schemaVersion is the number of applied migrations.
-const schemaVersion = 20
+const schemaVersion = 21
 
 // migrations are applied in order; index+1 becomes user_version.
 var migrations = []string{
@@ -523,6 +523,29 @@ CREATE TABLE IF NOT EXISTS memory_tombstones (
 CREATE TABLE IF NOT EXISTS memory_sync_outbox (
   memory_id  TEXT PRIMARY KEY REFERENCES memories(id) ON DELETE CASCADE,
   updated_at INTEGER NOT NULL
+);
+`,
+	// v21 (HTTP memory sync): idempotency guard for the near-duplicate
+	// reinforce-merge path in memory.SyncApply.
+	//
+	// When an incoming wire record's id has no local row but content-matches an
+	// existing row via MinHash (independent authoring converging — e.g. the same
+	// learning recorded on two machines under two different ids), SyncApply
+	// reinforces the existing row rather than creating a new one at the incoming
+	// id. That incoming id therefore never becomes a row of its own, so without
+	// remembering it was already merged, EVERY re-application of the identical
+	// wire record (a client retry after a push whose response was lost, or a
+	// replayed pull page) would reinforce the target again and — on the server —
+	// bump sync_index.seq again, violating "an idempotent re-application must be
+	// a Noop". memory_sync_merges(id) records the canonical row an incoming id
+	// was last merged into and at what updated_at, so a later apply of the same
+	// (id, updated_at) is recognized as already-applied and returns Noop.
+	// Idempotent (IF NOT EXISTS) so the migration replays safely.
+	`
+CREATE TABLE IF NOT EXISTS memory_sync_merges (
+  id            TEXT PRIMARY KEY,
+  canonical_id  TEXT NOT NULL,
+  updated_at    INTEGER NOT NULL
 );
 `,
 }

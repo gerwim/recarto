@@ -249,6 +249,21 @@ func (e *Engine) syncApplyExisting(ctx context.Context, c store.Conn, rec syncwi
 // wall clock, used only for the reinforce bump (never for the insert, which
 // preserves rec's original timestamps).
 func (e *Engine) syncApplyAbsent(ctx context.Context, c store.Conn, rec syncwire.Record, now int64) (SyncOutcome, string, error) {
+	// A reinforce-merge (below) never creates a row at rec.ID, so a plain
+	// "does the id exist" check can never catch a REPLAY of an already-merged
+	// record (a client retry after a push whose response was lost, or a
+	// replayed pull page) — every replay would look identical to a fresh
+	// independent-authoring convergence and reinforce the target again,
+	// inflating reinforcement_count and, on the server, bumping sync_index.seq
+	// again. memory_sync_merges remembers "this incoming id, at this
+	// updated_at, already merged into canonical X" so a replay is recognized
+	// and returned as Noop instead.
+	if canonID, mergedAt, ok, err := e.getSyncMerge(ctx, c, rec.ID); err != nil {
+		return SyncNoop, "", err
+	} else if ok && rec.UpdatedAt <= mergedAt {
+		return SyncNoop, canonID, nil
+	}
+
 	refs := refsFromWire(rec.Refs)
 	nm := NewMemory{
 		Kind: Kind(rec.Kind), Title: rec.Title, Body: rec.Body, Refs: refs,
@@ -269,6 +284,9 @@ func (e *Engine) syncApplyAbsent(ctx context.Context, c store.Conn, rec syncwire
 		if _, err := c.ExecContext(ctx,
 			`UPDATE memories SET pinned = MAX(pinned, ?), confidence = MAX(confidence, ?) WHERE id=?`,
 			boolToInt(rec.Pinned), clampConfidence(rec.Confidence), candID); err != nil {
+			return SyncNoop, "", err
+		}
+		if err := e.upsertSyncMerge(ctx, c, rec.ID, candID, rec.UpdatedAt); err != nil {
 			return SyncNoop, "", err
 		}
 		return SyncReinforced, candID, nil
@@ -368,6 +386,37 @@ func (e *Engine) upsertTombstone(ctx context.Context, c store.Conn, id string, d
 		                 THEN excluded.pushed ELSE memory_tombstones.pushed END,
 		   deleted_at = MAX(memory_tombstones.deleted_at, excluded.deleted_at)`,
 		id, deletedAt, boolToInt(pushed))
+	return err
+}
+
+// getSyncMerge returns the canonical id and updated_at that incoming id was
+// last merged into via a near-duplicate reinforce, if any.
+func (e *Engine) getSyncMerge(ctx context.Context, c store.Conn, id string) (canonID string, updatedAt int64, ok bool, err error) {
+	err = c.QueryRowContext(ctx,
+		`SELECT canonical_id, updated_at FROM memory_sync_merges WHERE id=?`, id).
+		Scan(&canonID, &updatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", 0, false, nil
+	}
+	if err != nil {
+		return "", 0, false, err
+	}
+	return canonID, updatedAt, true, nil
+}
+
+// upsertSyncMerge records that incoming id was merged into canonID at
+// updatedAt (extending forward only, mirroring upsertTombstone: a later merge
+// always advances the recorded watermark, an earlier/equal replay never
+// regresses it — and, in the ordinary case, id always merges into the same
+// canonID on every call since findNearDup is deterministic over unchanged
+// content).
+func (e *Engine) upsertSyncMerge(ctx context.Context, c store.Conn, id, canonID string, updatedAt int64) error {
+	_, err := c.ExecContext(ctx,
+		`INSERT INTO memory_sync_merges(id, canonical_id, updated_at) VALUES (?,?,?)
+		 ON CONFLICT(id) DO UPDATE SET
+		   canonical_id = excluded.canonical_id,
+		   updated_at = MAX(memory_sync_merges.updated_at, excluded.updated_at)`,
+		id, canonID, updatedAt)
 	return err
 }
 
