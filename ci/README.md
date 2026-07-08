@@ -14,6 +14,9 @@ update only if the minisign signature **and** the sha256 verify.
    git tag X.Y.Z ──► GitLab CI pulls the image ──► build (zig: linux/windows)
                      ──► hash + merge index.json ──► minisign
                      sign ──► upload binaries + index.json + index.json.minisig to R2
+                     │
+                     └──► sync-image (Kaniko) ──► build root Dockerfile
+                          ──► push …/sync:X.Y.Z + …/sync:latest to GitLab registry
 ```
 
 > **Darwin/arm64 is disabled for now.** The builder image and the `build` job
@@ -118,11 +121,36 @@ git tag X.Y.Z           # plain semver, no leading "v" (matches the version stam
 git push origin X.Y.Z
 ```
 
-The pipeline runs `test → build → publish`. `build` produces
-`releases/{linux-amd64/recarto, windows-amd64/recarto.exe}` (darwin disabled);
-`publish` fetches the current `index.json` (absent on the first release), merges the
-new version in, signs it, and uploads the versioned binaries (cached forever) plus
-`index.json` + `index.json.minisig` (short TTL) to `recarto/` in the bucket.
+The pipeline runs `test → build → publish`, plus `sync-image` alongside `build`.
+`build` produces `releases/{linux-amd64/recarto, windows-amd64/recarto.exe}`
+(darwin disabled); `publish` fetches the current `index.json` (absent on the first
+release), merges the new version in, signs it, and uploads the versioned binaries
+(cached forever) plus `index.json` + `index.json.minisig` (short TTL) to `recarto/`
+in the bucket.
+
+### Sync-server container image
+
+The `sync-image` job builds the HTTP sync server from the repo-root `Dockerfile`
+and pushes it to the GitLab registry as `$CI_REGISTRY_IMAGE/sync:X.Y.Z` **and**
+`$CI_REGISTRY_IMAGE/sync:latest` (i.e. `reg.gerwim.nl/gerwim/recarto/sync`), on
+every release tag alongside the binary build.
+
+- **Build engine:** [Kaniko](https://github.com/GoogleContainerTools/kaniko),
+  which builds OCI images from a Dockerfile without a Docker daemon — **no
+  privileged runner is required**, unlike `docker:dind`.
+- **Auth:** GitLab's built-in job-token registry credentials
+  (`$CI_REGISTRY`, `$CI_REGISTRY_USER`, `$CI_REGISTRY_PASSWORD`) are used to
+  write a Kaniko Docker config at runtime. **No new CI/CD variables are needed.**
+- **Prerequisite:** the project's **Container Registry must be enabled**
+  (Settings → Packages & registries) — the same prerequisite the `/builder`
+  image already relies on.
+
+Consumers can then pull the published image directly, e.g.:
+
+```sh
+docker login reg.gerwim.nl
+docker pull reg.gerwim.nl/gerwim/recarto/sync:latest    # or :X.Y.Z for an immutable release
+```
 
 Verify afterward:
 

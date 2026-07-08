@@ -26,6 +26,28 @@ build:
       - releases/
     expire_in: 1 hour
 
+# Build the HTTP sync-server image from the root Dockerfile with Kaniko (rootless,
+# no privileged runner needed) and push it to the GitLab registry as both the tag
+# and :latest. Runs alongside the binary `build` job on release tags only.
+sync-image:
+  stage: build
+  image:
+    name: gcr.io/kaniko-project/executor:v1.23.2-debug
+    entrypoint: [""]
+  rules:
+    - if: '$CI_COMMIT_TAG'
+  script:
+    - mkdir -p /kaniko/.docker
+    - >
+      echo "{\"auths\":{\"${CI_REGISTRY}\":{\"auth\":\"$(printf '%s:%s' "${CI_REGISTRY_USER}" "${CI_REGISTRY_PASSWORD}" | base64 | tr -d '\n')\"}}}" > /kaniko/.docker/config.json
+    - >
+      /kaniko/executor
+      --context "${CI_PROJECT_DIR}"
+      --dockerfile "${CI_PROJECT_DIR}/Dockerfile"
+      --build-arg VERSION="${CI_COMMIT_TAG}"
+      --destination "${CI_REGISTRY_IMAGE}/sync:${CI_COMMIT_TAG}"
+      --destination "${CI_REGISTRY_IMAGE}/sync:latest"
+
 # Hash binaries, merge index.json, sign with minisign, upload everything to R2.
 publish:
   stage: publish

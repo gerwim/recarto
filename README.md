@@ -326,6 +326,11 @@ docker network create proxy   # once, unless your proxy already has a network to
 docker compose up -d --build
 ```
 
+Every release tag also publishes a prebuilt image to the GitLab registry at
+`reg.gerwim.nl/gerwim/recarto/sync:latest` (and `:X.Y.Z` for a pinned version), so you
+can skip the local build: `docker login reg.gerwim.nl`, set `image:` in
+`docker-compose.yml` instead of `build:`, then `docker compose up -d`.
+
 Then point every client machine at the proxied URL, same as any other server (§ above):
 
 ```sh
