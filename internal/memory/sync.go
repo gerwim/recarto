@@ -41,8 +41,11 @@ const (
 //     then silently no-op while the real row survives), delete that row if
 //     it exists and is not newer than the tombstone, then record/extend the
 //     tombstone at the resolved (canonical) id.
-//  2. A tombstone already covers rec.ID at >= rec.UpdatedAt: drop rec — an
-//     older non-deleted record must never resurrect a later delete.
+//  2. A tombstone already covers rec.ID (or, when rec.ID was previously
+//     merged into a different canonical row via step 4, a tombstone covers
+//     that canonical id) at >= rec.UpdatedAt: drop rec — an older non-deleted
+//     record must never resurrect a later delete, including one recorded
+//     under an alias's canonical id.
 //  3. rec.ID exists locally: LWW-overwrite content when rec is newer, else
 //     keep local content; either way MAX the soft signals (confidence,
 //     reinforcement_count, pinned) and union refs, never regressing them.
@@ -106,6 +109,28 @@ func (e *Engine) SyncApplyTx(ctx context.Context, rec syncwire.Record, afterAppl
 		tombAt, hasTomb, err := e.getTombstone(ctx, c, rec.ID)
 		if err != nil {
 			return err
+		}
+		// rec.ID may be an alias this store previously merged into a different
+		// canonical row (syncApplyAbsent's near-dup reinforce path never creates
+		// a row at the incoming id, so rec.ID itself is never tombstoned
+		// directly when the canonical row is later Forgotten under its own
+		// id — only the canonical id is). Without also checking the canonical
+		// id's tombstone here, a non-deleted record for rec.ID that arrives
+		// after the canonical row was deleted — but whose updated_at is newer
+		// than the merge that created the alias (so syncApplyAbsent's replay
+		// guard lets it through) and older than the delete — would fall through
+		// to syncApplyAbsent, find no surviving near-duplicate to reinforce
+		// (the canonical row is gone), and insert a fresh row, resurrecting the
+		// memory under the alias id. Resolve the alias and take the more
+		// restrictive (later) of the two tombstones.
+		if canonID, _, ok, err := e.getSyncMerge(ctx, c, rec.ID); err != nil {
+			return err
+		} else if ok {
+			if aliasTombAt, aliasHasTomb, err := e.getTombstone(ctx, c, canonID); err != nil {
+				return err
+			} else if aliasHasTomb && (!hasTomb || aliasTombAt > tombAt) {
+				tombAt, hasTomb = aliasTombAt, aliasHasTomb
+			}
 		}
 
 		switch {

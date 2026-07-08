@@ -389,3 +389,53 @@ exception as before, `internal/mcp/handlers_feedback_test.go`);
 clean stash of this branch — this sandbox blocks loopback TCP, unrelated to
 this change); `-race` clean on `internal/memory`, `internal/remotesync`,
 `internal/syncserver`, `internal/store`.
+
+## Round 9 — review fix: non-deleted alias record could resurrect after a canonical tombstone
+
+A review pass found a gap in round 8's alias-resolution fix: that fix only
+resolved `rec.ID` through `memory_sync_merges` in the *deleted* branch of
+`SyncApplyTx`. The *non-deleted* branch still looked up
+`memory_tombstones` keyed on the raw incoming `rec.ID` alone. Since a
+near-duplicate reinforce-merge (`syncApplyAbsent`) never creates a row at
+the incoming id, that id is never itself tombstoned directly — only its
+canonical id is, once round 8's fix resolves a delete through the alias.
+Concretely: incoming id `B` merges into canonical `A` at `updated_at=500`;
+`A` is later deleted via a tombstone for `B` at `updated_at=1000`, correctly
+resolving to and deleting `A` (round 8). A *third*, non-deleted record for
+`B` then arrives with `updated_at=700` — newer than the merge, so
+`syncApplyAbsent`'s replay guard (which compares against the merge time,
+not the delete time) lets it through — but older than the delete. Before
+this fix, the tombstone lookup on raw `B` found nothing (only `A` was
+tombstoned), so the record fell through to `syncApplyAbsent`, found no
+surviving near-duplicate to reinforce (the canonical row was already
+deleted), and inserted a fresh row — resurrecting the memory under alias
+`B`, in violation of the "a record older than a recorded tombstone must be
+dropped" rule the ordinary same-id path already enforces.
+
+Fixed by resolving `rec.ID` through `memory_sync_merges` in the non-deleted
+branch too (right after the raw-id tombstone lookup, before the
+Noop-vs-continue decision): when an alias is on record, the canonical id's
+tombstone is also checked, and the later (more restrictive) of the two
+`deleted_at` values wins. This mirrors the same forward-only,
+later-wins discipline `upsertTombstone`/`upsertSyncMerge` already use
+elsewhere. A record genuinely newer than the tombstone (arriving after the
+delete) is unaffected and still legitimately re-inserts, matching the
+existing same-id tombstone-vs-newer-record rule. New test:
+`TestSyncApplyNonDeletedAliasRecordDoesNotResurrectAfterCanonicalTombstone`
+— merges an alias into a canonical row, tombstones it through the alias
+(as in round 8), then applies a third record for the alias id with an
+`updated_at` strictly between the merge and the delete, asserting it is
+dropped as `SyncNoop` and neither the canonical id nor the alias id ends up
+with a live row; a final case confirms a record genuinely newer than the
+delete still legitimately re-inserts. Manually verified the new test fails
+(observed `SyncInserted`, i.e. resurrection) against the pre-fix code and
+passes against the fix.
+
+Verification after round 9: `go build ./...`, `go vet ./...` clean;
+`gofmt -l .` clean on all touched files (same pre-existing unrelated
+exception as before, `internal/mcp/handlers_feedback_test.go`);
+`go test ./...` green except the same pre-existing, environment-specific
+`internal/update` `TestHTTPFetcher` failure (reconfirmed unchanged on a
+clean stash of this branch — this sandbox blocks loopback TCP, unrelated to
+this change); `-race` clean on `internal/memory`, `internal/remotesync`,
+`internal/syncserver`, `internal/store`.

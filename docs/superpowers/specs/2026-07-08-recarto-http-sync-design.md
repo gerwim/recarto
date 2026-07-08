@@ -109,7 +109,10 @@ the shipped implementation:
   incoming id was never its own row here, so applying the delete verbatim would silently
   no-op while the real (canonical) row survives. Reachable whenever two peers (including
   the server) independently converge two near-duplicates onto different canonical ids and
-  one is later `Forget`-ten by its authoring id.
+  one is later `Forget`-ten by its authoring id. The same alias resolution also guards the
+  **non-deleted** path: a later, non-deleted record for that same alias id (newer than the
+  merge but older than the delete) must check the tombstone under the resolved canonical
+  id too, or it would fall through to an insert and resurrect the memory under the alias id.
 - **Tombstone GC.** Given "full offline mode" is a hard requirement, the server does
   **not** default to any tombstone GC horizon (a machine offline longer than a fixed TTL
   would silently miss a delete and resurrect it later). No GC ships in this cut; add one

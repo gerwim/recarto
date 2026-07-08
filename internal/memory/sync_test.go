@@ -662,6 +662,93 @@ func TestSyncApplyTombstoneResolvesNearDupMergeAlias(t *testing.T) {
 	}
 }
 
+// TestSyncApplyNonDeletedAliasRecordDoesNotResurrectAfterCanonicalTombstone
+// covers a gap a review pass found in TestSyncApplyTombstoneResolvesNearDupMergeAlias's
+// fix: that test only replayed the EXACT same (id, updated_at) near-duplicate
+// record after the delete, which syncApplyAbsent's own memory_sync_merges
+// replay guard already Noops regardless of any tombstone (it compares
+// against the merge time, not the delete time). The gap is a DIFFERENT
+// non-deleted record for the same alias id, with an updated_at strictly
+// BETWEEN the merge time and the delete time: the replay guard lets it
+// through (rec.UpdatedAt > mergedAt), but until the alias is resolved to the
+// canonical id BEFORE the tombstone check, the tombstone lookup on the raw
+// alias id finds nothing (the alias never has its own tombstone — the
+// canonical id does), so the record falls through to syncApplyAbsent, finds
+// no surviving near-duplicate (the canonical row is gone), and inserts a
+// fresh row — resurrecting the memory under the alias id.
+func TestSyncApplyNonDeletedAliasRecordDoesNotResurrectAfterCanonicalTombstone(t *testing.T) {
+	e := newTestEngine(t, clock.NewFake(time.UnixMilli(1_000_000)))
+	ctx := context.Background()
+
+	canonID, _, _, err := e.Record(ctx, NewMemory{
+		Kind: KindLearning, Title: "t", Body: "always cap goroutine pool size under load",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Merge alias "origin-2" -> canonID at updated_at=500.
+	dup := syncwire.Record{
+		ID: "origin-2", Kind: string(KindLearning), Title: "t",
+		Body: "always cap goroutine pool size under load!", CreatedAt: 500, UpdatedAt: 500,
+	}
+	out, mergedInto, err := e.SyncApply(ctx, dup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != SyncReinforced || mergedInto != canonID {
+		t.Fatalf("setup: want reinforced into %s, got %v %s", canonID, out, mergedInto)
+	}
+
+	canonAfterMerge, _ := e.GetByID(ctx, canonID)
+	deleteAt := canonAfterMerge.UpdatedAt + 1000
+	out, target, err := e.SyncApply(ctx, syncwire.Record{ID: "origin-2", Deleted: true, UpdatedAt: deleteAt})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != SyncTombstoned || target != canonID {
+		t.Fatalf("setup: want tombstoned %s, got %v %s", canonID, out, target)
+	}
+	if got, _ := e.GetByID(ctx, canonID); got != nil {
+		t.Fatalf("setup: canonical row must be deleted: %+v", got)
+	}
+
+	// A delayed, non-deleted record for the alias id "origin-2" arrives with an
+	// updated_at strictly between the merge (500) and the delete (deleteAt) —
+	// newer than the merge, so the replay guard alone does not stop it; older
+	// than the delete, so it must be dropped as a resurrection attempt via the
+	// canonical tombstone, exactly like an ordinary same-id stale record would be.
+	delayed := syncwire.Record{
+		ID: "origin-2", Kind: string(KindLearning), Title: "t",
+		Body: "always cap goroutine pool size under load!", CreatedAt: 500, UpdatedAt: deleteAt - 1,
+	}
+	out, _, err = e.SyncApply(ctx, delayed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != SyncNoop {
+		t.Fatalf("a non-deleted alias record older than the canonical tombstone must be dropped as Noop, got %v", out)
+	}
+	if got, _ := e.GetByID(ctx, canonID); got != nil {
+		t.Fatalf("canonical row must stay deleted, but a resurrection occurred: %+v", got)
+	}
+	if got, _ := e.GetByID(ctx, "origin-2"); got != nil {
+		t.Fatalf("the alias id must not become its own resurrected row either: %+v", got)
+	}
+
+	// A genuinely newer record (after the delete) legitimately resurrects, same
+	// as the ordinary same-id tombstone-vs-newer-record rule.
+	newer := delayed
+	newer.UpdatedAt = deleteAt + 1000
+	out, id, err := e.SyncApply(ctx, newer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != SyncInserted || id != "origin-2" {
+		t.Fatalf("a record newer than the tombstone must legitimately re-insert, got %v %s", out, id)
+	}
+}
+
 func TestSyncApplyTombstoneNotPushedBack(t *testing.T) {
 	e := newTestEngine(t, clock.NewFake(time.UnixMilli(1_000_000)))
 	ctx := context.Background()
