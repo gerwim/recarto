@@ -15,7 +15,7 @@ update only if the minisign signature **and** the sha256 verify.
                      ──► hash + merge index.json ──► minisign
                      sign ──► upload binaries + index.json + index.json.minisig to R2
                      │
-                     └──► sync-image (Kaniko) ──► build root Dockerfile
+                     └──► sync-image (docker:dind) ──► build root Dockerfile
                           ──► push …/sync:X.Y.Z + …/sync:latest to GitLab registry
 ```
 
@@ -135,12 +135,12 @@ and pushes it to the GitLab registry as `$CI_REGISTRY_IMAGE/sync:X.Y.Z` **and**
 `$CI_REGISTRY_IMAGE/sync:latest` (i.e. `reg.gerwim.nl/gerwim/recarto/sync`), on
 every release tag alongside the binary build.
 
-- **Build engine:** [Kaniko](https://github.com/GoogleContainerTools/kaniko),
-  which builds OCI images from a Dockerfile without a Docker daemon — **no
-  privileged runner is required**, unlike `docker:dind`.
+- **Build engine:** `docker:27` with a `docker:27-dind` service (Docker-in-Docker).
+  The GitLab runner is privileged, so the job talks to a real Docker daemon over
+  TLS on port 2376 — no Kaniko or other daemonless builder is needed.
 - **Auth:** GitLab's built-in job-token registry credentials
-  (`$CI_REGISTRY`, `$CI_REGISTRY_USER`, `$CI_REGISTRY_PASSWORD`) are used to
-  write a Kaniko Docker config at runtime. **No new CI/CD variables are needed.**
+  (`$CI_REGISTRY`, `$CI_REGISTRY_USER`, `$CI_REGISTRY_PASSWORD`) are piped into
+  `docker login` at job start. **No new CI/CD variables are needed.**
 - **Prerequisite:** the project's **Container Registry must be enabled**
   (Settings → Packages & registries) — the same prerequisite the `/builder`
   image already relies on.
