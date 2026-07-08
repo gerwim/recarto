@@ -548,3 +548,54 @@ this change); `-race` clean on `internal/memory`, `internal/remotesync`,
 `internal/syncserver`, `internal/agents` (+ subpackages), `internal/mcp`,
 `internal/app`, `internal/cli`, `internal/snapshot`, `internal/store`. Go
 was available in this session (`/usr/local/go/bin`, not on default `PATH`).
+
+## Round 12 — review fix: `PendingPush` paired content and version from two separate reads
+
+A review pass found that round 11's version-aware `ClearPushed`/
+`MarkTombstonesPushed` guard only closed half the race: `PendingPush`
+(`internal/memory/sync.go`) itself assembled its result from TWO separate,
+non-transactional queries — first `selectMemoriesSQL` (the memory row) plus
+a follow-up `loadRefs` query, then a second, independent
+`SELECT memory_id, updated_at FROM memory_sync_outbox` to fetch each id's
+version — and paired them up afterward by id in a Go map. If a local write
+(another `Record`/`CompleteTodo`/`ResolveFeedback`/supersede/dedup-merge
+call, in a long-lived `recarto serve` process) landed on the same id in the
+window between those two queries, `PendingPush` could return STALE content
+paired with the NEWER version that write had just bumped the outbox to.
+`Syncer.Push` would then send the stale content but confirm the newer
+version via `ClearPushed`/`MarkTombstonesPushed` — round 11's guard compares
+exactly that version, so it would happily clear the outbox entry, silently
+dropping the newer write's content with no error and no retry. Round 11's
+own race tests only exercised a write landing AFTER `PendingPush` returned,
+never one landing DURING its two-query assembly, so they did not catch this.
+
+Fixed by replacing the two queries with one: `pendingPushSQL` joins
+`memories` to `memory_sync_outbox` so a row's content and its outbox
+version are read together, in a single SQL statement — executing one
+statement against one consistent read snapshot makes it structurally
+impossible for a commit to land "in between" the content read and the
+version read, unlike two sequential statements. `PendingPush` now scans
+both from the same result set (mirroring `scanMemories`'s column list plus
+the joined `o.updated_at`) and only reads refs (via the existing
+`loadRefs`) afterward — a ref added by a same-transaction write is already
+covered by the joined version, and any residual skew from reading refs
+after the join can only leave an item version-stale (never version-ahead),
+which `ClearPushed` already treats as "leave it queued", i.e. safe. New
+test: `TestPendingPushVersionIsAtomicWithContent` pins the invariant that a
+`PendingPushItem`'s `Version` and `Record.Body` are always read from the
+same underlying row state across several distinct writes to one id — a
+regression guard against reintroducing the two-query form, since a true
+interleaved-commit race is not reproducible in a deterministic
+single-threaded test once the read is a single statement (there is no
+longer a second statement for a commit to land before).
+
+Verification after round 12: `go build ./...`, `go vet ./...` clean;
+`gofmt -l .` clean on all touched files (same pre-existing unrelated
+exception as before, `internal/mcp/handlers_feedback_test.go`);
+`go test ./...` green except the same pre-existing, environment-specific
+`internal/update` `TestHTTPFetcher` failure (reconfirmed unchanged on a
+clean stash of this branch — this sandbox blocks loopback TCP, unrelated to
+this change); `-race` clean on `internal/memory`, `internal/remotesync`,
+`internal/syncserver`, `internal/agents` (+ subpackages), `internal/mcp`,
+`internal/app`, `internal/cli`, `internal/snapshot`, `internal/store`. Go
+was available in this session (`/usr/local/go/bin`, not on default `PATH`).

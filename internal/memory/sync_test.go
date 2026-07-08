@@ -1197,6 +1197,62 @@ func TestClearPushedDoesNotDropNewerDirtyRow(t *testing.T) {
 	}
 }
 
+// TestPendingPushVersionIsAtomicWithContent pins the property
+// TestClearPushedDoesNotDropNewerDirtyRow's race guard depends on but never
+// itself exercised: that a PendingPushItem's Version and Record come from the
+// SAME read (pendingPushSQL joins memories to memory_sync_outbox in one
+// query), never a stale/newer mismatch from two separate reads. A prior
+// implementation read the memory row (and its refs) in one query, then the
+// outbox version in a second, separate query — a write landing on the same
+// id between those two reads could pair OLD content with a NEWER version (or
+// vice versa); pairing old content with a newer version is the dangerous
+// direction, since ClearPushed would then believe that newer version's
+// content had actually been sent and pushed, when it never was. This test
+// asserts PendingPush's returned Version and Record.Body always match
+// whatever is currently in the DB together, for several distinct writes to
+// the same id, guarding against a regression back to the two-query form.
+func TestPendingPushVersionIsAtomicWithContent(t *testing.T) {
+	e := newTestEngine(t, clock.NewFake(time.UnixMilli(1_000_000)))
+	ctx := context.Background()
+
+	id, _, _, err := e.Record(ctx, NewMemory{Kind: KindLearning, Title: "t", Body: "version one"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, body := range []string{"version two", "version three", "version four"} {
+		if _, err := e.st.DB.ExecContext(ctx,
+			`UPDATE memories SET body=?, updated_at=updated_at+1 WHERE id=?`, body, id); err != nil {
+			t.Fatal(err)
+		}
+		newVersion := int64(0)
+		if err := e.st.DB.QueryRowContext(ctx,
+			`SELECT updated_at FROM memory_sync_outbox WHERE memory_id=?`, id).Scan(&newVersion); err != nil {
+			t.Fatal(err)
+		}
+		newVersion++
+		if _, err := e.st.DB.ExecContext(ctx,
+			`UPDATE memory_sync_outbox SET updated_at=? WHERE memory_id=?`, newVersion, id); err != nil {
+			t.Fatal(err)
+		}
+
+		pending, err := e.PendingPush(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(pending) != 1 {
+			t.Fatalf("want exactly one pending item for %s, got %+v", id, pending)
+		}
+		if pending[0].Record.Body != body {
+			t.Fatalf("content mismatch: got %q want %q", pending[0].Record.Body, body)
+		}
+		if pending[0].Version != newVersion {
+			t.Fatalf("version mismatch: got %d want %d (must be read from the SAME row as the content)",
+				pending[0].Version, newVersion)
+		}
+	}
+}
+
 // TestMarkTombstonesPushedDoesNotDropNewerTombstoneVersion is the tombstone
 // analogue of TestClearPushedDoesNotDropNewerDirtyRow: MarkTombstonesPushed
 // must not flip pushed=1 for a version older than what memory_tombstones

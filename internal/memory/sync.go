@@ -3,6 +3,7 @@ package memory
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 
 	"git.gerwim.nl/gerwim/recarto/internal/store"
@@ -600,53 +601,74 @@ type PendingPushItem struct {
 	Version int64
 }
 
+// pendingPushSQL joins memories to memory_sync_outbox so a row's content and
+// its outbox version are read from the SAME query — a single SQL statement
+// executes against one consistent read snapshot, unlike two separate
+// queries (the memory row, then the outbox version), which left a window for
+// a concurrent write to land in between and pair stale content with a newer
+// version (or vice versa). See PendingPush for why that pairing matters.
+const pendingPushSQL = `
+SELECT m.id, m.kind, m.title, m.body, m.search_text, m.created_at, m.updated_at,
+       COALESCE(m.branch,''), COALESCE(m.worktree,''), m.author, m.source, m.confidence,
+       m.reinforcement_count, m.pinned, m.status, COALESCE(m.superseded_by,''), m.simhash, m.extra,
+       o.updated_at
+  FROM memories m JOIN memory_sync_outbox o ON o.memory_id = m.id`
+
 // PendingPush returns memories with a pending local change (present in
-// memory_sync_outbox), as wire records ready to POST to the sync server. This
-// is NOT filtered to status='active': the outbox is populated only by
-// explicit local-authoring writes (Record, ImportMemory, the dedup merge's
-// canonical bump, CompleteTodo, ResolveFeedback, an explicit supersede), and
-// those status transitions (active -> done/resolved/superseded) must
-// propagate just as much as a still-active row's content does — a completed
-// todo that fails to sync would keep surfacing as open work on every other
-// machine.
+// memory_sync_outbox), as wire records ready to POST to the sync server,
+// each paired with the exact outbox version it was read alongside (see
+// pendingPushSQL — content and version come from one query, one snapshot, so
+// the returned Version can never be newer or older than the content actually
+// sent for that call). This is NOT filtered to status='active': the outbox
+// is populated only by explicit local-authoring writes (Record, ImportMemory,
+// the dedup merge's canonical bump, CompleteTodo, ResolveFeedback, an
+// explicit supersede), and those status transitions (active ->
+// done/resolved/superseded) must propagate just as much as a still-active
+// row's content does — a completed todo that fails to sync would keep
+// surfacing as open work on every other machine.
 func (e *Engine) PendingPush(ctx context.Context) ([]PendingPushItem, error) {
-	rows, err := e.st.DB.QueryContext(ctx, selectMemoriesSQL+
-		` WHERE id IN (SELECT memory_id FROM memory_sync_outbox)`)
+	rows, err := e.st.DB.QueryContext(ctx, pendingPushSQL)
 	if err != nil {
 		return nil, err
 	}
-	recs, err := scanMemories(rows)
+	var recs []*Record
+	var versions []int64
+	for rows.Next() {
+		var r Record
+		var kind, status, extra string
+		var sim int64
+		var pinned int
+		var version int64
+		if err := rows.Scan(&r.ID, &kind, &r.Title, &r.Body, &r.SearchText,
+			&r.CreatedAt, &r.UpdatedAt, &r.Branch, &r.Worktree, &r.Author, &r.Source,
+			&r.Confidence, &r.ReinforcementCount, &pinned, &status, &r.SupersededBy,
+			&sim, &extra, &version); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		r.Kind = Kind(kind)
+		r.Status = status
+		r.Pinned = pinned != 0
+		r.SimHash = uint64(sim)
+		if extra != "" && extra != "{}" {
+			_ = json.Unmarshal([]byte(extra), &r.Extra)
+		}
+		recs = append(recs, &r)
+		versions = append(versions, version)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
 	rows.Close()
-	if err != nil {
-		return nil, err
-	}
+
 	if err := e.loadRefs(ctx, recs); err != nil {
 		return nil, err
 	}
 
-	verRows, err := e.st.DB.QueryContext(ctx, `SELECT memory_id, updated_at FROM memory_sync_outbox`)
-	if err != nil {
-		return nil, err
-	}
-	versions := map[string]int64{}
-	for verRows.Next() {
-		var id string
-		var v int64
-		if err := verRows.Scan(&id, &v); err != nil {
-			verRows.Close()
-			return nil, err
-		}
-		versions[id] = v
-	}
-	if err := verRows.Err(); err != nil {
-		verRows.Close()
-		return nil, err
-	}
-	verRows.Close()
-
 	out := make([]PendingPushItem, len(recs))
 	for i, r := range recs {
-		out[i] = PendingPushItem{Record: ToWireRecord(r), Version: versions[r.ID]}
+		out[i] = PendingPushItem{Record: ToWireRecord(r), Version: versions[i]}
 	}
 	return out, nil
 }
