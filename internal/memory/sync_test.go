@@ -12,6 +12,44 @@ import (
 	"git.gerwim.nl/gerwim/recarto/internal/syncwire"
 )
 
+// clearOutbox is a test-only convenience over the now version-guarded
+// ClearPushed: it reads each id's current memory_sync_outbox version and
+// clears exactly that version, mirroring what a real push does after a
+// successful HTTP round trip. Tests that want to exercise the race guard
+// itself build IDVersion values directly instead of using this helper.
+func clearOutbox(t *testing.T, e *Engine, ctx context.Context, ids ...string) {
+	t.Helper()
+	var versions []IDVersion
+	for _, id := range ids {
+		var v int64
+		if err := e.st.DB.QueryRowContext(ctx,
+			`SELECT updated_at FROM memory_sync_outbox WHERE memory_id=?`, id).Scan(&v); err != nil {
+			continue // not currently queued; nothing to clear
+		}
+		versions = append(versions, IDVersion{ID: id, Version: v})
+	}
+	if err := e.ClearPushed(ctx, versions); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// markTombstonesPushed is the tombstone analogue of clearOutbox.
+func markTombstonesPushed(t *testing.T, e *Engine, ctx context.Context, ids ...string) {
+	t.Helper()
+	var versions []IDVersion
+	for _, id := range ids {
+		var v int64
+		if err := e.st.DB.QueryRowContext(ctx,
+			`SELECT deleted_at FROM memory_tombstones WHERE id=?`, id).Scan(&v); err != nil {
+			continue
+		}
+		versions = append(versions, IDVersion{ID: id, Version: v})
+	}
+	if err := e.MarkTombstonesPushed(ctx, versions); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestSyncApplyInsertsNewRecord(t *testing.T) {
 	e := newTestEngine(t, clock.NewFake(time.UnixMilli(1_000_000)))
 	ctx := context.Background()
@@ -65,9 +103,7 @@ func TestSyncApplyReinforcesNearDupAndReturnsCanonicalID(t *testing.T) {
 	}
 	// Clear the outbox entry Record() created, so the test cleanly observes only
 	// what SyncApply itself does to the outbox below.
-	if err := e.ClearPushed(ctx, []string{local}); err != nil {
-		t.Fatal(err)
-	}
+	clearOutbox(t, e, ctx, local)
 
 	rec := syncwire.Record{
 		ID: "remote-1", Kind: string(KindLearning), Title: "t",
@@ -871,9 +907,7 @@ func TestForgetTombstoneIsQueuedForPush(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := e.ClearPushed(ctx, []string{id}); err != nil {
-		t.Fatal(err)
-	}
+	clearOutbox(t, e, ctx, id)
 	if ok, err := e.Forget(ctx, id, "test"); err != nil || !ok {
 		t.Fatalf("Forget: ok=%v err=%v", ok, err)
 	}
@@ -891,9 +925,7 @@ func TestForgetTombstoneIsQueuedForPush(t *testing.T) {
 		t.Fatalf("an explicit Forget must queue a tombstone for push, got %+v", pending)
 	}
 
-	if err := e.MarkTombstonesPushed(ctx, []string{id}); err != nil {
-		t.Fatal(err)
-	}
+	markTombstonesPushed(t, e, ctx, id)
 	pending, err = e.PendingTombstones(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -953,12 +985,10 @@ func TestPendingPushClearedAfterPush(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(pending) != 1 || pending[0].ID != id {
+	if len(pending) != 1 || pending[0].Record.ID != id {
 		t.Fatalf("locally-authored Record must be queued for push, got %+v", pending)
 	}
-	if err := e.ClearPushed(ctx, []string{id}); err != nil {
-		t.Fatal(err)
-	}
+	clearOutbox(t, e, ctx, id)
 	pending, err = e.PendingPush(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -976,9 +1006,7 @@ func TestCompleteTodoQueuesForPushWithDoneStatus(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := e.ClearPushed(ctx, []string{id}); err != nil {
-		t.Fatal(err)
-	}
+	clearOutbox(t, e, ctx, id)
 
 	if ok, err := e.CompleteTodo(ctx, id); err != nil || !ok {
 		t.Fatalf("CompleteTodo: ok=%v err=%v", ok, err)
@@ -988,10 +1016,10 @@ func TestCompleteTodoQueuesForPushWithDoneStatus(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(pending) != 1 || pending[0].ID != id {
+	if len(pending) != 1 || pending[0].Record.ID != id {
 		t.Fatalf("completing a todo must queue it for push, got %+v", pending)
 	}
-	if pending[0].Status != "done" {
+	if pending[0].Record.Status != "done" {
 		t.Fatalf("pushed record must carry the done status, got %+v", pending[0])
 	}
 }
@@ -1004,9 +1032,7 @@ func TestResolveFeedbackQueuesForPush(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := e.ClearPushed(ctx, []string{id}); err != nil {
-		t.Fatal(err)
-	}
+	clearOutbox(t, e, ctx, id)
 
 	if ok, err := e.ResolveFeedback(ctx, id, "fixed in v2"); err != nil || !ok {
 		t.Fatalf("ResolveFeedback: ok=%v err=%v", ok, err)
@@ -1016,7 +1042,7 @@ func TestResolveFeedbackQueuesForPush(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(pending) != 1 || pending[0].ID != id || pending[0].Status != "resolved" {
+	if len(pending) != 1 || pending[0].Record.ID != id || pending[0].Record.Status != "resolved" {
 		t.Fatalf("resolving feedback must queue it for push as resolved, got %+v", pending)
 	}
 }
@@ -1029,9 +1055,7 @@ func TestSupersedeQueuesOldMemoryForPush(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := e.ClearPushed(ctx, []string{oldID}); err != nil {
-		t.Fatal(err)
-	}
+	clearOutbox(t, e, ctx, oldID)
 
 	newID, _, _, err := e.Record(ctx, NewMemory{
 		Kind: KindDecision, Title: "t2", Body: "use a query builder instead", SupersedesID: oldID,
@@ -1046,7 +1070,7 @@ func TestSupersedeQueuesOldMemoryForPush(t *testing.T) {
 	}
 	byID := map[string]syncwire.Record{}
 	for _, p := range pending {
-		byID[p.ID] = p
+		byID[p.Record.ID] = p.Record
 	}
 	if _, ok := byID[newID]; !ok {
 		t.Fatalf("the new superseding record must be queued for push, got %+v", pending)
@@ -1117,5 +1141,125 @@ func TestSyncApplyTxHookFailureRollsBackTheMerge(t *testing.T) {
 	// seq/sync_index bump must never be separable from the memory it indexes).
 	if got, _ := e.GetByID(ctx, "r1"); got != nil {
 		t.Fatalf("a failed afterApply hook must roll back the merge too, but the row was committed: %+v", got)
+	}
+}
+
+// TestClearPushedDoesNotDropNewerDirtyRow proves the ClearPushed race guard: a
+// long-lived `recarto serve` process can have PendingPush read id X's outbox
+// row (snapshotting it for an HTTP push), then — while that push is still in
+// flight over the network — a completely separate write (another
+// Record/CompleteTodo/ResolveFeedback/supersede call) lands on the SAME id
+// and re-dirties it at a newer version. If ClearPushed matched on id alone,
+// the push response arriving afterward would delete the outbox row entirely,
+// silently dropping the newer, never-actually-sent change. Matching
+// "id AND updated_at <= the version that was sent" makes that clear a no-op.
+func TestClearPushedDoesNotDropNewerDirtyRow(t *testing.T) {
+	e := newTestEngine(t, clock.NewFake(time.UnixMilli(1_000_000)))
+	ctx := context.Background()
+
+	id, _, _, err := e.Record(ctx, NewMemory{Kind: KindLearning, Title: "t", Body: "will be re-dirtied mid-push"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, err := e.PendingPush(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 1 || pending[0].Record.ID != id {
+		t.Fatalf("setup: want one pending record for %s, got %+v", id, pending)
+	}
+	sentVersion := pending[0].Version
+
+	// Simulate a write landing on the same id while the push above is still in
+	// flight (e.g. another tool call in a long-lived MCP session) — it
+	// re-dirties the outbox at a NEWER version, exactly like markDirty would.
+	newerVersion := sentVersion + 1000
+	if _, err := e.st.DB.ExecContext(ctx,
+		`UPDATE memory_sync_outbox SET updated_at=? WHERE memory_id=?`, newerVersion, id); err != nil {
+		t.Fatal(err)
+	}
+
+	// The in-flight push's response now arrives and tries to clear the OLD
+	// version it actually sent — this must be a no-op against the newer row.
+	if err := e.ClearPushed(ctx, []IDVersion{{ID: id, Version: sentVersion}}); err != nil {
+		t.Fatal(err)
+	}
+
+	pending, err = e.PendingPush(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 1 || pending[0].Record.ID != id {
+		t.Fatalf("a write that raced an in-flight push must remain queued, got %+v", pending)
+	}
+	if pending[0].Version != newerVersion {
+		t.Fatalf("the outbox version must still reflect the newer write, got %d want %d", pending[0].Version, newerVersion)
+	}
+}
+
+// TestMarkTombstonesPushedDoesNotDropNewerTombstoneVersion is the tombstone
+// analogue of TestClearPushedDoesNotDropNewerDirtyRow: MarkTombstonesPushed
+// must not flip pushed=1 for a version older than what memory_tombstones
+// currently records, or a tombstone that was re-recorded at a newer
+// deleted_at after being snapshotted for push (e.g. a concurrent remote
+// delete for the same id learned mid-flight) would be marked as already
+// pushed without that newer version ever actually reaching the server.
+func TestMarkTombstonesPushedDoesNotDropNewerTombstoneVersion(t *testing.T) {
+	e := newTestEngine(t, clock.NewFake(time.UnixMilli(1_000_000)))
+	ctx := context.Background()
+
+	id, _, _, err := e.Record(ctx, NewMemory{Kind: KindLearning, Title: "t", Body: "forget me mid-flight"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	clearOutbox(t, e, ctx, id)
+
+	if ok, err := e.Forget(ctx, id, "test"); err != nil || !ok {
+		t.Fatalf("Forget: ok=%v err=%v", ok, err)
+	}
+	pendingTombs, err := e.PendingTombstones(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sentVersion int64
+	found := false
+	for _, p := range pendingTombs {
+		if p.ID == id {
+			sentVersion, found = p.UpdatedAt, true
+		}
+	}
+	if !found {
+		t.Fatalf("setup: expected a pending tombstone for %s, got %+v", id, pendingTombs)
+	}
+
+	// Simulate the tombstone being re-recorded at a NEWER deleted_at while the
+	// push above is still in flight.
+	newerVersion := sentVersion + 1000
+	if _, err := e.st.DB.ExecContext(ctx,
+		`UPDATE memory_tombstones SET deleted_at=? WHERE id=?`, newerVersion, id); err != nil {
+		t.Fatal(err)
+	}
+
+	// The in-flight push's response arrives and tries to confirm the OLD
+	// version it actually sent — this must be a no-op against the newer row.
+	if err := e.MarkTombstonesPushed(ctx, []IDVersion{{ID: id, Version: sentVersion}}); err != nil {
+		t.Fatal(err)
+	}
+
+	pendingTombs, err = e.PendingTombstones(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found = false
+	for _, p := range pendingTombs {
+		if p.ID == id {
+			found = true
+			if p.UpdatedAt != newerVersion {
+				t.Fatalf("want the tombstone still queued at the newer version %d, got %d", newerVersion, p.UpdatedAt)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("a tombstone version newer than what was confirmed pushed must remain queued, got %+v", pendingTombs)
 	}
 }

@@ -11,6 +11,7 @@ import (
 	"git.gerwim.nl/gerwim/recarto/internal/gitctx"
 	"git.gerwim.nl/gerwim/recarto/internal/memory"
 	"git.gerwim.nl/gerwim/recarto/internal/store"
+	"git.gerwim.nl/gerwim/recarto/internal/syncwire"
 )
 
 // metaCursor is the meta key holding the last-applied server seq (the pull
@@ -98,9 +99,21 @@ func (s *Syncer) Pull(ctx context.Context) error {
 	}
 }
 
+// pushItem is one queued outgoing change, carrying both its wire record and
+// the outbox/tombstone version it was read at — see memory.IDVersion for why
+// the version must travel with it (a race guard against a write landing on
+// the same id while this exact item is still in flight over HTTP).
+type pushItem struct {
+	rec     syncwire.Record
+	version int64
+	tomb    bool
+}
+
 // Push sends every locally-authored change (the outbox) and pending tombstone
 // to the server, in bounded batches, clearing each batch's local queue entries
-// only after the server confirms it.
+// only after the server confirms it — and only up to the version actually
+// sent, so a write that races an in-flight push is never silently dropped
+// (see memory.IDVersion).
 func (s *Syncer) Push(ctx context.Context) error {
 	recs, err := s.eng.PendingPush(ctx)
 	if err != nil {
@@ -110,25 +123,36 @@ func (s *Syncer) Push(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	all := append(recs, tombs...)
+	all := make([]pushItem, 0, len(recs)+len(tombs))
+	for _, r := range recs {
+		all = append(all, pushItem{rec: r.Record, version: r.Version})
+	}
+	for _, t := range tombs {
+		// PendingTombstones' UpdatedAt IS the tombstone's version (deleted_at).
+		all = append(all, pushItem{rec: t, version: t.UpdatedAt, tomb: true})
+	}
 	for start := 0; start < len(all); start += pushBatchSize {
 		end := min(start+pushBatchSize, len(all))
 		batch := all[start:end]
-		if _, err := s.client.Push(ctx, s.repoKey, batch); err != nil {
+		wire := make([]syncwire.Record, len(batch))
+		for i, it := range batch {
+			wire[i] = it.rec
+		}
+		if _, err := s.client.Push(ctx, s.repoKey, wire); err != nil {
 			return err
 		}
-		var pushedIDs, tombIDs []string
-		for _, r := range batch {
-			if r.Deleted {
-				tombIDs = append(tombIDs, r.ID)
+		var pushed, tombPushed []memory.IDVersion
+		for _, it := range batch {
+			if it.tomb {
+				tombPushed = append(tombPushed, memory.IDVersion{ID: it.rec.ID, Version: it.version})
 			} else {
-				pushedIDs = append(pushedIDs, r.ID)
+				pushed = append(pushed, memory.IDVersion{ID: it.rec.ID, Version: it.version})
 			}
 		}
-		if err := s.eng.ClearPushed(ctx, pushedIDs); err != nil {
+		if err := s.eng.ClearPushed(ctx, pushed); err != nil {
 			return err
 		}
-		if err := s.eng.MarkTombstonesPushed(ctx, tombIDs); err != nil {
+		if err := s.eng.MarkTombstonesPushed(ctx, tombPushed); err != nil {
 			return err
 		}
 	}

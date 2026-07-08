@@ -488,3 +488,63 @@ exception as before, `internal/mcp/handlers_feedback_test.go`);
 clean stash of this branch — this sandbox blocks loopback TCP, unrelated to
 this change); `-race` clean on `internal/memory`, `internal/remotesync`,
 `internal/syncserver`, `internal/store`.
+
+## Round 11 — review fix: push/tombstone confirmation raced a concurrent local write
+
+A review pass found that `Syncer.Push` (`internal/remotesync/sync.go`)
+confirmed a batch it had just sent by clearing/marking-pushed purely by id —
+`Engine.ClearPushed(ctx, ids []string)` deleted every `memory_sync_outbox`
+row named in the batch, and `Engine.MarkTombstonesPushed` flipped `pushed=1`
+the same way — with no check that the row `PendingPush`/`PendingTombstones`
+had snapshotted before the HTTP call was still the SAME version by the time
+the HTTP response came back. In a long-lived `recarto serve` process this is
+reachable: `PendingPush` reads id `A`'s outbox row and the batch is sent;
+while that request is still in flight over the network, some other tool call
+(`record_memory`, `complete_todo`, `forget_memory`, a dedup merge) writes to
+the SAME id `A` again, calling `markDirty` and bumping
+`memory_sync_outbox.updated_at` to a newer value. When the original push's
+response arrives, `ClearPushed(["A"])` deleted the row unconditionally —
+including the newer write that was never actually sent — permanently
+dropping a locally-authored change with no error and no retry. The identical
+shape applies to `MarkTombstonesPushed`.
+
+Fixed by making both confirmation calls **version-aware**. `Engine.PendingPush`
+now returns `[]PendingPushItem{Record, Version}` (`Version` is the
+`memory_sync_outbox.updated_at` the record was read at, alongside the
+existing wire record); `Engine.ClearPushed` and `Engine.MarkTombstonesPushed`
+now take `[]IDVersion{ID, Version}` and only clear/flip a row when its
+current `updated_at`/`deleted_at` has not advanced past the version actually
+confirmed (`DELETE ... WHERE memory_id=? AND updated_at<=?` /
+`UPDATE ... SET pushed=1 WHERE id=? AND deleted_at<=?`). `PendingTombstones`'
+existing `UpdatedAt` field on each wire record already IS the tombstone's
+version (`deleted_at`), so no shape change was needed there — `Syncer.Push`
+just carries it through to `MarkTombstonesPushed` instead of discarding it.
+A write that races an in-flight push therefore survives: the guarded
+clear/mark is a no-op against the newer row, and the newer version stays
+queued for the next sync cycle. New tests:
+`TestClearPushedDoesNotDropNewerDirtyRow` and
+`TestMarkTombstonesPushedDoesNotDropNewerTombstoneVersion` (both in
+`internal/memory`) simulate the race directly (bump the outbox/tombstone
+row to a newer version between reading it and confirming the old one) and
+assert the newer version survives un-cleared.
+
+Every existing caller of `PendingPush`/`ClearPushed`/`MarkTombstonesPushed`
+was updated for the new shapes: `Syncer.Push` now tracks each queued item's
+own version through the batch loop (a small `pushItem` struct pairing the
+wire record with its version and whether it's a tombstone) instead of
+building bare id slices. Test-only callers across `internal/memory` gained
+two small helpers, `clearOutbox`/`markTombstonesPushed`, that look up an
+id's current version and clear/confirm exactly that — mirroring what a real
+successful push does — so the bulk of the existing test suite needed no
+behavioral changes, only a mechanical signature update.
+
+Verification after round 11: `go build ./...`, `go vet ./...` clean;
+`gofmt -l .` clean on all touched files (same pre-existing unrelated
+exception as before, `internal/mcp/handlers_feedback_test.go`);
+`go test ./...` green except the same pre-existing, environment-specific
+`internal/update` `TestHTTPFetcher` failure (reconfirmed unchanged on a
+clean stash of this branch — this sandbox blocks loopback TCP, unrelated to
+this change); `-race` clean on `internal/memory`, `internal/remotesync`,
+`internal/syncserver`, `internal/agents` (+ subpackages), `internal/mcp`,
+`internal/app`, `internal/cli`, `internal/snapshot`, `internal/store`. Go
+was available in this session (`/usr/local/go/bin`, not on default `PATH`).

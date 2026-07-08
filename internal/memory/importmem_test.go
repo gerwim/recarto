@@ -116,12 +116,10 @@ func TestImportMemoryQueuesRowsForHTTPPush(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(pending) != 1 || pending[0].ID != "snap-ins" {
+	if len(pending) != 1 || pending[0].Record.ID != "snap-ins" {
 		t.Fatalf("a fresh ImportMemory insert must be queued for push, got %+v", pending)
 	}
-	if err := e.ClearPushed(ctx, []string{"snap-ins"}); err != nil {
-		t.Fatal(err)
-	}
+	clearOutbox(t, e, ctx, "snap-ins")
 
 	// Reinforce-by-near-dup via ImportMemory (independent authoring converging).
 	reinforcing := ImportMemory{
@@ -138,7 +136,7 @@ func TestImportMemoryQueuesRowsForHTTPPush(t *testing.T) {
 	}
 	found := false
 	for _, p := range pending {
-		if p.ID == canonID {
+		if p.Record.ID == canonID {
 			found = true
 		}
 	}

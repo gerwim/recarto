@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"strings"
 
 	"git.gerwim.nl/gerwim/recarto/internal/store"
 	"git.gerwim.nl/gerwim/recarto/internal/syncwire"
@@ -577,6 +576,30 @@ func (e *Engine) markDirty(ctx context.Context, c store.Conn, id string, updated
 	return err
 }
 
+// IDVersion pairs a memory id with the outbox/tombstone version it was read
+// at (memory_sync_outbox.updated_at, or memory_tombstones.deleted_at). Both
+// ClearPushed and MarkTombstonesPushed require these rather than bare ids so
+// they can guard against a push race: a long-lived `recarto serve` process
+// can have a write land on id X (re-dirtying it, or re-tombstoning it — see
+// upsertTombstone) WHILE an earlier push of X's outbox/tombstone snapshot is
+// still in flight over HTTP. If the clear/mark-pushed step only matched on
+// id, it would delete/flag the NEW row that arrived after the snapshot was
+// taken, silently dropping a locally-authored change that was never actually
+// sent. Matching "id AND version <= the version that was actually pushed"
+// makes the clear a no-op whenever a newer write raced ahead of it, leaving
+// that newer version queued for the next cycle instead.
+type IDVersion struct {
+	ID      string
+	Version int64
+}
+
+// PendingPushItem is one PendingPush result: the wire record ready to POST,
+// paired with the memory_sync_outbox version it was read at (for ClearPushed).
+type PendingPushItem struct {
+	Record  syncwire.Record
+	Version int64
+}
+
 // PendingPush returns memories with a pending local change (present in
 // memory_sync_outbox), as wire records ready to POST to the sync server. This
 // is NOT filtered to status='active': the outbox is populated only by
@@ -586,7 +609,7 @@ func (e *Engine) markDirty(ctx context.Context, c store.Conn, id string, updated
 // propagate just as much as a still-active row's content does — a completed
 // todo that fails to sync would keep surfacing as open work on every other
 // machine.
-func (e *Engine) PendingPush(ctx context.Context) ([]syncwire.Record, error) {
+func (e *Engine) PendingPush(ctx context.Context) ([]PendingPushItem, error) {
 	rows, err := e.st.DB.QueryContext(ctx, selectMemoriesSQL+
 		` WHERE id IN (SELECT memory_id FROM memory_sync_outbox)`)
 	if err != nil {
@@ -600,33 +623,58 @@ func (e *Engine) PendingPush(ctx context.Context) ([]syncwire.Record, error) {
 	if err := e.loadRefs(ctx, recs); err != nil {
 		return nil, err
 	}
-	out := make([]syncwire.Record, len(recs))
+
+	verRows, err := e.st.DB.QueryContext(ctx, `SELECT memory_id, updated_at FROM memory_sync_outbox`)
+	if err != nil {
+		return nil, err
+	}
+	versions := map[string]int64{}
+	for verRows.Next() {
+		var id string
+		var v int64
+		if err := verRows.Scan(&id, &v); err != nil {
+			verRows.Close()
+			return nil, err
+		}
+		versions[id] = v
+	}
+	if err := verRows.Err(); err != nil {
+		verRows.Close()
+		return nil, err
+	}
+	verRows.Close()
+
+	out := make([]PendingPushItem, len(recs))
 	for i, r := range recs {
-		out[i] = ToWireRecord(r)
+		out[i] = PendingPushItem{Record: ToWireRecord(r), Version: versions[r.ID]}
 	}
 	return out, nil
 }
 
-// ClearPushed removes ids from the push outbox after a confirmed push.
-func (e *Engine) ClearPushed(ctx context.Context, ids []string) error {
-	if len(ids) == 0 {
+// ClearPushed removes an outbox entry after a confirmed push, but ONLY when
+// the outbox row's version has not advanced past what was actually pushed
+// (see IDVersion) — a race guard against a write landing on the same id while
+// the push that read versions was still in flight.
+func (e *Engine) ClearPushed(ctx context.Context, versions []IDVersion) error {
+	if len(versions) == 0 {
 		return nil
 	}
-	ph := make([]string, len(ids))
-	args := make([]any, len(ids))
-	for i, id := range ids {
-		ph[i] = "?"
-		args[i] = id
-	}
 	return e.st.WriteTx(ctx, func(c store.Conn) error {
-		_, err := c.ExecContext(ctx,
-			`DELETE FROM memory_sync_outbox WHERE memory_id IN (`+strings.Join(ph, ",")+`)`, args...)
-		return err
+		for _, v := range versions {
+			if _, err := c.ExecContext(ctx,
+				`DELETE FROM memory_sync_outbox WHERE memory_id=? AND updated_at<=?`,
+				v.ID, v.Version); err != nil {
+				return err
+			}
+		}
+		return nil
 	})
 }
 
 // PendingTombstones returns locally-authored deletes (memory_tombstones rows
-// with pushed=0) as wire tombstone records ready to push.
+// with pushed=0) as wire tombstone records ready to push. Each record's
+// UpdatedAt IS the tombstone's version (deleted_at) — MarkTombstonesPushed
+// expects it back unchanged as the guard version.
 func (e *Engine) PendingTombstones(ctx context.Context) ([]syncwire.Record, error) {
 	rows, err := e.st.DB.QueryContext(ctx,
 		`SELECT id, deleted_at FROM memory_tombstones WHERE pushed=0`)
@@ -646,16 +694,20 @@ func (e *Engine) PendingTombstones(ctx context.Context) ([]syncwire.Record, erro
 	return out, rows.Err()
 }
 
-// MarkTombstonesPushed flips pushed=1 for ids after a confirmed push, so they
-// are not re-sent on the next push cycle.
-func (e *Engine) MarkTombstonesPushed(ctx context.Context, ids []string) error {
-	if len(ids) == 0 {
+// MarkTombstonesPushed flips pushed=1 after a confirmed push, but ONLY when
+// the tombstone's deleted_at has not advanced past the version that was
+// actually pushed (see IDVersion) — guards against a newer local delete (or a
+// remote tombstone learned via a concurrent Pull) racing an in-flight push of
+// an older tombstone for the same id.
+func (e *Engine) MarkTombstonesPushed(ctx context.Context, versions []IDVersion) error {
+	if len(versions) == 0 {
 		return nil
 	}
 	return e.st.WriteTx(ctx, func(c store.Conn) error {
-		for _, id := range ids {
+		for _, v := range versions {
 			if _, err := c.ExecContext(ctx,
-				`UPDATE memory_tombstones SET pushed=1 WHERE id=?`, id); err != nil {
+				`UPDATE memory_tombstones SET pushed=1 WHERE id=? AND deleted_at<=?`,
+				v.ID, v.Version); err != nil {
 				return err
 			}
 		}
