@@ -3,6 +3,7 @@ package syncserver
 import (
 	"context"
 	"encoding/json"
+	"log"
 	"net/http"
 	"strconv"
 
@@ -106,6 +107,10 @@ func (s *Server) handleGetChanges(w http.ResponseWriter, r *http.Request) {
 		records = append(records, memory.ToWireRecord(rec))
 	}
 
+	// One line per pull so an operator watching the container logs can see each
+	// client polling, which store it asked for, and whether anything moved.
+	log.Printf("sync: pull %s since=%d → %d records (cursor=%d more=%v)",
+		r.PathValue("key"), since, len(records), cursor, more)
 	writeJSON(w, syncwire.ChangesResponse{Records: records, Cursor: cursor, More: more})
 }
 
@@ -178,5 +183,7 @@ func (s *Server) handlePostChanges(w http.ResponseWriter, r *http.Request) {
 	var cursor int64
 	_ = rs.st.DB.QueryRowContext(ctx,
 		`SELECT COALESCE(value, 0) FROM counters WHERE scope='sync' AND metric='seq'`).Scan(&cursor)
+	log.Printf("sync: push %s %d records, %d accepted (cursor=%d)",
+		r.PathValue("key"), len(req.Records), accepted, cursor)
 	writeJSON(w, syncwire.PushResponse{Cursor: cursor, Accepted: accepted})
 }

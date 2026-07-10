@@ -9,6 +9,7 @@ package mcp
 import (
 	"context"
 	"fmt"
+	"sort"
 
 	"git.gerwim.nl/gerwim/recarto/internal/app"
 	"git.gerwim.nl/gerwim/recarto/internal/memory"
@@ -26,7 +27,17 @@ type MemoryView struct {
 	Score              float64  `json:"score,omitempty"`
 	Caveat             string   `json:"caveat,omitempty"`
 	MatchedOn          []string `json:"matched_on,omitempty"`
+	// Scope is "workspace" for a memory from the cross-repo workspace store;
+	// empty (omitted) for this repo's own memories.
+	Scope string `json:"scope,omitempty"`
 }
+
+// scopeWorkspace / scopeRepo are the wire values of the record_memory scope
+// field (and MemoryView.Scope, which only ever carries the workspace one).
+const (
+	scopeWorkspace = "workspace"
+	scopeRepo      = "repo"
+)
 
 // RecordMemoryInput are the arguments to the record_memory tool. Fields without
 // `omitempty` (kind, body) are required in the generated JSON schema.
@@ -39,6 +50,7 @@ type RecordMemoryInput struct {
 	Tags         []string `json:"tags,omitempty" jsonschema:"freeform tags"`
 	Pinned       bool     `json:"pinned,omitempty" jsonschema:"pin so it is never evicted"`
 	Global       bool     `json:"global,omitempty" jsonschema:"store repo-global instead of branch-scoped"`
+	Scope        string   `json:"scope,omitempty" jsonschema:"where to store it: repo (default) or workspace — the cross-repo store shared under RECARTO_WORKSPACE, for preferences/knowledge that apply beyond this repo"`
 	SupersedesID string   `json:"supersedes_id,omitempty" jsonschema:"id of a prior memory this replaces"`
 }
 
@@ -72,17 +84,32 @@ func recordMemory(ctx context.Context, a *app.App, in RecordMemoryInput) (Record
 	if in.Body == "" {
 		return RecordMemoryOutput{}, fmt.Errorf("body is required")
 	}
+	eng := a.Engine
 	branch := a.Git.Branch
+	worktree := a.Git.Worktree
+	switch in.Scope {
+	case "", scopeRepo:
+	case scopeWorkspace:
+		if a.Workspace == nil {
+			return RecordMemoryOutput{}, fmt.Errorf("scope %q requires a configured workspace (set %s)", in.Scope, "RECARTO_WORKSPACE")
+		}
+		// Workspace memories are branch-less and worktree-less by construction:
+		// branches and worktrees are repo concepts. File refs still normalize
+		// against the current worktree so they read repo-relative.
+		eng, branch, worktree = a.Workspace.Engine, "", ""
+	default:
+		return RecordMemoryOutput{}, fmt.Errorf("invalid scope %q (repo or workspace)", in.Scope)
+	}
 	if in.Global {
 		branch = ""
 	}
-	id, reinforced, conflicts, err := a.Engine.Record(ctx, memory.NewMemory{
+	id, reinforced, conflicts, err := eng.Record(ctx, memory.NewMemory{
 		Kind:         kind,
 		Title:        in.Title,
 		Body:         in.Body,
 		Refs:         refsFrom(a.Git.Worktree, in.Files, in.Symbols, in.Tags),
 		Branch:       branch,
-		Worktree:     a.Git.Worktree,
+		Worktree:     worktree,
 		Author:       "mcp",
 		Source:       "mcp",
 		Pinned:       in.Pinned,
@@ -123,8 +150,46 @@ type RecallMemoryOutput struct {
 	BudgetUsed int          `json:"budget_used"`
 }
 
+// scopedResult pairs a recall result with the scope label of the store it came
+// from ("" = repo, scopeWorkspace = the workspace store).
+type scopedResult struct {
+	memory.RecallResult
+	scope string
+}
+
+// recallScoped runs q against the repo engine and — when a workspace is
+// configured — the workspace engine (branch/worktree stripped: workspace rows
+// carry neither), returning the merged results sorted by score. Scores from
+// the two stores are computed by the identical algorithm, so a merged sort is
+// meaningful. Each store applies q's limit/budget independently; callers that
+// need a hard cap re-cap the merged slice.
+func recallScoped(ctx context.Context, a *app.App, q memory.RecallQuery) ([]scopedResult, int, bool, error) {
+	set, err := a.Engine.Recall(ctx, q)
+	if err != nil {
+		return nil, 0, false, err
+	}
+	merged := make([]scopedResult, 0, len(set.Results))
+	for _, r := range set.Results {
+		merged = append(merged, scopedResult{RecallResult: r})
+	}
+	used, truncated := set.TokensUsed, set.Truncated
+	if a.Workspace != nil {
+		wq := q
+		wq.Branch, wq.Worktree = "", ""
+		if wset, err := a.Workspace.Engine.Recall(ctx, wq); err == nil {
+			for _, r := range wset.Results {
+				merged = append(merged, scopedResult{RecallResult: r, scope: scopeWorkspace})
+			}
+			used += wset.TokensUsed
+			truncated = truncated || wset.Truncated
+		}
+	}
+	sort.SliceStable(merged, func(i, j int) bool { return merged[i].Score > merged[j].Score })
+	return merged, used, truncated, nil
+}
+
 func recallMemory(ctx context.Context, a *app.App, in RecallMemoryInput) (RecallMemoryOutput, error) {
-	set, err := a.Engine.Recall(ctx, memory.RecallQuery{
+	merged, used, truncated, err := recallScoped(ctx, a, memory.RecallQuery{
 		TaskHint:    in.TaskHint,
 		Files:       in.Files,
 		Symbols:     in.Symbols,
@@ -138,15 +203,19 @@ func recallMemory(ctx context.Context, a *app.App, in RecallMemoryInput) (Recall
 	if err != nil {
 		return RecallMemoryOutput{}, err
 	}
-	out := RecallMemoryOutput{
-		Count: len(set.Results), Memories: make([]MemoryView, 0, len(set.Results)),
-		Truncated: set.Truncated, BudgetUsed: set.TokensUsed,
+	if in.Limit > 0 && len(merged) > in.Limit {
+		merged = merged[:in.Limit]
 	}
-	for _, r := range set.Results {
+	out := RecallMemoryOutput{
+		Count: len(merged), Memories: make([]MemoryView, 0, len(merged)),
+		Truncated: truncated, BudgetUsed: used,
+	}
+	for _, r := range merged {
 		v := viewOf(r.Record)
 		v.Score = roundScore(r.Score)
 		v.Caveat = r.Caveat()
 		v.MatchedOn = r.MatchedOn()
+		v.Scope = r.scope
 		out.Memories = append(out.Memories, v)
 	}
 	return out, nil
@@ -182,6 +251,11 @@ func completeTodo(ctx context.Context, a *app.App, in CompleteTodoInput) (Comple
 	ok, err := a.Engine.CompleteTodo(ctx, in.ID)
 	if err != nil {
 		return CompleteTodoOutput{}, err
+	}
+	if !ok && a.Workspace != nil {
+		if ok, err = a.Workspace.Engine.CompleteTodo(ctx, in.ID); err != nil {
+			return CompleteTodoOutput{}, err
+		}
 	}
 	if ok {
 		a.SignalSync()
@@ -273,7 +347,7 @@ type SearchBugsOutput struct {
 }
 
 func searchBugs(ctx context.Context, a *app.App, in SearchBugsInput) (SearchBugsOutput, error) {
-	set, err := a.Engine.Recall(ctx, memory.RecallQuery{
+	merged, _, _, err := recallScoped(ctx, a, memory.RecallQuery{
 		TaskHint: in.Query,
 		Kind:     memory.KindBug,
 		Branch:   a.Git.Branch,
@@ -282,13 +356,13 @@ func searchBugs(ctx context.Context, a *app.App, in SearchBugsInput) (SearchBugs
 	if err != nil {
 		return SearchBugsOutput{}, err
 	}
-	results := set.Results
-	out := SearchBugsOutput{Count: len(results), Bugs: make([]MemoryView, 0, len(results))}
-	for _, r := range results {
+	out := SearchBugsOutput{Count: len(merged), Bugs: make([]MemoryView, 0, len(merged))}
+	for _, r := range merged {
 		v := viewOf(r.Record)
 		v.Score = roundScore(r.Score)
 		v.Caveat = r.Caveat()
 		v.MatchedOn = r.MatchedOn()
+		v.Scope = r.scope
 		out.Bugs = append(out.Bugs, v)
 	}
 	return out, nil
@@ -309,6 +383,18 @@ func getMemory(ctx context.Context, a *app.App, in GetMemoryInput) (GetMemoryOut
 	rec, err := a.Engine.GetByID(ctx, in.ID)
 	if err != nil {
 		return GetMemoryOutput{}, err
+	}
+	if rec == nil && a.Workspace != nil {
+		// Ids are unique across stores (UUIDv7), so an id the repo store does
+		// not know may be a workspace memory — every id-taking tool falls back.
+		if rec, err = a.Workspace.Engine.GetByID(ctx, in.ID); err != nil {
+			return GetMemoryOutput{}, err
+		}
+		if rec != nil {
+			v := viewOf(rec)
+			v.Scope = scopeWorkspace
+			return GetMemoryOutput{Found: true, Memory: &v}, nil
+		}
 	}
 	if rec == nil {
 		return GetMemoryOutput{Found: false}, nil
@@ -331,19 +417,41 @@ type ListMemoryOutput struct {
 }
 
 func listMemory(ctx context.Context, a *app.App, in ListMemoryInput) (ListMemoryOutput, error) {
-	recs, err := a.Engine.List(ctx, memory.ListFilter{
+	f := memory.ListFilter{
 		Kind:   memory.Kind(in.Kind),
 		Branch: in.Branch,
 		Limit:  in.Limit,
-	})
+	}
+	recs, err := a.Engine.List(ctx, f)
 	if err != nil {
 		return ListMemoryOutput{}, err
 	}
-	out := ListMemoryOutput{Count: len(recs), Memories: make([]MemoryView, 0, len(recs))}
+	views := make([]MemoryView, 0, len(recs))
 	for _, r := range recs {
-		out.Memories = append(out.Memories, viewOf(r))
+		views = append(views, viewOf(r))
 	}
-	return out, nil
+	if a.Workspace != nil {
+		// Workspace rows are branch-less, so the branch filter never applies.
+		wf := f
+		wf.Branch = ""
+		if wrecs, err := a.Workspace.Engine.List(ctx, wf); err == nil {
+			at := make(map[string]int64, len(recs)+len(wrecs))
+			for _, r := range recs {
+				at[r.ID] = r.UpdatedAt
+			}
+			for _, r := range wrecs {
+				v := viewOf(r)
+				v.Scope = scopeWorkspace
+				views = append(views, v)
+				at[r.ID] = r.UpdatedAt
+			}
+			sort.SliceStable(views, func(i, j int) bool { return at[views[i].ID] > at[views[j].ID] })
+			if in.Limit > 0 && len(views) > in.Limit {
+				views = views[:in.Limit]
+			}
+		}
+	}
+	return ListMemoryOutput{Count: len(views), Memories: views}, nil
 }
 
 // ForgetMemoryInput is the argument to the forget_memory tool.
@@ -361,6 +469,11 @@ func forgetMemory(ctx context.Context, a *app.App, in ForgetMemoryInput) (Forget
 	ok, err := a.Engine.Forget(ctx, in.ID, in.Reason)
 	if err != nil {
 		return ForgetMemoryOutput{}, err
+	}
+	if !ok && a.Workspace != nil {
+		if ok, err = a.Workspace.Engine.Forget(ctx, in.ID, in.Reason); err != nil {
+			return ForgetMemoryOutput{}, err
+		}
 	}
 	if ok {
 		a.SignalSync()

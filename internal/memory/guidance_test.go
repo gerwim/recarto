@@ -9,9 +9,10 @@ import (
 )
 
 // GuidanceForCode surfaces the high-signal "ship better code" kinds anchored to a
-// file/symbol — do_not_repeat (guardrail) and decision (rationale) — and must NOT
-// leak the lower-signal kinds (bug/todo have their own tiers; learning/preference
-// belong to recall), so the just-in-time read/edit tier stays high-precision.
+// file/symbol — do_not_repeat (guardrail), decision (rationale) and learning
+// (how-it-works knowledge) — and must NOT leak the kinds with their own tiers
+// (bug/todo) or preference (recall-only), so the just-in-time read/edit tier
+// stays high-precision.
 func TestGuidanceForCodeReturnsOnlyGuardrailKinds(t *testing.T) {
 	eng := newTestEngine(t, clock.NewFake(time.UnixMilli(10_000_000)))
 	ctx := context.Background()
@@ -31,6 +32,7 @@ func TestGuidanceForCodeReturnsOnlyGuardrailKinds(t *testing.T) {
 	rec(KindBug, "off-by-one in cursor")
 	rec(KindLearning, "resolve is the bottleneck")
 	rec(KindTodo, "split this file")
+	rec(KindPreference, "prefer table tests")
 
 	got, err := eng.GuidanceForCode(ctx, "main", []string{rel}, nil)
 	if err != nil {
@@ -46,8 +48,11 @@ func TestGuidanceForCodeReturnsOnlyGuardrailKinds(t *testing.T) {
 	if !titles["we chose modernc sqlite"] {
 		t.Errorf("decision anchored to the file should surface; got %v", titles)
 	}
-	if titles["off-by-one in cursor"] || titles["resolve is the bottleneck"] || titles["split this file"] {
-		t.Errorf("bug/learning/todo must not leak into the guidance tier; got %v", titles)
+	if !titles["resolve is the bottleneck"] {
+		t.Errorf("learning anchored to the file should surface; got %v", titles)
+	}
+	if titles["off-by-one in cursor"] || titles["split this file"] || titles["prefer table tests"] {
+		t.Errorf("bug/todo/preference must not leak into the guidance tier; got %v", titles)
 	}
 }
 

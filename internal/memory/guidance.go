@@ -66,14 +66,17 @@ func (e *Engine) memoriesForCodeByKinds(ctx context.Context, branch string, kind
 	return recs, nil
 }
 
-// GuidanceForCode returns active do_not_repeat (guardrail) and decision (rationale)
-// memories anchored to any of the given files or symbols, branch-visible, most-
-// recently-updated first. It powers the high-precision just-in-time guidance tier
-// in the read/edit hooks: the moment the agent touches a file carrying a "don't do
-// this" or "we settled on this" memory, that guidance reappears — so prior
-// decisions are respected and prior mistakes are not repeated. Bug and todo kinds
-// have their own tiers; learning/preference belong to recall, so they are excluded
-// here to keep the tier lean.
+// GuidanceForCode returns active do_not_repeat (guardrail), decision (rationale)
+// and learning (how-it-works knowledge) memories anchored to any of the given
+// files or symbols, branch-visible, most-recently-updated first. It powers the
+// high-precision just-in-time guidance tier in the read/edit hooks: the moment
+// the agent touches a file carrying a "don't do this", "we settled on this" or
+// "here is how this works" memory, that guidance reappears — so prior decisions
+// are respected, prior mistakes are not repeated, and hard-won knowledge fires
+// at the point of change instead of living in an always-loaded instructions
+// file. Bug and todo kinds have their own tiers; preference stays recall-only
+// (preferences are rarely about one file). Anchored memories dedup once per
+// session (dedupSurfaced), so including learning cannot make the tier chatty.
 func (e *Engine) GuidanceForCode(ctx context.Context, branch string, files, symbols []string) ([]*Record, error) {
-	return e.memoriesForCodeByKinds(ctx, branch, []Kind{KindDoNotRepeat, KindDecision}, files, symbols)
+	return e.memoriesForCodeByKinds(ctx, branch, []Kind{KindDoNotRepeat, KindDecision, KindLearning}, files, symbols)
 }

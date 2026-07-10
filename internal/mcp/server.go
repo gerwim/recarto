@@ -18,13 +18,13 @@ import (
 func NewServer(a *app.App) *sdk.Server {
 	s := sdk.NewServer(&sdk.Implementation{Name: "recarto", Version: version.Version}, nil)
 	addToolSchema(s, a, "record_memory",
-		"Record (or reinforce a near-duplicate of) a memory: a preference, learning, decision, do_not_repeat, bug, or todo (open work that resurfaces until done). When the new memory looks like it may contradict an existing one (same topic, different claim — or anchored to the same code), the response lists conflict_candidates with a resolution note; review them rather than leaving both claims standing.",
+		"Record (or reinforce a near-duplicate of) a memory: a preference, learning, decision, do_not_repeat, bug, or todo (open work that resurfaces until done). When the new memory looks like it may contradict an existing one (same topic, different claim — or anchored to the same code), the response lists conflict_candidates with a resolution note; review them rather than leaving both claims standing. When a workspace is configured (RECARTO_WORKSPACE), scope=\"workspace\" stores it in the cross-repo workspace store instead of this repo's — use that for preferences and knowledge that apply beyond this one repo.",
 		recordMemorySchema(), recordMemory)
 	addTool(s, a, "record_bug",
 		"Record a bug with its error message, root cause, and fix (a convenience wrapper over record_memory).",
 		recordBug)
 	addTool(s, a, "recall_memory",
-		"Recall the most relevant memories for the current task — branch-aware, structurally ranked, and token-budgeted. Each memory reports matched_on (the signals behind it); the result reports truncated/budget_used.",
+		"Recall the most relevant memories for the current task — branch-aware, structurally ranked, and token-budgeted. Each memory reports matched_on (the signals behind it); the result reports truncated/budget_used. When a workspace is configured (RECARTO_WORKSPACE), cross-repo workspace memories are searched too and carry scope=\"workspace\".",
 		recallMemory)
 	addTool(s, a, "search_bugs",
 		"Search recorded bugs by keywords before attempting a fix.",
@@ -108,7 +108,7 @@ func addToolSchema[In, Out any](s *sdk.Server, a *app.App, name, desc string,
 // Serve runs the MCP server over stdio until the client disconnects. It is the
 // body of `recarto serve`.
 func Serve(ctx context.Context, a *app.App) error {
-	if a.Sync != nil {
+	if a.HasSync() {
 		go runSyncLoop(ctx, a)
 	}
 	return NewServer(a).Run(ctx, &sdk.StdioTransport{})
@@ -131,9 +131,9 @@ func runSyncLoop(ctx context.Context, a *app.App) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			_ = a.Sync.Once(ctx)
+			a.SyncAll(ctx)
 		case <-a.SyncTrigger:
-			_ = a.Sync.Once(ctx)
+			a.SyncAll(ctx)
 		}
 	}
 }

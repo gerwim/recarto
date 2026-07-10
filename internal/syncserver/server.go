@@ -12,6 +12,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -125,6 +126,7 @@ func (s *Server) storeFor(repoKey string) (*repoStore, error) {
 	}
 	rs := &repoStore{st: st, eng: memory.New(st, ledger.New(st), s.clk)}
 	s.stores[repoKey] = rs
+	log.Printf("sync: opened store %s", repoKey)
 	return rs, nil
 }
 

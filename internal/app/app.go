@@ -18,6 +18,7 @@ import (
 	"git.gerwim.nl/gerwim/recarto/internal/remotesync"
 	"git.gerwim.nl/gerwim/recarto/internal/store"
 	"git.gerwim.nl/gerwim/recarto/internal/version"
+	"git.gerwim.nl/gerwim/recarto/internal/workspace"
 )
 
 // Config configures App construction. The zero value is valid: it resolves the
@@ -42,6 +43,10 @@ type App struct {
 	// cross-machine identity). Every caller must nil-check before use — sync is
 	// entirely optional, and its absence must never be an error.
 	Sync *remotesync.Syncer
+	// Workspace is the optional cross-repo workspace store (RECARTO_WORKSPACE),
+	// or nil when unconfigured. Like Sync, every caller must nil-check: the
+	// feature is opt-in and its absence must never be an error.
+	Workspace *workspace.Bundle
 	// SyncTrigger is signaled (non-blocking, via SignalSync) by write paths that
 	// want a long-lived `recarto serve` process to sync sooner than its next
 	// periodic tick — e.g. an MCP record_memory/complete_todo/forget_memory call,
@@ -107,24 +112,51 @@ func Open(cfg Config) (*App, error) {
 	}
 	eng.SetRefResolver(graphRefResolver{st: st})
 	syncer, _ := remotesync.New(remotesync.ConfigFromEnv(), gc, eng, st)
+	ws, err := workspace.Open(clk)
+	if err != nil {
+		gr.Close()
+		_ = st.Close()
+		return nil, err
+	}
 
 	a := &App{
 		Git: gc, Runner: runner, Store: st, Ledger: led, Engine: eng, Graph: gr, Clock: clk,
-		Sync: syncer, SyncTrigger: make(chan struct{}, 1),
+		Sync: syncer, Workspace: ws, SyncTrigger: make(chan struct{}, 1),
 	}
 	if err := a.writeMeta(context.Background()); err != nil {
-		_ = st.Close()
+		_ = a.Close()
 		return nil, err
 	}
 	return a, nil
 }
 
-// Close releases the graph engine's parser then the store.
+// Close releases the graph engine's parser, the workspace store, then the store.
 func (a *App) Close() error {
 	if a.Graph != nil {
 		a.Graph.Close()
 	}
+	if a.Workspace != nil {
+		_ = a.Workspace.Close()
+	}
 	return a.Store.Close()
+}
+
+// HasSync reports whether any syncer — the repo store's or the workspace
+// store's — is configured, i.e. whether a background sync loop has work.
+func (a *App) HasSync() bool {
+	return a.Sync != nil || (a.Workspace != nil && a.Workspace.Sync != nil)
+}
+
+// SyncAll runs one best-effort pull+push cycle on every configured syncer.
+// Each store's cycle is independent: a failure of one never blocks the other,
+// and either may be absent.
+func (a *App) SyncAll(ctx context.Context) {
+	if a.Sync != nil {
+		_ = a.Sync.Once(ctx)
+	}
+	if a.Workspace != nil && a.Workspace.Sync != nil {
+		_ = a.Workspace.Sync.Once(ctx)
+	}
 }
 
 // writeMeta upserts repo identity metadata. It is idempotent and safe under

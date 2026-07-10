@@ -256,6 +256,34 @@ Measure-Command { recarto recall "auth flow" }
   lazily at session start and incrementally on each edit.
 - **Languages:** Go, C#, TypeScript (+TSX), JavaScript (+JSX) via tree-sitter.
 
+## Cross-repo workspace memory (RECARTO_WORKSPACE)
+
+Recarto's store is per-repo, but some knowledge spans repos: your preferences, org-wide
+decisions, conventions shared by a polyrepo project. Set a workspace name to open a
+second, cross-repo store alongside every repo store:
+
+```sh
+export RECARTO_WORKSPACE=acme
+```
+
+With it set:
+
+- `record_memory` accepts `scope: "workspace"` to store a memory there (default stays
+  `repo`); workspace memories are branch-less by construction.
+- `recall_memory`, `search_bugs` and `list_memory` search both stores and label
+  workspace hits with `scope: "workspace"`; `get_memory`/`forget_memory`/`complete_todo`
+  resolve ids across both.
+- Session start injects a budgeted "Workspace memory" tier next to the repo tier.
+- The workspace store works from **any** directory — including one that is no git repo
+  at all — because it is keyed by the name, never by the working directory.
+- With HTTP sync configured (§ below), the workspace store syncs under its own
+  name-derived bucket key automatically: every machine (or ephemeral sandbox) sharing
+  the same `RECARTO_WORKSPACE`, server and key converges.
+
+Workspace memories surface at session start and via recall — never through the
+file-anchored just-in-time read/edit hooks, whose repo-relative paths are ambiguous
+across repos.
+
 ## Sharing memory across machines (HTTP sync)
 
 Recarto's store is per-machine: working the same repo from a laptop, a desktop, and an

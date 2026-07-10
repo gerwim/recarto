@@ -42,11 +42,18 @@ type Syncer struct {
 // URL/key) or the repo has no resolvable cross-machine identity (RepoKey).
 // Either case means "stay local-only" — never an error.
 func New(cfg Config, gc gitctx.Context, eng *memory.Engine, st *store.Store) (*Syncer, bool) {
-	if !cfg.Enabled() {
-		return nil, false
-	}
 	key, ok := RepoKey(gc)
 	if !ok {
+		return nil, false
+	}
+	return NewWithKey(cfg, key, eng, st)
+}
+
+// NewWithKey is New with an explicit server-side bucket key instead of one
+// resolved from git identity — for stores whose identity is not a repo, like
+// the cross-repo workspace store (key = its name-derived store id).
+func NewWithKey(cfg Config, key string, eng *memory.Engine, st *store.Store) (*Syncer, bool) {
+	if !cfg.Enabled() || key == "" {
 		return nil, false
 	}
 	timeout := cfg.Timeout

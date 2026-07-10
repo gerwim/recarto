@@ -36,7 +36,8 @@ func kindStrings() []string {
 }
 
 func recordMemorySchema() *jsonschema.Schema {
-	return withEnum(schemaFor[RecordMemoryInput](), "kind", kindStrings()...)
+	s := withEnum(schemaFor[RecordMemoryInput](), "kind", kindStrings()...)
+	return withEnum(s, "scope", scopeRepo, scopeWorkspace)
 }
 
 func traceCallPathSchema() *jsonschema.Schema {

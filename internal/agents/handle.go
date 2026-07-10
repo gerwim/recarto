@@ -138,6 +138,9 @@ func handleSessionStart(ctx context.Context, a *app.App, ev Event) (Result, erro
 	if a.Sync != nil {
 		boundedSync(ctx, syncPullBudget, a.Sync.Pull)
 	}
+	if a.Workspace != nil && a.Workspace.Sync != nil {
+		boundedSync(ctx, syncPullBudget, a.Workspace.Sync.Pull)
+	}
 
 	// Absorb a teammate's committed memory snapshot when it changed (best-effort).
 	_, _ = snapshot.SyncOnSessionStart(ctx, a.Engine, a.Store, a.Git.Worktree)
@@ -151,6 +154,9 @@ func handleSessionStart(ctx context.Context, a *app.App, ev Event) (Result, erro
 	if a.Sync != nil {
 		boundedSync(ctx, syncPushBudget, a.Sync.Push)
 	}
+	if a.Workspace != nil && a.Workspace.Sync != nil {
+		boundedSync(ctx, syncPushBudget, a.Workspace.Sync.Push)
+	}
 
 	// Opportunistic memory compaction (best-effort, gated to once per interval,
 	// single-flight across worktrees). Runs before recall so this session's
@@ -158,11 +164,25 @@ func handleSessionStart(ctx context.Context, a *app.App, ev Event) (Result, erro
 	_, _ = a.Engine.Compact(ctx, memory.CompactOptions{})
 
 	budget := sessionBudget()
+	repoBudget := budget
+	// The workspace tier borrows a third of the session budget rather than
+	// growing the block: RECARTO_SESSION_BUDGET stays the whole block's bound.
+	var wsResults []memory.RecallResult
+	if a.Workspace != nil {
+		wsBudget := budget / 3
+		repoBudget = budget - wsBudget
+		if wsSet, err := a.Workspace.Engine.Recall(ctx, memory.RecallQuery{
+			Baseline:    true,
+			TokenBudget: wsBudget,
+		}); err == nil {
+			wsResults = wsSet.Results
+		}
+	}
 	set, err := a.Engine.Recall(ctx, memory.RecallQuery{
 		Branch:      a.Git.Branch,
 		Worktree:    a.Git.Worktree,
 		Baseline:    true,
-		TokenBudget: budget,
+		TokenBudget: repoBudget,
 	})
 	if err != nil {
 		return Result{}, err
@@ -195,7 +215,11 @@ func handleSessionStart(ctx context.Context, a *app.App, ev Event) (Result, erro
 		_ = a.Graph.PruneDeltas(ctx, a.Git.Worktree, cutoff)
 	}
 
-	out, emitted := formatSessionContext(results, arch, bugs, deltas, deltaTotal, deltaBaseline, budget)
+	wsName := ""
+	if a.Workspace != nil {
+		wsName = a.Workspace.Name
+	}
+	out, emitted := formatSessionContext(results, wsName, wsResults, arch, bugs, deltas, deltaTotal, deltaBaseline, repoBudget)
 	// Mark every memory rendered into this block as surfaced for the session, so the
 	// just-in-time read/edit hooks won't re-inject a guardrail/bug/todo the agent can
 	// already see here. Memories dropped under budget stay unmarked and still surface
@@ -503,6 +527,9 @@ func handleStop(ctx context.Context, a *app.App, ev Event) (Result, error) {
 	if a.Sync != nil {
 		boundedSync(ctx, syncPushBudget, a.Sync.Push)
 	}
+	if a.Workspace != nil && a.Workspace.Sync != nil {
+		boundedSync(ctx, syncPushBudget, a.Workspace.Sync.Push)
+	}
 	if ev.StopActive {
 		return Result{}, nil
 	}
@@ -538,6 +565,15 @@ func handleStop(ctx context.Context, a *app.App, ev Event) (Result, error) {
 		  WHERE updated_at >= ? AND status = 'active' AND (branch IS NULL OR branch = ?)`,
 		startedAt, a.Git.Branch).Scan(&recorded); err != nil || recorded > 0 {
 		return Result{SystemMessage: stopCaptureReminder}, nil
+	}
+	// A session that recorded only workspace-scoped memories recorded something:
+	// the nudge must not fire on it. Workspace rows are branch-less (NULL).
+	if a.Workspace != nil {
+		if err := a.Workspace.Store.DB.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM memories WHERE updated_at >= ? AND status = 'active'`,
+			startedAt).Scan(&recorded); err != nil || recorded > 0 {
+			return Result{SystemMessage: stopCaptureReminder}, nil
+		}
 	}
 	_ = a.Ledger.Incr(ctx, ev.SessionID, "stop_nudged", 1)
 	return Result{Block: true, Reason: fmt.Sprintf(

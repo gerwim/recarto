@@ -7,11 +7,16 @@ import (
 	"io"
 
 	"git.gerwim.nl/gerwim/recarto/internal/app"
+	"git.gerwim.nl/gerwim/recarto/internal/remotesync"
 )
 
 // Sync runs a manual pull and/or push against the configured HTTP memory-sync
 // server. With neither --pull nor --push given, it does both (the same
-// pull-then-push order the session-start/Stop hooks use).
+// pull-then-push order the session-start/Stop hooks use). It covers every
+// configured store: the repo store and — when RECARTO_WORKSPACE is set — the
+// cross-repo workspace store, so the manual/debug tool converges exactly what
+// the hooks do. A non-git directory has no repo key but can still sync its
+// workspace store.
 func Sync(ctx context.Context, a *app.App, w io.Writer, args []string) error {
 	fs := flag.NewFlagSet("sync", flag.ContinueOnError)
 	pull := fs.Bool("pull", false, "pull only")
@@ -21,35 +26,47 @@ func Sync(ctx context.Context, a *app.App, w io.Writer, args []string) error {
 		return err
 	}
 
-	if a.Sync == nil {
+	type target struct {
+		label string
+		s     *remotesync.Syncer
+	}
+	var targets []target
+	if a.Sync != nil {
+		targets = append(targets, target{"repo", a.Sync})
+	}
+	if a.Workspace != nil && a.Workspace.Sync != nil {
+		targets = append(targets, target{"workspace " + a.Workspace.Name, a.Workspace.Sync})
+	}
+	if len(targets) == 0 {
 		fmt.Fprintln(w, "sync: not configured (set RECARTO_SYNC_URL and RECARTO_SYNC_KEY; "+
 			"this repo also needs a resolvable root commit, or RECARTO_SYNC_REPO)")
 		return nil
-	}
-	fmt.Fprintf(w, "sync: repo key %s\n", a.Sync.RepoKeyValue())
-
-	if *full {
-		if err := a.Sync.ResetCursor(ctx); err != nil {
-			return err
-		}
-		fmt.Fprintln(w, "sync: cursor reset; next pull reconciles from scratch")
 	}
 
 	doPull, doPush := *pull, *push
 	if !doPull && !doPush {
 		doPull, doPush = true, true
 	}
-	if doPull {
-		if err := a.Sync.Pull(ctx); err != nil {
-			return fmt.Errorf("pull: %w", err)
+	for _, t := range targets {
+		fmt.Fprintf(w, "sync: %s key %s\n", t.label, t.s.RepoKeyValue())
+		if *full {
+			if err := t.s.ResetCursor(ctx); err != nil {
+				return err
+			}
+			fmt.Fprintf(w, "sync: %s cursor reset; next pull reconciles from scratch\n", t.label)
 		}
-		fmt.Fprintln(w, "pull: ok")
-	}
-	if doPush {
-		if err := a.Sync.Push(ctx); err != nil {
-			return fmt.Errorf("push: %w", err)
+		if doPull {
+			if err := t.s.Pull(ctx); err != nil {
+				return fmt.Errorf("%s pull: %w", t.label, err)
+			}
+			fmt.Fprintf(w, "%s pull: ok\n", t.label)
 		}
-		fmt.Fprintln(w, "push: ok")
+		if doPush {
+			if err := t.s.Push(ctx); err != nil {
+				return fmt.Errorf("%s push: %w", t.label, err)
+			}
+			fmt.Fprintf(w, "%s push: ok\n", t.label)
+		}
 	}
 	return nil
 }

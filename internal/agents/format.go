@@ -54,15 +54,20 @@ func largeReadThreshold() int {
 
 // formatSessionContext renders the tiered session-start block: pinned do_not_repeat
 // (always, full body), cerebrum memories (title + trimmed body, degrading to
-// titles-only then dropping under budget pressure), a bounded module map, and a
-// titles-only recent-bugs tier — followed by the record nudge.
+// titles-only then dropping under budget pressure), an optional cross-repo
+// workspace tier (wsResults, already token-budgeted by their own recall), a
+// bounded module map, and a titles-only recent-bugs tier — followed by the
+// record nudge.
 //
 // It also returns the IDs of the memories it actually rendered (full or title-only,
 // excluding any dropped under budget pressure). The caller marks those as surfaced
 // so the just-in-time read/edit hooks do not re-inject a guardrail/bug/todo already
 // sitting in this block — duplicate context is pure token waste. A memory dropped
 // here is deliberately left unmarked so it can still surface when its code is touched.
-func formatSessionContext(results []memory.RecallResult, arch graph.Architecture, bugs []*memory.Record,
+// Workspace memories are never marked: the just-in-time hooks only serve the repo
+// store, so there is nothing to dedup against.
+func formatSessionContext(results []memory.RecallResult, wsName string, wsResults []memory.RecallResult,
+	arch graph.Architecture, bugs []*memory.Record,
 	deltas []graph.Delta, deltaTotal int, deltaBaselineMs int64, budget int) (string, []string) {
 	var b strings.Builder
 	b.WriteString("Recarto memory for this repo/branch:\n")
@@ -121,6 +126,21 @@ func formatSessionContext(results []memory.RecallResult, arch graph.Architecture
 	}
 	if len(results) == 0 {
 		b.WriteString("(no prior memories yet)\n")
+	}
+
+	// The cross-repo workspace tier: already token-budgeted by its own recall
+	// (a slice of the session budget carved out by the caller), so it renders
+	// without further cap math — uniform title + trimmed body, like the
+	// cerebrum tier's compact form.
+	if len(wsResults) > 0 {
+		fmt.Fprintf(&b, "\nWorkspace memory (%s, shared across repos):\n", wsName)
+		for _, r := range wsResults {
+			title := r.Record.Title
+			if title == "" {
+				title = "(untitled)"
+			}
+			fmt.Fprintf(&b, "- [%s] %s\n  %s\n", r.Record.Kind, title, trimOneLine(r.Record.Body))
+		}
 	}
 
 	if len(arch.Modules) > 0 {
@@ -185,10 +205,10 @@ func formatTodoReminders(loc string, todos []*memory.Record) string {
 }
 
 // formatGuidance renders file/symbol-anchored guardrail memories as advisory lines
-// the moment that code is touched: do_not_repeat as a hard "don't" (🚫) and
-// decision as a settled rationale (📌). It is the just-in-time counterpart to
-// formatBugWarnings for the high-signal kinds recall would otherwise only surface,
-// budget permitting, at session start.
+// the moment that code is touched: do_not_repeat as a hard "don't" (🚫), decision
+// as a settled rationale (📌), and learning as prior knowledge (📚). It is the
+// just-in-time counterpart to formatBugWarnings for the high-signal kinds recall
+// would otherwise only surface, budget permitting, at session start.
 func formatGuidance(loc string, recs []*memory.Record) string {
 	lines := make([]string, 0, len(recs))
 	for _, r := range recs {
@@ -199,6 +219,8 @@ func formatGuidance(loc string, recs []*memory.Record) string {
 		switch r.Kind {
 		case memory.KindDoNotRepeat:
 			lines = append(lines, fmt.Sprintf("🚫 do-not-repeat for %s: %s", loc, title))
+		case memory.KindLearning:
+			lines = append(lines, fmt.Sprintf("📚 prior learning for %s: %s", loc, title))
 		default: // decision
 			lines = append(lines, fmt.Sprintf("📌 prior decision for %s: %s", loc, title))
 		}
