@@ -8,6 +8,7 @@ package app
 import (
 	"context"
 	"os"
+	"path/filepath"
 
 	"git.gerwim.nl/gerwim/recarto/internal/cache"
 	"git.gerwim.nl/gerwim/recarto/internal/clock"
@@ -29,6 +30,21 @@ type Config struct {
 	Clock  clock.Clock   // nil → clock.Real{}
 }
 
+// RepoContext is one served repo root with its own store, engine and graph.
+// The primary (cwd-resolved) repo is exposed as one via AllRepos; the extras
+// come from RECARTO_REPOS and open the SAME store a session cd'd into that
+// repo would (the store key is the git common dir, not the serving process's
+// cwd) — so a repo-less session reads and writes exactly the memories the
+// cd'd sessions see.
+type RepoContext struct {
+	Git    gitctx.Context
+	Store  *store.Store
+	Ledger *ledger.Ledger
+	Engine *memory.Engine
+	Graph  *graph.Engine
+	Sync   *remotesync.Syncer // nil when unconfigured
+}
+
 // App is the resolved per-process runtime shared by every surface.
 type App struct {
 	Git    gitctx.Context
@@ -38,6 +54,12 @@ type App struct {
 	Engine *memory.Engine
 	Graph  *graph.Engine
 	Clock  clock.Clock
+	// Repos are the extra repo roots served by this process (RECARTO_REPOS),
+	// beyond the cwd-resolved primary. Empty unless explicitly configured —
+	// the feature exists for sessions that are not cd'd into (all of) the
+	// repos they work with, e.g. a multi-repo verifier running from a
+	// scratch directory.
+	Repos []*RepoContext
 	// Sync is the HTTP memory-sync client, or nil when unconfigured (no
 	// RECARTO_SYNC_URL/RECARTO_SYNC_KEY, or the repo has no resolvable
 	// cross-machine identity). Every caller must nil-check before use — sync is
@@ -121,7 +143,7 @@ func Open(cfg Config) (*App, error) {
 
 	a := &App{
 		Git: gc, Runner: runner, Store: st, Ledger: led, Engine: eng, Graph: gr, Clock: clk,
-		Sync: syncer, Workspace: ws, SyncTrigger: make(chan struct{}, 1),
+		Sync: syncer, Workspace: ws, Repos: openRepos(gc.RepoID, clk), SyncTrigger: make(chan struct{}, 1),
 	}
 	if err := a.writeMeta(context.Background()); err != nil {
 		_ = a.Close()
@@ -130,7 +152,8 @@ func Open(cfg Config) (*App, error) {
 	return a, nil
 }
 
-// Close releases the graph engine's parser, the workspace store, then the store.
+// Close releases the graph engine's parser, the workspace store, the extra
+// repo stores, then the primary store.
 func (a *App) Close() error {
 	if a.Graph != nil {
 		a.Graph.Close()
@@ -138,25 +161,91 @@ func (a *App) Close() error {
 	if a.Workspace != nil {
 		_ = a.Workspace.Close()
 	}
+	for _, rc := range a.Repos {
+		if rc.Graph != nil {
+			rc.Graph.Close()
+		}
+		_ = rc.Store.Close()
+	}
 	return a.Store.Close()
 }
 
-// HasSync reports whether any syncer — the repo store's or the workspace
+// AllRepos returns the primary (cwd-resolved) repo context followed by the
+// RECARTO_REPOS extras — the iteration order every merged surface uses, so
+// the primary always leads.
+func (a *App) AllRepos() []*RepoContext {
+	prim := &RepoContext{Git: a.Git, Store: a.Store, Ledger: a.Ledger, Engine: a.Engine, Graph: a.Graph, Sync: a.Sync}
+	return append([]*RepoContext{prim}, a.Repos...)
+}
+
+// HasSync reports whether any syncer — the repo stores' or the workspace
 // store's — is configured, i.e. whether a background sync loop has work.
 func (a *App) HasSync() bool {
-	return a.Sync != nil || (a.Workspace != nil && a.Workspace.Sync != nil)
+	if a.Sync != nil || (a.Workspace != nil && a.Workspace.Sync != nil) {
+		return true
+	}
+	for _, rc := range a.Repos {
+		if rc.Sync != nil {
+			return true
+		}
+	}
+	return false
 }
 
 // SyncAll runs one best-effort pull+push cycle on every configured syncer.
-// Each store's cycle is independent: a failure of one never blocks the other,
-// and either may be absent.
+// Each store's cycle is independent: a failure of one never blocks the others,
+// and any may be absent.
 func (a *App) SyncAll(ctx context.Context) {
 	if a.Sync != nil {
 		_ = a.Sync.Once(ctx)
 	}
+	for _, rc := range a.Repos {
+		if rc.Sync != nil {
+			_ = rc.Sync.Once(ctx)
+		}
+	}
 	if a.Workspace != nil && a.Workspace.Sync != nil {
 		_ = a.Workspace.Sync.Once(ctx)
 	}
+}
+
+// openRepos resolves RECARTO_REPOS (a filepath.SplitList of repo roots) into
+// served repo contexts. Best-effort by design: a path that is missing (an
+// unmounted host's config), not a git repo, unresolvable, or a duplicate of
+// the primary or an earlier entry is skipped — an incomplete list must never
+// fail the session.
+func openRepos(primaryID string, clk clock.Clock) []*RepoContext {
+	seen := map[string]bool{primaryID: true}
+	var out []*RepoContext
+	for _, p := range filepath.SplitList(os.Getenv("RECARTO_REPOS")) {
+		if p == "" {
+			continue
+		}
+		gc, err := gitctx.Resolve(gitctx.Real{Dir: p}, p)
+		if err != nil || gc.NonGit || seen[gc.RepoID] {
+			continue
+		}
+		path, err := cache.StorePath(gc.RepoID)
+		if err != nil {
+			continue
+		}
+		st, err := store.Open(path)
+		if err != nil {
+			continue
+		}
+		led := ledger.New(st)
+		eng := memory.New(st, led, clk)
+		gr, err := graph.New(st, led, clk)
+		if err != nil {
+			_ = st.Close()
+			continue
+		}
+		eng.SetRefResolver(graphRefResolver{st: st})
+		syncer, _ := remotesync.New(remotesync.ConfigFromEnv(), gc, eng, st)
+		seen[gc.RepoID] = true
+		out = append(out, &RepoContext{Git: gc, Store: st, Ledger: led, Engine: eng, Graph: gr, Sync: syncer})
+	}
+	return out
 }
 
 // writeMeta upserts repo identity metadata. It is idempotent and safe under

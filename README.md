@@ -284,6 +284,38 @@ Workspace memories surface at session start and via recall — never through the
 file-anchored just-in-time read/edit hooks, whose repo-relative paths are ambiguous
 across repos.
 
+## Serving multiple repos from one session (RECARTO_REPOS)
+
+A session is normally cd'd into the one repo it works on, and Recarto resolves that
+repo from the working directory. Some sessions aren't: a multi-repo verifier or test
+runner working from a scratch directory with several checkouts beside it. List those
+checkouts explicitly and one Recarto process serves them all:
+
+```sh
+export RECARTO_REPOS=/work/task/repo1:/work/task/repo2   # filepath list; ';' on Windows
+```
+
+Each listed root resolves to the SAME per-repo store a session cd'd into it would
+use (the store key is the git common dir, not the serving process's cwd), so the
+repo-less session reads and writes exactly the memories the cd'd sessions see:
+
+- Graph and file tools (`search_graph`, `get_code_snippet`, `get_file_outline`, …)
+  take an optional `repo` (name or path) to target a served repo; omitted = the cwd
+  repo, and an unknown name errors with the served list.
+- `recall_memory`/`search_bugs`/`list_memory` merge every served repo's memories
+  (hits labeled `repo`); `record_memory`/`record_bug` take `repo` to write into a
+  specific repo's store; id lookups resolve across all of them.
+- The read/edit hooks map each touched file to the repo that owns it, so a memory
+  anchored to `a/b/c.go` in repo1 fires even when the session reads it as
+  `/work/task/repo1/a/b/c.go` from outside that repo — and edits reindex the owning
+  repo's graph.
+- With HTTP sync configured, every served repo's store syncs under its own
+  root-commit key, exactly as if a session were cd'd there.
+
+Missing paths, non-git directories and duplicates are skipped silently — an
+incomplete list never fails the session. Pair with `RECARTO_WORKSPACE` (§ above)
+for the cross-repo store that belongs to no single repo.
+
 ## Sharing memory across machines (HTTP sync)
 
 Recarto's store is per-machine: working the same repo from a laptop, a desktop, and an

@@ -80,6 +80,32 @@ func agentOrDefault(s string) string {
 	return s
 }
 
+// owningRepo maps an absolute file path to the served repo containing it —
+// the primary, or a RECARTO_REPOS extra — returning that repo's context and
+// the repo-relative path. Longest worktree prefix wins (a nested checkout
+// belongs to the inner repo). ok=false when no served worktree contains the
+// file, or the path is not absolute.
+func owningRepo(a *app.App, abs string) (rc *app.RepoContext, rel string, ok bool) {
+	if !filepath.IsAbs(abs) {
+		return nil, "", false
+	}
+	bestLen := -1
+	for _, cand := range a.AllRepos() {
+		wt := cand.Git.Worktree
+		if wt == "" {
+			continue
+		}
+		r, err := filepath.Rel(wt, abs)
+		if err != nil || r == ".." || strings.HasPrefix(r, ".."+string(filepath.Separator)) {
+			continue
+		}
+		if len(wt) > bestLen {
+			rc, rel, ok, bestLen = cand, filepath.ToSlash(r), true, len(wt)
+		}
+	}
+	return
+}
+
 // handleSessionStart opens/creates the session row, warms the code graph, runs
 // gated compaction, recalls a token-budgeted slice for this branch, and returns it
 // as injectable context plus a record nudge.
@@ -113,6 +139,12 @@ func handleSessionStart(ctx context.Context, a *app.App, ev Event) (Result, erro
 	warmed := make(chan struct{})
 	go func() {
 		_ = a.Graph.ReconcileIfStale(sctx, a.Git.Worktree, newGraphSource(a.Git.Worktree), graph.WorktreeToken(a.Git.Worktree))
+		// Extra served repos (RECARTO_REPOS) reconcile inside the same hard
+		// budget — usually a no-op, since sessions cd'd into those repos keep
+		// their graphs fresh; a cold host makes bounded progress per session.
+		for _, rc := range a.Repos {
+			_ = rc.Graph.ReconcileIfStale(sctx, rc.Git.Worktree, newGraphSource(rc.Git.Worktree), graph.WorktreeToken(rc.Git.Worktree))
+		}
 		// Opportunistic worktree GC, inside the same hard budget: a deleted git
 		// worktree leaves its entire graph copy in the shared store until swept.
 		// Batched deletes commit progress, so abandonment at the budget is safe.
@@ -138,6 +170,11 @@ func handleSessionStart(ctx context.Context, a *app.App, ev Event) (Result, erro
 	if a.Sync != nil {
 		boundedSync(ctx, syncPullBudget, a.Sync.Pull)
 	}
+	for _, rc := range a.Repos {
+		if rc.Sync != nil {
+			boundedSync(ctx, syncPullBudget, rc.Sync.Pull)
+		}
+	}
 	if a.Workspace != nil && a.Workspace.Sync != nil {
 		boundedSync(ctx, syncPullBudget, a.Workspace.Sync.Pull)
 	}
@@ -153,6 +190,11 @@ func handleSessionStart(ctx context.Context, a *app.App, ev Event) (Result, erro
 	// sync. No-op when sync is unconfigured (a.Sync == nil).
 	if a.Sync != nil {
 		boundedSync(ctx, syncPushBudget, a.Sync.Push)
+	}
+	for _, rc := range a.Repos {
+		if rc.Sync != nil {
+			boundedSync(ctx, syncPushBudget, rc.Sync.Push)
+		}
 	}
 	if a.Workspace != nil && a.Workspace.Sync != nil {
 		boundedSync(ctx, syncPushBudget, a.Workspace.Sync.Push)
@@ -219,7 +261,11 @@ func handleSessionStart(ctx context.Context, a *app.App, ev Event) (Result, erro
 	if a.Workspace != nil {
 		wsName = a.Workspace.Name
 	}
-	out, emitted := formatSessionContext(results, wsName, wsResults, arch, bugs, deltas, deltaTotal, deltaBaseline, repoBudget)
+	var extraRepos []string
+	for _, rc := range a.Repos {
+		extraRepos = append(extraRepos, rc.Git.RepoName)
+	}
+	out, emitted := formatSessionContext(results, wsName, wsResults, extraRepos, arch, bugs, deltas, deltaTotal, deltaBaseline, repoBudget)
 	// Mark every memory rendered into this block as surfaced for the session, so the
 	// just-in-time read/edit hooks won't re-inject a guardrail/bug/todo the agent can
 	// already see here. Memories dropped under budget stay unmarked and still surface
@@ -290,31 +336,38 @@ func handlePostRead(ctx context.Context, a *app.App, ev Event) (Result, error) {
 		msgs = append(msgs, fmt.Sprintf("You have already read %s in this session (%d times, ~%d tokens each). "+
 			"Rely on the earlier read instead of reading it again.", file, n, tokens))
 	}
-	rel := memory.RelFileRef(a.Git.Worktree, file)
+	// Route the file to the served repo that owns it — a session reading a
+	// sibling repo's file (a verifier in a scratch dir, RECARTO_REPOS) must
+	// surface THAT repo's anchored memories, with the path made relative to
+	// that repo's root so it matches how the anchors were recorded.
+	target, rel, owned := owningRepo(a, file)
+	if !owned {
+		target, rel = a.AllRepos()[0], memory.RelFileRef(a.Git.Worktree, file)
+	}
 	// First whole-file read of a large, graph-indexed file: nudge toward the cheaper
 	// navigation tools. Whole-file reads of big files are the dominant token sink, and
 	// the graph offers a structural alternative only when the file actually has symbols.
 	// Gated to the first read (n == 1) because a repeat already gets the stronger
 	// "rely on the earlier read" warning above — so this fires at most once per file.
 	if n == 1 && tokens >= int64(largeReadThreshold()) {
-		if syms, err := a.Graph.Outline(ctx, a.Git.Worktree, rel); err == nil && len(syms) > 0 {
+		if syms, err := target.Graph.Outline(ctx, target.Git.Worktree, rel); err == nil && len(syms) > 0 {
 			_ = a.Ledger.Incr(ctx, "lifetime", "large_reads_nudged", 1)
 			msgs = append(msgs, fmt.Sprintf("Recarto: %s is large (~%d tokens, %d symbols indexed). "+
 				"Next time use get_file_outline for its structure or get_code_snippet to read one symbol, "+
 				"instead of reading the whole file.", rel, tokens, len(syms)))
 		}
 	}
-	if found, err := a.Engine.BugsForCode(ctx, a.Git.Branch, []string{rel}, nil); err == nil {
+	if found, err := target.Engine.BugsForCode(ctx, target.Git.Branch, []string{rel}, nil); err == nil {
 		if found = dedupSurfaced(ctx, a, ev.SessionID, found); len(found) > 0 {
 			msgs = append(msgs, formatBugWarnings(rel, found))
 		}
 	}
-	if found, err := a.Engine.GuidanceForCode(ctx, a.Git.Branch, []string{rel}, nil); err == nil {
+	if found, err := target.Engine.GuidanceForCode(ctx, target.Git.Branch, []string{rel}, nil); err == nil {
 		if found = dedupSurfaced(ctx, a, ev.SessionID, found); len(found) > 0 {
 			msgs = append(msgs, formatGuidance(rel, found))
 		}
 	}
-	if found, err := a.Engine.TodosForCode(ctx, a.Git.Branch, []string{rel}, nil); err == nil {
+	if found, err := target.Engine.TodosForCode(ctx, target.Git.Branch, []string{rel}, nil); err == nil {
 		if found = dedupSurfaced(ctx, a, ev.SessionID, found); len(found) > 0 {
 			msgs = append(msgs, formatTodoReminders(rel, found))
 		}
@@ -333,12 +386,14 @@ func handlePostEdit(ctx context.Context, a *app.App, ev Event) (Result, error) {
 	if abs == "" {
 		return Result{}, nil
 	}
-	wt := a.Git.Worktree
-	rel, err := filepath.Rel(wt, abs)
-	if err != nil || strings.HasPrefix(rel, "..") {
-		return Result{}, nil // outside the worktree; ignore
+	// Route the edit to the served repo that owns it (primary, or a
+	// RECARTO_REPOS extra) so its anchored memories fire and ITS graph is
+	// reindexed — with the path relative to that repo's root, matching how
+	// anchors and graph files are keyed.
+	target, rel, owned := owningRepo(a, abs)
+	if !owned {
+		return Result{}, nil // outside every served worktree; ignore
 	}
-	rel = filepath.ToSlash(rel)
 
 	if ev.SessionID != "" {
 		// Per-session edit counter; the Stop hook's capture nudge keys on it.
@@ -350,17 +405,17 @@ func handlePostEdit(ctx context.Context, a *app.App, ev Event) (Result, error) {
 	// (best-effort). This matches stored refs by path and does not require the file
 	// on disk. Each is deduped per session so repeated edits don't re-inject.
 	var msgs []string
-	if found, berr := a.Engine.BugsForCode(ctx, a.Git.Branch, []string{rel}, nil); berr == nil {
+	if found, berr := target.Engine.BugsForCode(ctx, target.Git.Branch, []string{rel}, nil); berr == nil {
 		if found = dedupSurfaced(ctx, a, ev.SessionID, found); len(found) > 0 {
 			msgs = append(msgs, formatBugWarnings(rel, found))
 		}
 	}
-	if found, berr := a.Engine.GuidanceForCode(ctx, a.Git.Branch, []string{rel}, nil); berr == nil {
+	if found, berr := target.Engine.GuidanceForCode(ctx, target.Git.Branch, []string{rel}, nil); berr == nil {
 		if found = dedupSurfaced(ctx, a, ev.SessionID, found); len(found) > 0 {
 			msgs = append(msgs, formatGuidance(rel, found))
 		}
 	}
-	if found, berr := a.Engine.TodosForCode(ctx, a.Git.Branch, []string{rel}, nil); berr == nil {
+	if found, berr := target.Engine.TodosForCode(ctx, target.Git.Branch, []string{rel}, nil); berr == nil {
 		if found = dedupSurfaced(ctx, a, ev.SessionID, found); len(found) > 0 {
 			msgs = append(msgs, formatTodoReminders(rel, found))
 		}
@@ -378,7 +433,7 @@ func handlePostEdit(ctx context.Context, a *app.App, ev Event) (Result, error) {
 	// edit can affect (full resolve only on a structural `extends` change). The
 	// previous unconditional full Resolve cost ~14s per edit on a large repo —
 	// paid inside the agent's edit hook.
-	return res, a.Graph.ReindexFileIncremental(ctx, wt, rel, content, info.ModTime().UnixMilli(), info.Size())
+	return res, target.Graph.ReindexFileIncremental(ctx, target.Git.Worktree, rel, content, info.ModTime().UnixMilli(), info.Size())
 }
 
 // handleAugment runs a code-graph search matching the agent's Grep/Glob pattern and
@@ -413,34 +468,67 @@ func handleAugment(ctx context.Context, a *app.App, ev Event) (Result, error) {
 	}
 
 	var b strings.Builder
-	if res, err := a.Graph.Search(ctx, a.Git.Worktree, term, "", "", 8); err == nil && len(res) > 0 {
-		b.WriteString("Recarto code graph — symbols matching your search:\n")
-		for _, r := range res {
-			fmt.Fprintf(&b, "- [%s] %s  %s:%d\n", r.Kind, r.QualifiedName, r.Path, r.Line)
+	// Search every served repo's graph (primary first), capping the combined
+	// page — a repo-less session's greps are about the sibling repos' code, so
+	// primary-only search would inject nothing. Extra repos' paths are
+	// prefixed with their repo name so hits stay unambiguous.
+	var symLines []string
+	for _, rc := range a.AllRepos() {
+		if len(symLines) >= 8 {
+			break
 		}
-		b.WriteString("Use get_code_snippet to read one symbol instead of the whole file.")
+		res, err := rc.Graph.Search(ctx, rc.Git.Worktree, term, "", "", 8-len(symLines))
+		if err != nil {
+			continue
+		}
+		prefix := ""
+		if rc.Git.RepoID != a.Git.RepoID {
+			prefix = rc.Git.RepoName + ":"
+		}
+		for _, r := range res {
+			symLines = append(symLines, fmt.Sprintf("- [%s] %s  %s%s:%d", r.Kind, r.QualifiedName, prefix, r.Path, r.Line))
+		}
+	}
+	if len(symLines) > 0 {
+		b.WriteString("Recarto code graph — symbols matching your search:\n")
+		b.WriteString(strings.Join(symLines, "\n"))
+		b.WriteString("\nUse get_code_snippet to read one symbol instead of the whole file.")
 	}
 
-	if set, err := a.Engine.Recall(ctx, memory.RecallQuery{
-		TaskHint: term, Kind: memory.KindBug, Branch: a.Git.Branch, Worktree: a.Git.Worktree, Limit: 5,
-	}); err == nil {
+	var bugResults []memory.RecallResult
+	for _, rc := range a.AllRepos() {
+		if len(bugResults) >= 5 {
+			break
+		}
+		set, err := rc.Engine.Recall(ctx, memory.RecallQuery{
+			TaskHint: term, Kind: memory.KindBug, Branch: rc.Git.Branch, Worktree: rc.Git.Worktree,
+			Limit: 5 - len(bugResults),
+		})
+		if err != nil {
+			continue
+		}
+		for _, r := range set.Results {
+			if r.Record.Kind == memory.KindBug { // recall always includes pinned do_not_repeat
+				bugResults = append(bugResults, r)
+			}
+		}
+	}
+	{
 		// Drop bugs already surfaced this session — at session-start, on a read/edit,
 		// or by an earlier search — so the same bug block is never injected twice
 		// (pure token waste). dedupSurfaced also marks the survivors, so a later
 		// read/edit of the same code stays quiet about a bug this search just showed.
 		var bugRecs []*memory.Record
-		for _, r := range set.Results {
-			if r.Record.Kind == memory.KindBug { // recall always includes pinned do_not_repeat
-				bugRecs = append(bugRecs, r.Record)
-			}
+		for _, r := range bugResults {
+			bugRecs = append(bugRecs, r.Record)
 		}
 		fresh := make(map[string]bool, len(bugRecs))
 		for _, r := range dedupSurfaced(ctx, a, ev.SessionID, bugRecs) {
 			fresh[r.ID] = true
 		}
 		var bugLines []string
-		for _, r := range set.Results {
-			if r.Record.Kind != memory.KindBug || !fresh[r.Record.ID] {
+		for _, r := range bugResults {
+			if !fresh[r.Record.ID] {
 				continue
 			}
 			if fix, _ := r.Record.Extra["fix"].(string); fix != "" {
@@ -527,6 +615,11 @@ func handleStop(ctx context.Context, a *app.App, ev Event) (Result, error) {
 	if a.Sync != nil {
 		boundedSync(ctx, syncPushBudget, a.Sync.Push)
 	}
+	for _, rc := range a.Repos {
+		if rc.Sync != nil {
+			boundedSync(ctx, syncPushBudget, rc.Sync.Push)
+		}
+	}
 	if a.Workspace != nil && a.Workspace.Sync != nil {
 		boundedSync(ctx, syncPushBudget, a.Workspace.Sync.Push)
 	}
@@ -566,10 +659,18 @@ func handleStop(ctx context.Context, a *app.App, ev Event) (Result, error) {
 		startedAt, a.Git.Branch).Scan(&recorded); err != nil || recorded > 0 {
 		return Result{SystemMessage: stopCaptureReminder}, nil
 	}
-	// A session that recorded only workspace-scoped memories recorded something:
-	// the nudge must not fire on it. Workspace rows are branch-less (NULL).
+	// A session that recorded only workspace-scoped or served-repo memories
+	// recorded something: the nudge must not fire on it. Workspace rows are
+	// branch-less (NULL); a served repo's rows count regardless of branch.
 	if a.Workspace != nil {
 		if err := a.Workspace.Store.DB.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM memories WHERE updated_at >= ? AND status = 'active'`,
+			startedAt).Scan(&recorded); err != nil || recorded > 0 {
+			return Result{SystemMessage: stopCaptureReminder}, nil
+		}
+	}
+	for _, rc := range a.Repos {
+		if err := rc.Store.DB.QueryRowContext(ctx,
 			`SELECT COUNT(*) FROM memories WHERE updated_at >= ? AND status = 'active'`,
 			startedAt).Scan(&recorded); err != nil || recorded > 0 {
 			return Result{SystemMessage: stopCaptureReminder}, nil

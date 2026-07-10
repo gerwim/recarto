@@ -16,7 +16,7 @@ func TestFormatSessionContextIncludesCaveat(t *testing.T) {
 		Score:        0.5,
 		DanglingRefs: []memory.Ref{{Type: memory.RefFile, Value: "absent.go"}},
 	}}
-	out, _ := formatSessionContext(results, "", nil, graph.Architecture{}, nil, nil, 0, 0, 1500)
+	out, _ := formatSessionContext(results, "", nil, nil, graph.Architecture{}, nil, nil, 0, 0, 1500)
 	if !strings.Contains(out, "not present in this worktree") {
 		t.Fatalf("expected caveat in session context, got:\n%s", out)
 	}
@@ -84,7 +84,7 @@ func TestFormatSessionContextMapSelectsProductOverTestModules(t *testing.T) {
 	// One product module, alphabetically last and smaller — must still win a slot.
 	mods = append(mods, graph.Module{Name: "Zproduct", Files: 20, Symbols: 80})
 
-	out, _ := formatSessionContext(nil, "", nil, graph.Architecture{Modules: mods}, nil, nil, 0, 0, 1500)
+	out, _ := formatSessionContext(nil, "", nil, nil, graph.Architecture{Modules: mods}, nil, nil, 0, 0, 1500)
 	if !strings.Contains(out, "Zproduct") {
 		t.Fatalf("product module must be selected over test modules in the orientation map:\n%s", out)
 	}
@@ -101,7 +101,7 @@ func TestFormatSessionContextPinnedDNRIncludesCaveat(t *testing.T) {
 		Score:        1.0,
 		DanglingRefs: []memory.Ref{{Type: memory.RefFile, Value: "absent.go"}},
 	}}
-	out, _ := formatSessionContext(results, "", nil, graph.Architecture{}, nil, nil, 0, 0, 1500)
+	out, _ := formatSessionContext(results, "", nil, nil, graph.Architecture{}, nil, nil, 0, 0, 1500)
 	if !strings.Contains(out, "not present in this worktree") {
 		t.Fatalf("expected caveat in pinned do_not_repeat output, got:\n%s", out)
 	}

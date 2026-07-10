@@ -67,7 +67,7 @@ func largeReadThreshold() int {
 // Workspace memories are never marked: the just-in-time hooks only serve the repo
 // store, so there is nothing to dedup against.
 func formatSessionContext(results []memory.RecallResult, wsName string, wsResults []memory.RecallResult,
-	arch graph.Architecture, bugs []*memory.Record,
+	extraRepos []string, arch graph.Architecture, bugs []*memory.Record,
 	deltas []graph.Delta, deltaTotal int, deltaBaselineMs int64, budget int) (string, []string) {
 	var b strings.Builder
 	b.WriteString("Recarto memory for this repo/branch:\n")
@@ -141,6 +141,14 @@ func formatSessionContext(results []memory.RecallResult, wsName string, wsResult
 			}
 			fmt.Fprintf(&b, "- [%s] %s\n  %s\n", r.Record.Kind, title, trimOneLine(r.Record.Body))
 		}
+	}
+
+	// One line, not a tier: the extra repos' memories reach the agent through
+	// recall (merged automatically) and the file-anchored read/edit hooks, so
+	// session start only needs to say they are served and how to target them.
+	if len(extraRepos) > 0 {
+		fmt.Fprintf(&b, "\nAlso serving repos: %s — graph/memory tools accept repo:\"<name>\"; recall and file-anchored surfacing cover them automatically.\n",
+			strings.Join(extraRepos, ", "))
 	}
 
 	if len(arch.Modules) > 0 {

@@ -13,10 +13,10 @@ import (
 // Sync runs a manual pull and/or push against the configured HTTP memory-sync
 // server. With neither --pull nor --push given, it does both (the same
 // pull-then-push order the session-start/Stop hooks use). It covers every
-// configured store: the repo store and — when RECARTO_WORKSPACE is set — the
-// cross-repo workspace store, so the manual/debug tool converges exactly what
-// the hooks do. A non-git directory has no repo key but can still sync its
-// workspace store.
+// configured store: the repo store, every served extra repo (RECARTO_REPOS),
+// and — when RECARTO_WORKSPACE is set — the cross-repo workspace store, so the
+// manual/debug tool converges exactly what the hooks do. A non-git directory
+// has no repo key but can still sync its extra-repo and workspace stores.
 func Sync(ctx context.Context, a *app.App, w io.Writer, args []string) error {
 	fs := flag.NewFlagSet("sync", flag.ContinueOnError)
 	pull := fs.Bool("pull", false, "pull only")
@@ -33,6 +33,11 @@ func Sync(ctx context.Context, a *app.App, w io.Writer, args []string) error {
 	var targets []target
 	if a.Sync != nil {
 		targets = append(targets, target{"repo", a.Sync})
+	}
+	for _, rc := range a.Repos {
+		if rc.Sync != nil {
+			targets = append(targets, target{"repo " + rc.Git.RepoName, rc.Sync})
+		}
 	}
 	if a.Workspace != nil && a.Workspace.Sync != nil {
 		targets = append(targets, target{"workspace " + a.Workspace.Name, a.Workspace.Sync})
