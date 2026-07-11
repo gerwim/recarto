@@ -62,7 +62,7 @@ func NewWithKey(cfg Config, key string, eng *memory.Engine, st *store.Store) (*S
 	}
 	interval := cfg.Interval
 	if interval <= 0 {
-		interval = defaultInterval
+		interval = DefaultInterval
 	}
 	return &Syncer{
 		repoKey:  key,
@@ -75,8 +75,15 @@ func NewWithKey(cfg Config, key string, eng *memory.Engine, st *store.Store) (*S
 
 // Interval returns the configured poll period (RECARTO_SYNC_INTERVAL;
 // default 60s) for a long-lived process's periodic sync loop (`recarto
-// serve`'s background ticker).
-func (s *Syncer) Interval() time.Duration { return s.interval }
+// serve`'s background ticker). Safe on a nil receiver — *Syncer fields are
+// nil by contract when unconfigured (app.App.Sync), and asking an absent
+// syncer for a poll period must yield the default, never a crash.
+func (s *Syncer) Interval() time.Duration {
+	if s == nil {
+		return DefaultInterval
+	}
+	return s.interval
+}
 
 // Pull applies remote changes since the local cursor into the local store,
 // paging until the server reports no more, advancing the cursor after each

@@ -80,7 +80,12 @@ func TestMultiProcessIndexAcrossWorktrees(t *testing.T) {
 			for attempt := 0; attempt < 5; attempt++ {
 				cmd := exec.Command(bin, "index")
 				cmd.Dir = wt
-				cmd.Env = append(os.Environ(), "RECARTO_CACHE_DIR="+cache)
+				// The empty trailing overrides neutralize ambient RECARTO_*
+				// (workspace/sync/served-repo config on the host running the
+				// tests — e.g. a ForgeBoard session) so the subprocess opens
+				// ONLY this repo's store under the test cache dir.
+				cmd.Env = append(os.Environ(), "RECARTO_CACHE_DIR="+cache,
+					"RECARTO_WORKSPACE=", "RECARTO_REPOS=", "RECARTO_SYNC_URL=", "RECARTO_SYNC_KEY=")
 				out, err := cmd.CombinedOutput()
 				if err == nil {
 					return

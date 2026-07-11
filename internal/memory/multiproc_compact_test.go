@@ -39,7 +39,12 @@ func TestMultiProcessCompactSharedStore(t *testing.T) {
 	runCompactCmd(t, repo, "git", "commit", "-m", "init")
 
 	cache := t.TempDir()
-	env := append(os.Environ(), "RECARTO_CACHE_DIR="+cache)
+	// The empty trailing overrides neutralize ambient RECARTO_* (workspace/
+	// sync/served-repo config on the host running the tests — e.g. a
+	// ForgeBoard session) so subprocesses open ONLY this repo's store under
+	// the test cache dir.
+	env := append(os.Environ(), "RECARTO_CACHE_DIR="+cache,
+		"RECARTO_WORKSPACE=", "RECARTO_REPOS=", "RECARTO_SYNC_URL=", "RECARTO_SYNC_KEY=")
 
 	// Seed a couple of memories (one process, sequential).
 	seed := exec.Command(bin, "remember", "learning", "--body", "first seeded learning fact")

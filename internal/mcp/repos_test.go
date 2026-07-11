@@ -41,6 +41,7 @@ func initGitRepo(t *testing.T, dir, funcName string) {
 // via RECARTO_REPOS — the repo-less verifier shape.
 func newServedApp(t *testing.T) (*app.App, string, string) {
 	t.Helper()
+	clearRecartoEnv(t)
 	t.Setenv("RECARTO_CACHE_DIR", t.TempDir())
 	base := t.TempDir()
 	repo1, repo2, scratch := filepath.Join(base, "repo1"), filepath.Join(base, "repo2"), filepath.Join(base, "_scratch")

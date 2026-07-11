@@ -9,6 +9,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"time"
 
 	"git.gerwim.nl/gerwim/recarto/internal/cache"
 	"git.gerwim.nl/gerwim/recarto/internal/clock"
@@ -190,6 +191,28 @@ func (a *App) HasSync() bool {
 		}
 	}
 	return false
+}
+
+// SyncInterval returns the poll period for a long-lived process's background
+// sync loop (mcp.Serve). Every syncer is built from the same
+// RECARTO_SYNC_INTERVAL, so the first configured one speaks for all; the
+// point of asking App rather than a.Sync directly is that the PRIMARY syncer
+// is nil whenever the cwd is not a git repo (no cross-machine identity) even
+// while the workspace or RECARTO_REPOS syncers exist — exactly the state
+// HasSync reports true for.
+func (a *App) SyncInterval() time.Duration {
+	if a.Sync != nil {
+		return a.Sync.Interval()
+	}
+	for _, rc := range a.Repos {
+		if rc.Sync != nil {
+			return rc.Sync.Interval()
+		}
+	}
+	if a.Workspace != nil && a.Workspace.Sync != nil {
+		return a.Workspace.Sync.Interval()
+	}
+	return remotesync.DefaultInterval
 }
 
 // SyncAll runs one best-effort pull+push cycle on every configured syncer.

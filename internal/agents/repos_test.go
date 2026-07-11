@@ -43,6 +43,7 @@ func initGitRepo(t *testing.T, dir string) {
 // repo's file — the anchored memory recorded by a session cd'd into that repo
 // (anchor path relative to the REPO root, not the scratch cwd) must fire.
 func TestPostReadSurfacesSiblingRepoGuidance(t *testing.T) {
+	clearRecartoEnv(t)
 	t.Setenv("RECARTO_CACHE_DIR", t.TempDir())
 	base := t.TempDir()
 	repo1, scratch := filepath.Join(base, "repo1"), filepath.Join(base, "_scratch")
@@ -91,6 +92,7 @@ func TestPostReadSurfacesSiblingRepoGuidance(t *testing.T) {
 
 // Session start names the served repos so the agent knows to target them.
 func TestSessionStartNamesServedRepos(t *testing.T) {
+	clearRecartoEnv(t)
 	t.Setenv("RECARTO_CACHE_DIR", t.TempDir())
 	base := t.TempDir()
 	repo1, scratch := filepath.Join(base, "repo1"), filepath.Join(base, "_scratch")

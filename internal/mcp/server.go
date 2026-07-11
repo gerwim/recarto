@@ -2,6 +2,8 @@ package mcp
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"time"
 
 	"github.com/google/jsonschema-go/jsonschema"
@@ -108,10 +110,17 @@ func addToolSchema[In, Out any](s *sdk.Server, a *app.App, name, desc string,
 // Serve runs the MCP server over stdio until the client disconnects. It is the
 // body of `recarto serve`.
 func Serve(ctx context.Context, a *app.App) error {
+	return serve(ctx, a, &sdk.StdioTransport{})
+}
+
+// serve is Serve with the transport injected, so tests can drive the full
+// serve path — including the background sync goroutine — over an in-memory
+// transport.
+func serve(ctx context.Context, a *app.App, t sdk.Transport) error {
 	if a.HasSync() {
 		go runSyncLoop(ctx, a)
 	}
-	return NewServer(a).Run(ctx, &sdk.StdioTransport{})
+	return NewServer(a).Run(ctx, t)
 }
 
 // runSyncLoop keeps a long-lived `recarto serve` session converged with the
@@ -124,7 +133,20 @@ func Serve(ctx context.Context, a *app.App) error {
 // goroutine is detached from any single tool call, so a wedged or
 // unreachable server can never block or fail one.
 func runSyncLoop(ctx context.Context, a *app.App) {
-	ticker := time.NewTicker(a.Sync.Interval())
+	// Sync is best-effort by contract, but a panic in a goroutine takes down
+	// the whole process — for a stdio MCP server that means dying before the
+	// handshake and losing every tool, not just sync (the 1.2.0 SIGSEGV when
+	// remote sync was configured from a non-git cwd). Contain any panic here:
+	// background sync stops for the session, the server keeps serving.
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(os.Stderr, "recarto: background sync disabled after panic: %v\n", r)
+		}
+	}()
+	// a.SyncInterval, not a.Sync.Interval: the primary repo's syncer is nil
+	// when the cwd is not a git repo, while the workspace/RECARTO_REPOS
+	// syncers this loop exists for are configured.
+	ticker := time.NewTicker(a.SyncInterval())
 	defer ticker.Stop()
 	for {
 		select {

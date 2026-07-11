@@ -12,8 +12,9 @@ import (
 // newWorkspaceTestApp is newTestApp with the cross-repo workspace store enabled.
 func newWorkspaceTestApp(t *testing.T, branch string) *app.App {
 	t.Helper()
+	clearRecartoEnv(t)
 	t.Setenv("RECARTO_WORKSPACE", "acme")
-	a := newTestApp(t, branch)
+	a := openTestApp(t, branch)
 	if a.Workspace == nil {
 		t.Fatal("workspace not opened despite RECARTO_WORKSPACE")
 	}

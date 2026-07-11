@@ -36,6 +36,7 @@ func (g worktreeListGit) Run(args ...string) (string, error) {
 // opportunistic moment (best-effort, inside the warm-up budget).
 func TestSessionStartPrunesDeadWorktrees(t *testing.T) {
 	liveDir := t.TempDir()
+	clearRecartoEnv(t)
 	t.Setenv("RECARTO_CACHE_DIR", t.TempDir())
 	a, err := app.Open(app.Config{
 		CWD:    "/repo",

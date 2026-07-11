@@ -32,6 +32,10 @@ func TestOpenDisabledWithoutEnv(t *testing.T) {
 func TestOpenRecordsAndRecalls(t *testing.T) {
 	t.Setenv("RECARTO_CACHE_DIR", t.TempDir())
 	t.Setenv(EnvVar, "acme")
+	// The host running the tests may itself use Recarto with sync configured
+	// (e.g. a ForgeBoard session); this test asserts the sync-LESS shape.
+	t.Setenv("RECARTO_SYNC_URL", "")
+	t.Setenv("RECARTO_SYNC_KEY", "")
 	b, err := Open(nil)
 	if err != nil {
 		t.Fatal(err)

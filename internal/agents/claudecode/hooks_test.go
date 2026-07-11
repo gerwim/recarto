@@ -41,6 +41,16 @@ func (f fakeGit) Run(args ...string) (string, error) {
 
 func newTestApp(t *testing.T, branch string) *app.App {
 	t.Helper()
+	// Neutralize ambient RECARTO_* configuration: the machine running the
+	// tests may itself legitimately use Recarto (e.g. a ForgeBoard session),
+	// and tests must not inherit that state.
+	for _, k := range []string{
+		"RECARTO_WORKSPACE", "RECARTO_REPOS",
+		"RECARTO_SYNC_URL", "RECARTO_SYNC_KEY", "RECARTO_SYNC_REPO",
+		"RECARTO_SYNC_INTERVAL", "RECARTO_SYNC_TIMEOUT",
+	} {
+		t.Setenv(k, "")
+	}
 	t.Setenv("RECARTO_CACHE_DIR", t.TempDir())
 	a, err := app.Open(app.Config{
 		CWD:    "/repo",

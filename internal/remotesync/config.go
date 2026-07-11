@@ -24,17 +24,19 @@ type Config struct {
 	Timeout  time.Duration // RECARTO_SYNC_TIMEOUT (seconds); default 5s — per-request HTTP timeout
 }
 
-const (
-	defaultInterval = 60 * time.Second
-	defaultTimeout  = 5 * time.Second
-)
+// DefaultInterval is the poll period used when RECARTO_SYNC_INTERVAL is unset.
+// Exported so callers that need an interval without a constructed Syncer (a
+// serve process whose primary repo has no syncer) share the same default.
+const DefaultInterval = 60 * time.Second
+
+const defaultTimeout = 5 * time.Second
 
 // ConfigFromEnv reads Config from the process environment.
 func ConfigFromEnv() Config {
 	return Config{
 		URL:      os.Getenv("RECARTO_SYNC_URL"),
 		Key:      os.Getenv("RECARTO_SYNC_KEY"),
-		Interval: durationEnvSeconds("RECARTO_SYNC_INTERVAL", defaultInterval),
+		Interval: durationEnvSeconds("RECARTO_SYNC_INTERVAL", DefaultInterval),
 		Timeout:  durationEnvSeconds("RECARTO_SYNC_TIMEOUT", defaultTimeout),
 	}
 }
