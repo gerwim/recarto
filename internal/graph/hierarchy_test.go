@@ -20,7 +20,7 @@ func TestImplementationsFindsSubtypes(t *testing.T) {
 	if err := e.IndexFile(ctx, "/wt", "App.cs", src, 1, int64(len(src))); err != nil {
 		t.Fatal(err)
 	}
-	if err := e.Resolve(ctx, "/wt"); err != nil {
+	if err := e.Resolve(ctx, "/wt", noopProgress{}); err != nil {
 		t.Fatal(err)
 	}
 

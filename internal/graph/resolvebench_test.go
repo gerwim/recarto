@@ -100,7 +100,7 @@ func TestResolveBenchHeadline(t *testing.T) {
 	e, wt := resolveBenchEngine(t)
 	ctx := context.Background()
 	start := time.Now()
-	if err := e.Resolve(ctx, wt); err != nil {
+	if err := e.Resolve(ctx, wt, noopProgress{}); err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
 	dur := time.Since(start)
@@ -110,8 +110,9 @@ func TestResolveBenchHeadline(t *testing.T) {
 }
 
 // TestResolveBenchProfile times each sub-step of the CURRENT full Resolve in order,
-// inside one write tx, using the real package strategy constants and helpers so it
-// never drifts from resolve.go. It leaves the store resolved and prints the digest.
+// inside one WriteTxBulk (the production resolve connection profile), using the real
+// package strategy constants and fold helpers so it never drifts from resolve.go. It
+// leaves the store resolved and prints the digest.
 func TestResolveBenchProfile(t *testing.T) {
 	e, wt := resolveBenchEngine(t)
 	ctx := context.Background()
@@ -137,7 +138,7 @@ func TestResolveBenchProfile(t *testing.T) {
 WHERE dst_node_id IS NULL AND dst_name <> '' AND kind <> 'calls'
   AND file_id IN (SELECT id FROM files WHERE worktree = ?)`
 	total := time.Now()
-	if err := e.st.WriteTx(ctx, func(c store.Conn) error {
+	if err := e.st.WriteTxBulk(ctx, func(c store.Conn) error {
 		step := func(name string, fn func() (int64, error)) {
 			start := time.Now()
 			n, err := fn()
@@ -167,14 +168,43 @@ WHERE dst_node_id IS NULL AND dst_name <> '' AND kind <> 'calls'
   AND file_id IN (SELECT id FROM files WHERE worktree=?)`, wt))
 		}
 		step("non-call edges", exec(nonCall, wt, wt))
-		step("build recv_types", func() (int64, error) { return 0, buildReceiverTypes(ctx, c, wt) })
-		step("S1 self", exec(stratSelf, wt, wt))
-		step("S2 typed (shared)", exec(stratTypedReceiverShared, wt))
-		step("S3 static", exec(stratStatic, wt, wt))
-		step("S4 iface (shared)", exec(stratInterfaceShared, wt))
-		step("S5 name", func() (int64, error) { return 0, resolveNameFallback(ctx, c, wt) })
-		step("denormalize", func() (int64, error) { return 0, denormalizeBestCandidate(ctx, c, wt) })
+
+		// Call-edge resolution via the exact production helpers: shared maps, the
+		// fold-per-strategy passes, S6, then the winner write-back.
+		var m *resolveMaps
+		step("build maps", func() (int64, error) {
+			var err error
+			m, err = buildResolveMaps(ctx, c, wt)
+			return 0, err
+		})
+		step("build recv_types", func() (int64, error) { return 0, buildReceiverTypes(ctx, c, wt, m) })
+		winners := make(map[string]denormWinner, len(m.edges))
+		step("S1 self", func() (int64, error) {
+			return 0, foldStrategy(ctx, c, m, winners, stratSelf+returningCandidates, wt, wt)
+		})
+		step("S2 typed (shared)", func() (int64, error) {
+			return 0, foldStrategy(ctx, c, m, winners, stratTypedReceiverShared+returningCandidates, wt)
+		})
+		step("S3 static", func() (int64, error) {
+			return 0, foldStrategy(ctx, c, m, winners, stratStatic+returningCandidates, wt, wt)
+		})
+		step("S4 iface (shared)", func() (int64, error) {
+			return 0, foldStrategy(ctx, c, m, winners, stratInterfaceShared+returningCandidates, wt)
+		})
+		step("S5 name", func() (int64, error) { return 0, resolveNameFallback(ctx, c, wt, m.files, winners) })
+		step("S6 ctor", func() (int64, error) { return 0, stratImplicitCtorFold(ctx, c, wt, m, winners) })
+		step("denormalize", func() (int64, error) { return 0, applyWinners(ctx, c, winners) })
 		step("rebuild idx_dst", exec(`CREATE INDEX IF NOT EXISTS idx_edge_candidates_dst ON edge_candidates(dst_node_id)`))
+		step("analyze", func() (int64, error) {
+			if _, err := c.ExecContext(ctx, `PRAGMA analysis_limit=1000`); err != nil {
+				return 0, err
+			}
+			res, err := c.ExecContext(ctx, `ANALYZE`)
+			if err != nil {
+				return 0, err
+			}
+			return res.RowsAffected()
+		})
 		step("drop recv_types", exec(`DROP TABLE IF EXISTS recv_types`))
 		return nil
 	}); err != nil {

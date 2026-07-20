@@ -40,7 +40,7 @@ func TestResolveS2TypedReceiverCSharp(t *testing.T) {
 	if err := e.IndexFile(ctx, "/wt", "Svc.cs", src, 1, int64(len(src))); err != nil {
 		t.Fatal(err)
 	}
-	if err := e.Resolve(ctx, "/wt"); err != nil {
+	if err := e.Resolve(ctx, "/wt", noopProgress{}); err != nil {
 		t.Fatal(err)
 	}
 	got := candidateTargets(t, e, "Run", "_dep")
@@ -61,7 +61,7 @@ func TestResolveS1SelfCSharp(t *testing.T) {
 	if err := e.IndexFile(ctx, "/wt", "Svc.cs", src, 1, int64(len(src))); err != nil {
 		t.Fatal(err)
 	}
-	if err := e.Resolve(ctx, "/wt"); err != nil {
+	if err := e.Resolve(ctx, "/wt", noopProgress{}); err != nil {
 		t.Fatal(err)
 	}
 	// Both bare Helper() and this.Helper() capture with recv="" (this has no
@@ -85,7 +85,7 @@ func TestResolveDenormalizesBestCandidate(t *testing.T) {
 	if err := e.IndexFile(ctx, "/wt", "Svc.cs", src, 1, int64(len(src))); err != nil {
 		t.Fatal(err)
 	}
-	if err := e.Resolve(ctx, "/wt"); err != nil {
+	if err := e.Resolve(ctx, "/wt", noopProgress{}); err != nil {
 		t.Fatal(err)
 	}
 	var qn string
@@ -110,7 +110,7 @@ func TestResolveS4InterfaceExpansionCSharp(t *testing.T) {
 	if err := e.IndexFile(ctx, "/wt", "H.cs", src, 1, int64(len(src))); err != nil {
 		t.Fatal(err)
 	}
-	if err := e.Resolve(ctx, "/wt"); err != nil {
+	if err := e.Resolve(ctx, "/wt", noopProgress{}); err != nil {
 		t.Fatal(err)
 	}
 	got := candidateTargets(t, e, "Handle", "_h")
@@ -128,7 +128,7 @@ func TestResolveS3StaticCSharp(t *testing.T) {
 	if err := e.IndexFile(ctx, "/wt", "Svc.cs", src, 1, int64(len(src))); err != nil {
 		t.Fatal(err)
 	}
-	if err := e.Resolve(ctx, "/wt"); err != nil {
+	if err := e.Resolve(ctx, "/wt", noopProgress{}); err != nil {
 		t.Fatal(err)
 	}
 	got := candidateTargets(t, e, "Create", "Factory")
@@ -147,7 +147,7 @@ func TestResolveS2TypedReceiverGo(t *testing.T) {
 	if err := e.IndexFile(ctx, "/wt", "saga.go", src, 1, int64(len(src))); err != nil {
 		t.Fatal(err)
 	}
-	if err := e.Resolve(ctx, "/wt"); err != nil {
+	if err := e.Resolve(ctx, "/wt", noopProgress{}); err != nil {
 		t.Fatal(err)
 	}
 	got := candidateTargets(t, e, "step", "s")

@@ -29,6 +29,33 @@ func (g *gatedSource) List() ([]FileEntry, error) {
 }
 func (g *gatedSource) Read(p string) ([]byte, error) { return g.inner.Read(p) }
 
+// TestRefreshProgressReceivesResolveSubPhase proves the live resolve sub-phase
+// labels flow into refreshProgress (the adapter behind the MCP freshness hint), not
+// just the base label — so a client polling an in-flight refresh sees which resolve
+// stage is running. Driving Resolve through a real refreshProgress, detail() must
+// end on the last sub-phase and stay under the "resolving references" prefix.
+func TestRefreshProgressReceivesResolveSubPhase(t *testing.T) {
+	e := newTestEngine(t)
+	ctx := context.Background()
+	if err := e.IndexFile(ctx, "/wt", "a.go", []byte("package p\nfunc A(){ B() }"), 1, 24); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.IndexFile(ctx, "/wt", "b.go", []byte("package p\nfunc B(){}"), 1, 19); err != nil {
+		t.Fatal(err)
+	}
+	prog := &refreshProgress{}
+	if err := e.Resolve(ctx, "/wt", prog); err != nil {
+		t.Fatal(err)
+	}
+	got := prog.detail()
+	if !strings.HasPrefix(got, "resolving references") {
+		t.Fatalf("refreshProgress detail = %q, want a 'resolving references' sub-phase", got)
+	}
+	if got == "resolving references" {
+		t.Fatalf("refreshProgress detail stuck on the base label %q; sub-phases did not reach it", got)
+	}
+}
+
 // errSource fails every List, simulating a persistently broken refresh.
 type errSource struct{ lists atomic.Int64 }
 

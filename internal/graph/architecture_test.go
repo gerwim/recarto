@@ -46,7 +46,7 @@ func TestArchitectureDependencyEdges(t *testing.T) {
 	// api/handler.go calls Login defined in auth/login.go -> dep api->auth.
 	mustIndex("auth/login.go", "package auth\nfunc Login(){}")
 	mustIndex("api/handler.go", "package api\nfunc Handle(){ Login() }")
-	if err := e.Resolve(ctx, "/wt"); err != nil {
+	if err := e.Resolve(ctx, "/wt", noopProgress{}); err != nil {
 		t.Fatal(err)
 	}
 	arch, err := e.Architecture(ctx, "/wt", "")

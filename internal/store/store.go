@@ -4,10 +4,12 @@ package store
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"fmt"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -43,10 +45,17 @@ func open(path string, busyTimeoutMs int) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, fmt.Errorf("create cache dir: %w", err)
 	}
+	// temp_store(2) keeps temp tables, CREATE INDEX sorts, and ANALYZE/ORDER BY
+	// spills in memory instead of on disk. On Windows those temp files are exactly
+	// what Windows Defender scans on creation, so an in-memory temp store removes a
+	// per-spill antivirus round trip during a large resolve. cache_size is left at
+	// the SQLite default here: the pool holds up to 8 resident connections, so a
+	// large per-connection cache is only applied transiently by WriteTxBulk.
 	dsn := fmt.Sprintf("file:%s"+
 		"?_pragma=busy_timeout(%d)"+
 		"&_pragma=journal_mode(WAL)"+
 		"&_pragma=synchronous(NORMAL)"+
+		"&_pragma=temp_store(2)"+
 		"&_pragma=foreign_keys(ON)", path, busyTimeoutMs)
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
@@ -101,8 +110,51 @@ const maxWriteRetries = 6
 // `BEGIN IMMEDIATE` that loses the race for the write lock makes no changes, so
 // the whole transaction is safely retried with bounded backoff on SQLITE_BUSY.
 func (s *Store) WriteTx(ctx context.Context, fn func(c Conn) error) error {
+	return s.writeTx(ctx, fn, false)
+}
+
+// bulkCacheMBDefault is the WriteTxBulk page-cache size in MiB when
+// RECARTO_BULK_CACHE_MB is unset.
+const bulkCacheMBDefault = 128
+
+// bulkCacheKB returns the WriteTxBulk page-cache size in KiB (the unit SQLite's
+// negative `PRAGMA cache_size` takes). RECARTO_BULK_CACHE_MB overrides the default
+// for constrained environments; it is read per call so a test can set it with
+// t.Setenv.
+func bulkCacheKB() int {
+	mb := bulkCacheMBDefault
+	if v := os.Getenv("RECARTO_BULK_CACHE_MB"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			mb = n
+		}
+	}
+	return mb * 1024
+}
+
+// WriteTxBulk is WriteTx with a bulk-write connection profile: a large page cache
+// (128 MiB, or RECARTO_BULK_CACHE_MB) and foreign-key enforcement OFF for the
+// duration of the transaction. Both settings are applied to the checked-out
+// connection before BEGIN IMMEDIATE (foreign_keys is a no-op inside a transaction,
+// so it cannot be toggled from within fn) and restored — under a detached context,
+// so a cancelled ctx cannot skip the restore — after COMMIT/ROLLBACK. A connection
+// whose profile cannot be restored is discarded rather than returned to the pool,
+// so a mis-profiled connection never serves a later writer.
+//
+// CONTRACT (caller must guarantee): the transaction only (a) inserts child rows
+// whose parent rows it has read in the same transaction, and (b) deletes or updates
+// rows that no other table references. It must never delete or rewrite parent rows
+// that FK CASCADE/SET NULL actions would otherwise clean up after — with foreign
+// keys off, SQLite performs no such cascade and the store would be left with
+// dangling children.
+func (s *Store) WriteTxBulk(ctx context.Context, fn func(c Conn) error) error {
+	return s.writeTx(ctx, fn, true)
+}
+
+// writeTx is the shared retry loop for WriteTx / WriteTxBulk. bulk selects the
+// bulk-write connection profile for each attempt.
+func (s *Store) writeTx(ctx context.Context, fn func(c Conn) error, bulk bool) error {
 	for attempt := 0; ; attempt++ {
-		err := s.writeTxOnce(ctx, fn)
+		err := s.writeTxOnce(ctx, fn, bulk)
 		if err == nil || !isBusy(err) || attempt >= maxWriteRetries {
 			return err
 		}
@@ -116,10 +168,50 @@ func (s *Store) WriteTx(ctx context.Context, fn func(c Conn) error) error {
 	}
 }
 
+// execRestore runs the WriteTxBulk profile-restore PRAGMAs on conn. It is a package
+// variable so a test can substitute a failing implementation and prove that a
+// connection which cannot be un-profiled is discarded rather than pooled.
+var execRestore = func(ctx context.Context, conn *sql.Conn, prevCache int) error {
+	if _, err := conn.ExecContext(ctx, `PRAGMA foreign_keys=ON`); err != nil {
+		return err
+	}
+	if _, err := conn.ExecContext(ctx, fmt.Sprintf(`PRAGMA cache_size=%d`, prevCache)); err != nil {
+		return err
+	}
+	return nil
+}
+
+// applyBulkProfile sets the bulk-write PRAGMAs on conn (before BEGIN) and returns a
+// restore closure that reverses them under a detached context, discarding conn on
+// failure. It captures the connection's prior cache_size so the restore is exact
+// regardless of any future change to the pool default.
+func applyBulkProfile(ctx context.Context, conn *sql.Conn) (restore func(), err error) {
+	var prevCache int
+	if err := conn.QueryRowContext(ctx, `PRAGMA cache_size`).Scan(&prevCache); err != nil {
+		return nil, err
+	}
+	if _, err := conn.ExecContext(ctx, fmt.Sprintf(`PRAGMA cache_size=-%d`, bulkCacheKB())); err != nil {
+		return nil, err
+	}
+	if _, err := conn.ExecContext(ctx, `PRAGMA foreign_keys=OFF`); err != nil {
+		// cache_size already moved; roll it back before surfacing the failure.
+		_, _ = conn.ExecContext(context.WithoutCancel(ctx),
+			fmt.Sprintf(`PRAGMA cache_size=%d`, prevCache))
+		return nil, err
+	}
+	return func() {
+		if err := execRestore(context.WithoutCancel(ctx), conn, prevCache); err != nil {
+			// A connection left with foreign keys off / an oversized cache must never
+			// serve a later writer; returning driver.ErrBadConn from Raw discards it.
+			_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+		}
+	}, nil
+}
+
 // writeTxOnce performs a single attempt of the serialized transaction. wmu is
 // held only for the duration of one attempt so backoff between retries does not
 // block other in-process writers.
-func (s *Store) writeTxOnce(ctx context.Context, fn func(c Conn) error) error {
+func (s *Store) writeTxOnce(ctx context.Context, fn func(c Conn) error, bulk bool) error {
 	s.wmu.Lock()
 	defer s.wmu.Unlock()
 
@@ -128,6 +220,16 @@ func (s *Store) writeTxOnce(ctx context.Context, fn func(c Conn) error) error {
 		return err
 	}
 	defer conn.Close()
+
+	if bulk {
+		restore, err := applyBulkProfile(ctx, conn)
+		if err != nil {
+			return err
+		}
+		// Runs before the deferred conn.Close (LIFO), on every exit path below —
+		// failed BEGIN, callback error, failed COMMIT, or success.
+		defer restore()
+	}
 
 	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
 		return err // no transaction open yet; nothing to roll back

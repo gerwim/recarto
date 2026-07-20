@@ -23,6 +23,12 @@ func TestFreshnessHintMapping(t *testing.T) {
 	if !strings.Contains(got, "resolving references") || !strings.Contains(got, "stale") {
 		t.Errorf("Refreshing hint %q should carry the detail and warn about staleness", got)
 	}
+	// A resolve sub-phase detail (prefix-compatible with the base) must flow through
+	// unchanged, so a polling client sees which stage is running.
+	got = freshnessHint(graph.Freshness{State: graph.Refreshing, Detail: "resolving references (4/8: name fallback)"})
+	if !strings.Contains(got, "resolving references (4/8: name fallback)") || !strings.Contains(got, "stale") {
+		t.Errorf("Refreshing hint %q should carry the resolve sub-phase detail", got)
+	}
 }
 
 func TestJoinHints(t *testing.T) {
