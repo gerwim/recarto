@@ -12,7 +12,7 @@ func TestQueryNodeFiltersAndEdge(t *testing.T) {
 	if err := e.IndexFile(ctx, "/wt", "p.go", src, 1, int64(len(src))); err != nil {
 		t.Fatal(err)
 	}
-	if err := e.Resolve(ctx, "/wt"); err != nil {
+	if err := e.Resolve(ctx, "/wt", noopProgress{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -48,7 +48,7 @@ func TestQueryRejectsEmptySpec(t *testing.T) {
 	if err := e.IndexFile(ctx, "/wt", "p.go", src, 1, int64(len(src))); err != nil {
 		t.Fatal(err)
 	}
-	if err := e.Resolve(ctx, "/wt"); err != nil {
+	if err := e.Resolve(ctx, "/wt", noopProgress{}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := e.Query(ctx, "/wt", QuerySpec{}); err == nil {

@@ -64,7 +64,7 @@ func (e *Engine) ReindexFileIncremental(ctx context.Context, worktree, path stri
 	if sameStringSet(oldExtends, newExtends) {
 		return e.ResolveIncremental(ctx, worktree, dirty, oldNames)
 	}
-	return e.Resolve(ctx, worktree)
+	return e.Resolve(ctx, worktree, noopProgress{})
 }
 
 // writeStmts holds the per-row INSERT statements of the file-graph write path,

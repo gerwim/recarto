@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 )
@@ -19,7 +20,9 @@ func (p cancelOnResolvePhase) Start(int) {}
 func (p cancelOnResolvePhase) Inc()      {}
 func (p cancelOnResolvePhase) Done()     {}
 func (p cancelOnResolvePhase) Phase(label string) {
-	if label == "resolving references" {
+	// Every resolve sub-phase label starts with this prefix; the first one (the base
+	// label) fires the cancel, reproducing an abort at the very start of resolution.
+	if strings.HasPrefix(label, "resolving references") {
 		p.cancel()
 	}
 }
@@ -34,6 +37,37 @@ func (p *phaseRecorder) Done()              {}
 func (p *phaseRecorder) Phase(label string) { p.phases = append(p.phases, label) }
 
 func (p *phaseRecorder) saw(label string) bool { return slices.Contains(p.phases, label) }
+
+// TestResolveEmitsSubPhaseLabels: a full resolve must announce its sub-phases, each
+// under the "resolving references" prefix so existing matchers keep working, so a
+// long resolve is not silent and MCP/CLI/log consumers get per-stage timing.
+func TestResolveEmitsSubPhaseLabels(t *testing.T) {
+	e := newTestEngine(t)
+	rec := &phaseRecorder{}
+	// A first index takes the full-resolve path, where Resolve emits the sub-phases.
+	if err := e.Reconcile(context.Background(), "/wt", crossFileCallSource(), WithProgress(rec)); err != nil {
+		t.Fatal(err)
+	}
+	if !rec.saw("resolving references") {
+		t.Fatalf("missing base label; saw %v", rec.phases)
+	}
+	for _, want := range []string{
+		"resolving references (2/8: typed receivers)",
+		"resolving references (4/8: name fallback)",
+		"resolving references (6/8: picking best targets)",
+		"resolving references (8/8: analyzing)",
+	} {
+		if !rec.saw(want) {
+			t.Errorf("missing sub-phase label %q; saw %v", want, rec.phases)
+		}
+	}
+	// Every emitted resolve label must carry the shared prefix.
+	for _, l := range rec.phases {
+		if !strings.HasPrefix(l, "resolving references") {
+			t.Errorf("phase label %q lacks the required prefix", l)
+		}
+	}
+}
 
 // resolvedCallEdges counts call edges in wt whose destination has been resolved
 // to a concrete node — the observable output of the Resolve stage.

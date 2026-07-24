@@ -89,7 +89,7 @@ func TestQueryOutputsStableAcrossIndexOrder(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		if err := e.Resolve(ctx, wt); err != nil {
+		if err := e.Resolve(ctx, wt, noopProgress{}); err != nil {
 			t.Fatal(err)
 		}
 		return render(e)

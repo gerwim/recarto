@@ -8,7 +8,11 @@ type Progress interface {
 	Start(total int)
 	Inc()
 	// Phase announces a non-file-counted stage (e.g. resolving references) so a
-	// long, tick-less step does not look frozen after the file bar fills.
+	// long, tick-less step does not look frozen after the file bar fills. A full
+	// Resolve emits a sequence of sub-phase labels, every one prefixed with
+	// "resolving references" (e.g. "resolving references (4/8: name fallback)") so a
+	// matcher keyed on that prefix still fires while a timestamped log gains
+	// per-stage timings for free.
 	Phase(label string)
 	Done()
 }

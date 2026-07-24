@@ -19,11 +19,16 @@ func TestIndexProgressPlainLinesNonTTY(t *testing.T) {
 		p.Inc()
 	}
 	p.Phase("resolving references")
+	// A resolve sub-phase label (prefix-compatible with the base) must render too.
+	p.Phase("resolving references (6/8: picking best targets)")
 	p.Done()
 
 	out := buf.String()
 	if !strings.Contains(out, "resolving references...") {
 		t.Errorf("output missing phase line\n--- got ---\n%s", out)
+	}
+	if !strings.Contains(out, "resolving references (6/8: picking best targets)...") {
+		t.Errorf("output missing sub-phase line\n--- got ---\n%s", out)
 	}
 	for _, want := range []string{"1000/2500", "2000/2500", "2500/2500"} {
 		if !strings.Contains(out, want) {

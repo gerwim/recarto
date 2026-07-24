@@ -250,7 +250,6 @@ func (e *Engine) Reconcile(ctx context.Context, worktree string, src Source, opt
 		if err := e.createGraphSecondaryIndexes(ctx); err != nil {
 			return err
 		}
-		o.progress.Phase("resolving references")
 		// Incremental resolve is exact only while the worktree's interface/base
 		// structure is unchanged (ResolveIncremental); a dirty file that gained or
 		// lost an `extends` edge can redirect interface dispatch in OTHER files,
@@ -264,10 +263,15 @@ func (e *Engine) Reconcile(ctx context.Context, worktree string, src Source, opt
 			useIncremental = sameStringSet(oldExtends, newExtends)
 		}
 		if useIncremental {
+			// The incremental path has no sub-phases of its own; announce the base
+			// "resolving references" label so observers (progress bar, MCP freshness
+			// hint, the crash-safety cancel hook) still see the resolve stage begin.
+			// A full Resolve emits the base label (and its sub-phases) itself.
+			o.progress.Phase("resolving references")
 			if err := e.ResolveIncremental(ctx, worktree, dirtyPaths, oldNames); err != nil {
 				return err
 			}
-		} else if err := e.Resolve(ctx, worktree); err != nil {
+		} else if err := e.Resolve(ctx, worktree, o.progress); err != nil {
 			return err
 		}
 	}

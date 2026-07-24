@@ -41,7 +41,7 @@ func TestTracePartialQualifiedName(t *testing.T) {
 	if err := e.IndexFile(ctx, "/wt", "Svc.cs", src, 1, int64(len(src))); err != nil {
 		t.Fatal(err)
 	}
-	if err := e.Resolve(ctx, "/wt"); err != nil {
+	if err := e.Resolve(ctx, "/wt", noopProgress{}); err != nil {
 		t.Fatal(err)
 	}
 	chains, suggestions, err := e.TraceCallPathFiltered(ctx, "/wt", "Svc.M", "callees", 2, 0)
@@ -78,7 +78,7 @@ func TestTraceCallersAggregatesAmbiguousBareName(t *testing.T) {
 	if err := e.IndexFile(ctx, "/wt", "y/B.cs", b, 1, int64(len(b))); err != nil {
 		t.Fatal(err)
 	}
-	if err := e.Resolve(ctx, "/wt"); err != nil {
+	if err := e.Resolve(ctx, "/wt", noopProgress{}); err != nil {
 		t.Fatal(err)
 	}
 	chains, err := e.TraceCallPath(ctx, "/wt", "Handle", "callers", 1)
@@ -115,7 +115,7 @@ func TestTraceCallersResolvedDeadEndIsNotAMiss(t *testing.T) {
 	if err := e.IndexFile(ctx, "/wt", "Svc.cs", src, 1, int64(len(src))); err != nil {
 		t.Fatal(err)
 	}
-	if err := e.Resolve(ctx, "/wt"); err != nil {
+	if err := e.Resolve(ctx, "/wt", noopProgress{}); err != nil {
 		t.Fatal(err)
 	}
 	chains, suggestions, err := e.TraceCallPathFiltered(ctx, "/wt", "Loop", "callers", 3, 0)
@@ -156,7 +156,7 @@ func TestTraceCallPathCallersRespectsResolution(t *testing.T) {
 	if err := e.IndexFile(ctx, "/wt", "y/B.cs", b, 1, int64(len(b))); err != nil {
 		t.Fatal(err)
 	}
-	if err := e.Resolve(ctx, "/wt"); err != nil {
+	if err := e.Resolve(ctx, "/wt", noopProgress{}); err != nil {
 		t.Fatal(err)
 	}
 	chains, err := e.TraceCallPath(ctx, "/wt", "X.A.Handle", "callers", 1)
@@ -183,7 +183,7 @@ func TestCallNeighborsAnnotatesConfidence(t *testing.T) {
 	if err := e.IndexFile(ctx, "/wt", "Svc.cs", src, 1, int64(len(src))); err != nil {
 		t.Fatal(err)
 	}
-	if err := e.Resolve(ctx, "/wt"); err != nil {
+	if err := e.Resolve(ctx, "/wt", noopProgress{}); err != nil {
 		t.Fatal(err)
 	}
 	chains, err := e.TraceCallPath(ctx, "/wt", "N.Svc.M", "callees", 2)
@@ -214,7 +214,7 @@ func TestTraceCallPathCallees(t *testing.T) {
 	if err := e.IndexFile(ctx, "/wt", "p.go", src, 1, int64(len(src))); err != nil {
 		t.Fatal(err)
 	}
-	if err := e.Resolve(ctx, "/wt"); err != nil {
+	if err := e.Resolve(ctx, "/wt", noopProgress{}); err != nil {
 		t.Fatal(err)
 	}
 	chains, err := e.TraceCallPath(ctx, "/wt", "A", "callees", 3)

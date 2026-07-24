@@ -20,7 +20,7 @@ func TestTraceUncertaintyIsTerminal(t *testing.T) {
 	if err := e.IndexFile(ctx, "/wt", "Svc.cs", src, 1, int64(len(src))); err != nil {
 		t.Fatal(err)
 	}
-	if err := e.Resolve(ctx, "/wt"); err != nil {
+	if err := e.Resolve(ctx, "/wt", noopProgress{}); err != nil {
 		t.Fatal(err)
 	}
 	chains, err := e.TraceCallPath(ctx, "/wt", "N.Svc.M", "callees", 3)
@@ -63,7 +63,7 @@ func TestTraceGlobalBudget(t *testing.T) {
 	if err := e.IndexFile(ctx, "/wt", "C.cs", src, 1, int64(len(src))); err != nil {
 		t.Fatal(err)
 	}
-	if err := e.Resolve(ctx, "/wt"); err != nil {
+	if err := e.Resolve(ctx, "/wt", noopProgress{}); err != nil {
 		t.Fatal(err)
 	}
 	chains, err := e.TraceCallPath(ctx, "/wt", "N.C.Root", "callees", 3)
