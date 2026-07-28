@@ -1,10 +1,13 @@
 package syncserver
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 
 	"git.gerwim.nl/gerwim/recarto/internal/store"
@@ -168,4 +171,124 @@ func TestReconcileSyncIndexIsIdempotent(t *testing.T) {
 	if len(cr.Records) != 0 {
 		t.Fatalf("a healthy store was reindexed on reopen: %+v", cr.Records)
 	}
+}
+
+// TestReconcileSyncIndexTombstoneWinsOverASameIdMemory pins the ordering that
+// makes deletes stick.
+//
+// The abnormal-but-possible state is an id present in BOTH memory_tombstones and
+// memories with no sync_index entry (e.g. a salvage that recovered a memory row
+// whose delete had not yet been checkpointed). Because bumpSyncIndexTx is an
+// upsert, indexing the memory after the tombstone would overwrite deleted=1 with
+// deleted=0 and a higher seq — silently resurrecting deleted data for every
+// client. The tombstone pass must therefore be WRITTEN before the memories set
+// is even queried, so the memories query's NOT IN excludes it.
+func TestReconcileSyncIndexTombstoneWinsOverASameIdMemory(t *testing.T) {
+	dataDir := filepath.Join(t.TempDir(), "data")
+	srv := New("s3cret", dataDir)
+	t.Cleanup(func() { _ = srv.Close() })
+	client, base := unixHTTPClient(t, srv.Handler())
+
+	rs, err := srv.storeFor("repo1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+
+	if err := rs.st.WriteTx(ctx, func(c store.Conn) error {
+		if _, err := c.ExecContext(ctx,
+			`INSERT INTO memories(id,kind,title,body,search_text,created_at,updated_at,status)
+			 VALUES ('ghost','learning','deleted but still present','body','deleted body',100,100,'active')`); err != nil {
+			return err
+		}
+		if _, err := c.ExecContext(ctx,
+			`INSERT INTO memory_tombstones(id,deleted_at,pushed) VALUES ('ghost',200,1)`); err != nil {
+			return err
+		}
+		// A second, ordinary memory, so the memories pass is not empty and really
+		// does run after the tombstone write.
+		_, err := c.ExecContext(ctx,
+			`INSERT INTO memories(id,kind,title,body,search_text,created_at,updated_at,status)
+			 VALUES ('live','learning','a live one','body','live body',101,101,'active')`)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	n, err := reconcileSyncIndex(ctx, rs.st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 2 {
+		t.Fatalf("reindexed %d, want 2 (the tombstone and the live memory, the ghost counted once)", n)
+	}
+
+	var entries, deleted int
+	if err := rs.st.DB.QueryRow(
+		`SELECT count(*), COALESCE(sum(deleted),0) FROM sync_index WHERE memory_id='ghost'`).
+		Scan(&entries, &deleted); err != nil {
+		t.Fatal(err)
+	}
+	if entries != 1 {
+		t.Fatalf("sync_index has %d entries for 'ghost', want exactly 1", entries)
+	}
+	if deleted != 1 {
+		t.Fatal("the memories pass overwrote the tombstone: 'ghost' is indexed as live, resurrecting a delete")
+	}
+
+	// And over the wire, which is what a client actually sees.
+	resp := doReq(t, client, http.MethodGet, base+"/v1/repos/repo1/changes?since=0", "s3cret", nil)
+	var cr syncwire.ChangesResponse
+	if err := json.NewDecoder(resp.Body).Decode(&cr); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	got := map[string]syncwire.Record{}
+	for _, r := range cr.Records {
+		got[r.ID] = r
+	}
+	if rec, ok := got["ghost"]; !ok || !rec.Deleted {
+		t.Fatalf("'ghost' must reach clients as a delete, got %+v (all: %+v)", rec, cr.Records)
+	}
+	if rec, ok := got["live"]; !ok || rec.Deleted {
+		t.Fatalf("'live' must reach clients as a live record, got %+v", rec)
+	}
+
+	// Reconciling again must be a no-op: already-indexed entries keep their seqs,
+	// or every restart would re-push the whole repo.
+	before := indexSnapshot(t, rs)
+	n2, err := reconcileSyncIndex(ctx, rs.st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n2 != 0 {
+		t.Fatalf("second reconcile reindexed %d, want 0", n2)
+	}
+	if after := indexSnapshot(t, rs); after != before {
+		t.Fatalf("second reconcile changed the index:\n before %v\n after  %v", before, after)
+	}
+}
+
+// indexSnapshot renders sync_index as a comparable string.
+func indexSnapshot(t *testing.T, rs *repoStore) string {
+	t.Helper()
+	rows, err := rs.st.DB.Query(`SELECT memory_id, seq, deleted FROM sync_index ORDER BY memory_id`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var b strings.Builder
+	for rows.Next() {
+		var id string
+		var seq int64
+		var del int
+		if err := rows.Scan(&id, &seq, &del); err != nil {
+			t.Fatal(err)
+		}
+		fmt.Fprintf(&b, "%s:%d:%d ", id, seq, del)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return b.String()
 }

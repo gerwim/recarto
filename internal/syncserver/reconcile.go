@@ -22,9 +22,19 @@ import (
 // clients re-pull them exactly once and memory.SyncApply merges them
 // idempotently. A brand-new client (since=0) sees them like anything else.
 //
-// Tombstones are indexed before memories: if an id somehow appears in both
-// tables, the memories pass's NOT IN then skips it, so the delete wins. Both
-// passes order by timestamp so assigned seqs approximate real history.
+// A delete must win over a same-id memory row, and the ORDER of the two passes
+// is the entire mechanism: the memories set is collected only AFTER the
+// tombstone entries have been written in this same transaction, so its
+// `NOT IN (SELECT memory_id FROM sync_index)` sees them and skips those ids.
+//
+// Collecting both sets up front instead would be a silent data-resurrection bug:
+// an id present in both tables with no index entry would appear in both lists,
+// and bumpSyncIndexTx is an UPSERT, so the memories pass would overwrite the
+// tombstone with deleted=0 and a higher seq — undoing the delete for every
+// client. Read tombstones → write → read memories → write; do not batch the
+// reads.
+//
+// Both passes order by timestamp so assigned seqs approximate real history.
 func reconcileSyncIndex(ctx context.Context, st *store.Store) (int, error) {
 	n := 0
 	err := st.WriteTx(ctx, func(c store.Conn) error {
@@ -32,8 +42,8 @@ func reconcileSyncIndex(ctx context.Context, st *store.Store) (int, error) {
 			id string
 			at int64
 		}
-		// Each pass reads its whole result set before writing: the rows cursor
-		// holds this connection, and the bumps below run on the same one.
+		// Each pass drains its whole result set before any write: the rows cursor
+		// holds this connection, and the bumps run on the same one.
 		collect := func(query string) ([]entry, error) {
 			rows, err := c.QueryContext(ctx, query)
 			if err != nil {
@@ -58,21 +68,23 @@ func reconcileSyncIndex(ctx context.Context, st *store.Store) (int, error) {
 		if err != nil {
 			return err
 		}
-		// Every status, not just active: the index tracks each row the server
-		// holds, and a client must learn about a supersede or archive too.
+		for _, e := range tombs {
+			if _, err := bumpSyncIndexTx(ctx, c, e.id, true, e.at); err != nil {
+				return err
+			}
+			n++
+		}
+
+		// Only now — with the tombstone entries in sync_index — is it safe to ask
+		// which memories are unindexed. Every status, not just active: the index
+		// tracks each row the server holds, and a client must learn about a
+		// supersede or archive too.
 		mems, err := collect(
 			`SELECT id, updated_at FROM memories
 			  WHERE id NOT IN (SELECT memory_id FROM sync_index)
 			  ORDER BY updated_at, id`)
 		if err != nil {
 			return err
-		}
-
-		for _, e := range tombs {
-			if _, err := bumpSyncIndexTx(ctx, c, e.id, true, e.at); err != nil {
-				return err
-			}
-			n++
 		}
 		for _, e := range mems {
 			if _, err := bumpSyncIndexTx(ctx, c, e.id, false, e.at); err != nil {
