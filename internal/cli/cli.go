@@ -65,11 +65,23 @@ func Run(args []string, out io.Writer) error {
 		return Import(context.Background(), out, rest)
 	}
 
-	if !known(cmd) {
-		return fmt.Errorf("unknown command %q (try: init serve hook status doctor remember forget recall bug feedback memory index graph compact snapshot todo sync server export import)", cmd)
+	// repair rebuilds a possibly-corrupt store. It must run before app.Open,
+	// because the situation it exists for is exactly the one where app.Open fails.
+	if cmd == "repair" {
+		return Repair(out, rest)
 	}
 
-	a, err := app.Open(app.Config{})
+	if !known(cmd) {
+		return fmt.Errorf("unknown command %q (try: init serve hook status doctor remember forget recall bug feedback memory index graph compact snapshot todo sync server export import repair)", cmd)
+	}
+
+	// Only the long-lived serving process pays for the proactive corruption check
+	// (rate-limited to once a day by the store's stamp file): it opens once and
+	// serves for hours, so it must not discover damage on its first write. Hooks
+	// and one-shot commands stay as cheap as before.
+	cfg := app.Config{QuickCheck: cmd == "serve"}
+
+	a, err := app.Open(cfg)
 	if err != nil {
 		if cmd == "hook" {
 			// Hooks must never block the agent, even if the store cannot open.
@@ -135,6 +147,7 @@ func usage(w io.Writer) error {
 	fmt.Fprintln(w, "  hook <event>      run an agent hook (session-start|post-read|post-edit|augment|stop) [--agent]")
 	fmt.Fprintln(w, "  status            repo id, branch, memory counts, ledger")
 	fmt.Fprintln(w, "  doctor            health checks (db, WAL, integrity, git)")
+	fmt.Fprintln(w, "  repair            rebuild a corrupt store, salvaging memories (--path <store.db>)")
 	fmt.Fprintln(w, "  remember <kind>   record a memory (--title --body --files --symbols --tags --pin --global)")
 	fmt.Fprintln(w, "  forget <id>       hard-delete a memory by id")
 	fmt.Fprintln(w, "  recall [hint]     ranked, budgeted recall (--files --symbols --kind --limit --budget)")

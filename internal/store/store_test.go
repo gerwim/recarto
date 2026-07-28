@@ -3,7 +3,9 @@ package store
 import (
 	"context"
 	"database/sql"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -397,5 +399,306 @@ func TestWriteTxCommitsAndRollsBack(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatalf("row count = %d, want 1 (rollback failed)", count)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Corruption recovery at open time
+//
+// The corruption helpers (page smashing, seeding) live in repair_test.go.
+// ---------------------------------------------------------------------------
+
+// buildStoreWithCorruptMemories is the mirror image of
+// buildStoreWithCorruptGraph: the code graph is written first, so smashing
+// everything past that point damages the MEMORY pages while leaving the graph
+// readable. That is the shape of the reported failure — graph reads work all
+// session, then record_memory fails.
+func buildStoreWithCorruptMemories(t *testing.T, path string) {
+	t.Helper()
+	ctx := context.Background()
+
+	st, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedGraph(t, st, 200)
+	if err := st.Checkpoint(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	graphEnd := fi.Size()
+
+	st, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedPrecious(t, st)
+	if err := st.Checkpoint(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	smashPagesFrom(t, path, graphEnd)
+	assertCorrupt(t, path)
+}
+
+func quarantines(t *testing.T, path string) []string {
+	t.Helper()
+	all, err := filepath.Glob(path + ".corrupt-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []string
+	for _, m := range all {
+		if !strings.HasSuffix(m, "-wal") && !strings.HasSuffix(m, "-shm") {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// TestOpenAutoRepairsAnUnopenableStore is the reactive open-time trigger: a
+// store SQLite refuses outright must not take the session down — Open rebuilds
+// it and returns a usable store, keeping the damaged file for forensics.
+func TestOpenAutoRepairsAnUnopenableStore(t *testing.T) {
+	t.Setenv("RECARTO_AUTO_REPAIR", "")
+	path := filepath.Join(t.TempDir(), "store.db")
+	st, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedPrecious(t, st)
+	if err := st.Checkpoint(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	st.Close()
+	smashHeader(t, path)
+
+	// Sanity: without repair this open fails.
+	if _, err := openWith(path, 5000, openConfig{}, false); err == nil {
+		t.Fatal("expected a header-smashed store to be unopenable")
+	} else if !IsCorrupt(err) {
+		t.Fatalf("unopenable store error not classified as corruption: %v", err)
+	}
+
+	st, err = Open(path)
+	if err != nil {
+		t.Fatalf("Open did not self-heal: %v", err)
+	}
+	defer st.Close()
+	if err := st.WriteTx(context.Background(), func(c Conn) error {
+		_, err := c.ExecContext(context.Background(),
+			`INSERT INTO memories(id,kind,title,body,search_text,created_at,updated_at)
+			 VALUES ('fresh','learning','t','b','t b',1,1)`)
+		return err
+	}); err != nil {
+		t.Fatalf("repaired store is not writable: %v", err)
+	}
+	if q := quarantines(t, path); len(q) != 1 {
+		t.Fatalf("quarantined files = %v, want exactly one", q)
+	}
+}
+
+// TestOpenHonorsAutoRepairKillSwitch: RECARTO_AUTO_REPAIR=0 must surface the
+// original error untouched, so an operator can inspect the store before
+// anything rewrites it.
+func TestOpenHonorsAutoRepairKillSwitch(t *testing.T) {
+	t.Setenv("RECARTO_AUTO_REPAIR", "0")
+	path := filepath.Join(t.TempDir(), "store.db")
+	st, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Checkpoint(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	st.Close()
+	smashHeader(t, path)
+
+	if _, err := Open(path); err == nil {
+		t.Fatal("Open repaired the store despite RECARTO_AUTO_REPAIR=0")
+	} else if !IsCorrupt(err) {
+		t.Fatalf("error = %v, want the original corruption error", err)
+	}
+	if q := quarantines(t, path); len(q) != 0 {
+		t.Fatalf("store was quarantined despite the kill switch: %v", q)
+	}
+}
+
+// TestOpenWithQuickCheckRepairsAStoreThatOpensCleanly is the reported repro: the
+// store opens and reads perfectly, so nothing reactive ever fires — only the
+// proactive check catches it, before the session's first write does.
+func TestOpenWithQuickCheckRepairsAStoreThatOpensCleanly(t *testing.T) {
+	t.Setenv("RECARTO_AUTO_REPAIR", "")
+	t.Setenv("RECARTO_QUICKCHECK_INTERVAL", "")
+	path := filepath.Join(t.TempDir(), "store.db")
+	buildStoreWithCorruptGraph(t, path)
+
+	// A plain open succeeds and serves memory reads — this is why the damage
+	// went unnoticed until a write hit it.
+	plain, err := Open(path)
+	if err != nil {
+		t.Fatalf("plain Open failed, so this is not the reported scenario: %v", err)
+	}
+	var n int
+	if err := plain.DB.QueryRow(`SELECT count(*) FROM memories`).Scan(&n); err != nil {
+		t.Fatalf("memory reads should still work on this store: %v", err)
+	}
+	plain.Close()
+	if q := quarantines(t, path); len(q) != 0 {
+		t.Fatalf("a plain open must not repair: %v", q)
+	}
+
+	st, err := Open(path, WithQuickCheck())
+	if err != nil {
+		t.Fatalf("Open with quick check: %v", err)
+	}
+	defer st.Close()
+	if q := quarantines(t, path); len(q) != 1 {
+		t.Fatalf("quick check did not repair the store (quarantines: %v)", q)
+	}
+	if err := checkIntegrity(context.Background(), st.DB, `PRAGMA integrity_check`); err != nil {
+		t.Errorf("store still corrupt after quick-check repair: %v", err)
+	}
+	if got := scalar(t, st.DB, `SELECT count(*) FROM memories`); got != n {
+		t.Errorf("memories = %d after repair, want the %d that were readable", got, n)
+	}
+}
+
+// TestQuickCheckStampRateLimitsTheCheck: the check is expensive on a large
+// store, so a passing one is stamped and not repeated within the interval.
+func TestQuickCheckStampRateLimitsTheCheck(t *testing.T) {
+	t.Setenv("RECARTO_AUTO_REPAIR", "")
+	t.Setenv("RECARTO_QUICKCHECK_INTERVAL", "")
+	path := filepath.Join(t.TempDir(), "store.db")
+
+	st, err := Open(path, WithQuickCheck())
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedPrecious(t, st)
+	if err := st.Checkpoint(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	st.Close()
+	if _, err := os.Stat(quickCheckStamp(path)); err != nil {
+		t.Fatalf("a passing quick check must leave a stamp: %v", err)
+	}
+
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedGraph(t, st, 200)
+	if err := st.Checkpoint(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	st.Close()
+	smashPagesFrom(t, path, fi.Size())
+	assertCorrupt(t, path)
+
+	// Stamp is fresh → the check is skipped and the damage is not noticed yet.
+	st, err = Open(path, WithQuickCheck())
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.Close()
+	if q := quarantines(t, path); len(q) != 0 {
+		t.Fatalf("the check ran despite a fresh stamp: %v", q)
+	}
+
+	// Age the stamp past the interval → the check runs and repairs.
+	old := time.Now().Add(-48 * time.Hour)
+	if err := os.Chtimes(quickCheckStamp(path), old, old); err != nil {
+		t.Fatal(err)
+	}
+	st, err = Open(path, WithQuickCheck())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if q := quarantines(t, path); len(q) != 1 {
+		t.Fatalf("an expired stamp must let the check run again (quarantines: %v)", q)
+	}
+}
+
+func TestQuickCheckIntervalZeroDisablesTheCheck(t *testing.T) {
+	t.Setenv("RECARTO_AUTO_REPAIR", "")
+	t.Setenv("RECARTO_QUICKCHECK_INTERVAL", "0")
+	path := filepath.Join(t.TempDir(), "store.db")
+	buildStoreWithCorruptGraph(t, path)
+
+	st, err := Open(path, WithQuickCheck())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if q := quarantines(t, path); len(q) != 0 {
+		t.Fatalf("the check ran despite RECARTO_QUICKCHECK_INTERVAL=0: %v", q)
+	}
+	if _, err := os.Stat(quickCheckStamp(path)); !os.IsNotExist(err) {
+		t.Error("a disabled check must not stamp")
+	}
+}
+
+// TestWriteTxWrapsCorruptionWithGuidance: a write that hits corruption inside a
+// live session cannot be repaired in place (renaming the store out from under an
+// open pool is not safe), so it must at least tell the caller what to do — this
+// is the message record_memory now returns instead of a bare SQLite error.
+func TestWriteTxWrapsCorruptionWithGuidance(t *testing.T) {
+	t.Setenv("RECARTO_AUTO_REPAIR", "")
+	path := filepath.Join(t.TempDir(), "store.db")
+	buildStoreWithCorruptMemories(t, path)
+
+	st, err := Open(path)
+	if err != nil {
+		t.Fatalf("this store is supposed to open cleanly: %v", err)
+	}
+	defer st.Close()
+
+	ctx := context.Background()
+	err = st.WriteTx(ctx, func(c Conn) error {
+		// Rewriting every row is guaranteed to walk into the damaged pages.
+		_, err := c.ExecContext(ctx, `UPDATE memories SET title = title || '!'`)
+		return err
+	})
+	if err == nil {
+		t.Fatal("expected the write to fail on the corrupt store")
+	}
+	if !IsCorrupt(err) {
+		t.Fatalf("wrapped error lost its corruption classification: %v", err)
+	}
+	for _, want := range []string{"memory store is corrupt", "recarto repair"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %q", err, want)
+		}
+	}
+
+	// And the store heals on the next open, which is what the guidance promises.
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+	healed, err := Open(path, WithQuickCheck())
+	if err != nil {
+		t.Fatalf("next open did not heal the store: %v", err)
+	}
+	defer healed.Close()
+	if err := healed.WriteTx(ctx, func(c Conn) error {
+		_, err := c.ExecContext(ctx, `UPDATE memories SET title = title || '!'`)
+		return err
+	}); err != nil {
+		t.Fatalf("write still failing after the healing open: %v", err)
 	}
 }

@@ -116,7 +116,10 @@ func (s *Server) storeFor(repoKey string) (*repoStore, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, fmt.Errorf("repo %s: %w", repoKey, err)
 	}
-	st, err := store.Open(path)
+	// The sync server is long-lived and holds each repo store open for its whole
+	// lifetime, so it takes the proactive corruption check on first open — the
+	// same reasoning as `recarto serve`.
+	st, err := store.Open(path, store.WithQuickCheck())
 	if err != nil {
 		return nil, fmt.Errorf("repo %s: open store: %w", repoKey, err)
 	}

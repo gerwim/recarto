@@ -29,7 +29,11 @@ type Bundle struct {
 
 // Open opens — creating and migrating on first use — the global feedback store.
 // It ignores the working directory and git: the path is fixed under the cache dir.
-func Open(clk clock.Clock) (*Bundle, error) {
+// storeOpts reach store.Open unchanged; the MCP report handler passes
+// store.WithQuickCheck because it runs inside a long-lived serving process, and
+// this store is opened nowhere else in that process (so it would otherwise never
+// get a proactive check).
+func Open(clk clock.Clock, storeOpts ...store.Option) (*Bundle, error) {
 	if clk == nil {
 		clk = clock.Real{}
 	}
@@ -37,7 +41,7 @@ func Open(clk clock.Clock) (*Bundle, error) {
 	if err != nil {
 		return nil, err
 	}
-	st, err := store.Open(path)
+	st, err := store.Open(path, storeOpts...)
 	if err != nil {
 		return nil, err
 	}

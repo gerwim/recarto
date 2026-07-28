@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"database/sql/driver"
+	"errors"
 	"fmt"
 	"math/rand/v2"
 	"os"
@@ -35,16 +36,88 @@ type Store struct {
 	path string
 }
 
+// openConfig holds Open's optional behaviour.
+type openConfig struct {
+	quickCheck bool
+}
+
+// Option customises Open.
+type Option func(*openConfig)
+
+// WithQuickCheck enables a proactive PRAGMA quick_check at open time, rate
+// limited by the sidecar stamp file <path>.quickcheck (whose mtime records the
+// last passing check) to at most once per RECARTO_QUICKCHECK_INTERVAL — default
+// 24h, "0" disables it entirely.
+//
+// It exists because the damaging case is a store that opens and READS perfectly
+// while its damage sits in pages a read never touches: the session runs happily
+// until the first write fails. A long-lived serving process therefore checks
+// once at startup and repairs before serving, so the session begins healthy.
+// Short-lived opens (hooks, one-shot CLI commands) deliberately do not pass this
+// — they stay exactly as cheap as before and are covered by the reactive
+// open-time repair below.
+//
+// The stamp is a plain sidecar file rather than a meta row precisely because it
+// must be readable and writable when the database is not.
+func WithQuickCheck() Option { return func(c *openConfig) { c.quickCheck = true } }
+
 // Open creates (if needed) and opens the store at path, applies PRAGMAs on
-// every connection, and runs migrations.
-func Open(path string) (*Store, error) { return open(path, 5000) }
+// every connection, and runs migrations. A store found to be corrupt is
+// repaired in place of failing (see Repair), unless RECARTO_AUTO_REPAIR=0.
+func Open(path string, opts ...Option) (*Store, error) { return open(path, 5000, opts...) }
 
 // open is Open with a configurable busy_timeout (ms), so tests can force
 // SQLITE_BUSY quickly to exercise the WriteTx retry layer.
-func open(path string, busyTimeoutMs int) (*Store, error) {
+func open(path string, busyTimeoutMs int, opts ...Option) (*Store, error) {
+	var cfg openConfig
+	for _, o := range opts {
+		o(&cfg)
+	}
+	return openWith(path, busyTimeoutMs, cfg, true)
+}
+
+// openWith opens the store, optionally repairing it once. mayRepair is cleared
+// on the retry after a repair so a store that is still unopenable surfaces its
+// error instead of looping.
+func openWith(path string, busyTimeoutMs int, cfg openConfig, mayRepair bool) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, fmt.Errorf("create cache dir: %w", err)
 	}
+	// A repair renames the store file set aside; opening during that window would
+	// bind to the quarantined inode. The repair lock is honoured by every opener,
+	// not just by competing repairers.
+	waitForRepair(path)
+
+	db, err := openPool(path, busyTimeoutMs)
+	if err != nil {
+		return nil, err
+	}
+	err = prepare(db, path, cfg)
+	if err == nil {
+		return &Store{DB: db, path: path}, nil
+	}
+	db.Close()
+
+	if !mayRepair || !IsCorrupt(err) || !AutoRepairEnabled() {
+		return nil, err
+	}
+	stats, rerr := Repair(path)
+	if errors.Is(rerr, ErrRepairContended) {
+		// Another process is already repairing this store; wait it out and try the
+		// (probably fixed) file once more rather than repairing on top of it.
+		waitForRepair(path)
+		return openWith(path, busyTimeoutMs, cfg, false)
+	}
+	if rerr != nil {
+		return nil, fmt.Errorf("%w (automatic repair failed: %v — run 'recarto repair')", err, rerr)
+	}
+	fmt.Fprintf(os.Stderr, "recarto: repaired corrupt store %s (%v): %s\n", path, err, stats)
+	return openWith(path, busyTimeoutMs, cfg, false)
+}
+
+// openPool builds the connection pool for a store, applying the standard
+// per-connection PRAGMAs. It performs no I/O of its own (sql.Open is lazy).
+func openPool(path string, busyTimeoutMs int) (*sql.DB, error) {
 	// cache_size and temp_store are left at the pool default here (modernc's
 	// SQLITE_TEMP_STORE=1 makes the default an on-disk temp store) and applied
 	// transiently by WriteTxBulk instead. An in-memory temp store speeds a large
@@ -65,16 +138,102 @@ func open(path string, busyTimeoutMs int) (*Store, error) {
 	// WAL allows many readers + one writer across processes; in-process we
 	// additionally serialize writers via wmu, so a small pool is fine.
 	db.SetMaxOpenConns(8)
-	if err := db.Ping(); err != nil {
-		db.Close()
+	return db, nil
+}
+
+// openRepairTarget opens the replacement database a repair builds aside.
+// Foreign keys are OFF: salvage inserts rows whose parents may be unreadable,
+// and repair restores referential integrity explicitly (orphanCleanup) before
+// the file goes into service. A single connection keeps the final
+// wal_checkpoint(TRUNCATE) from being blocked by an idle pooled reader.
+func openRepairTarget(path string) (*sql.DB, error) {
+	db, err := sql.Open("sqlite", fmt.Sprintf("file:%s"+
+		"?_pragma=busy_timeout(5000)"+
+		"&_pragma=journal_mode(WAL)"+
+		"&_pragma=synchronous(NORMAL)"+
+		"&_pragma=foreign_keys(OFF)", path))
+	if err != nil {
 		return nil, err
 	}
-	s := &Store{DB: db, path: path}
-	if err := Migrate(db); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("migrate: %w", err)
+	db.SetMaxOpenConns(1)
+	return db, nil
+}
+
+// openRepairSource opens the corrupt database a repair salvages from. It is a
+// RAW handle: no store.Open (which would migrate the damaged file, and could
+// recurse into another repair) and no PRAGMAs beyond a busy timeout. In
+// particular it is not opened `immutable` — an ordinary open lets SQLite recover
+// and apply the existing WAL, which is where the most recently recorded
+// memories live.
+func openRepairSource(path string) (*sql.DB, error) {
+	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(2000)")
+	if err != nil {
+		return nil, err
 	}
-	return s, nil
+	db.SetMaxOpenConns(1)
+	return db, nil
+}
+
+// prepare readies a freshly opened pool: connectivity, migrations, and the
+// optional proactive integrity check. Every error it returns is classified by
+// IsCorrupt, so openWith can route damage to Repair.
+func prepare(db *sql.DB, path string, cfg openConfig) error {
+	if err := db.Ping(); err != nil {
+		return err
+	}
+	if err := Migrate(db); err != nil {
+		return fmt.Errorf("migrate: %w", err)
+	}
+	if cfg.quickCheck {
+		return runQuickCheck(db, path)
+	}
+	return nil
+}
+
+// quickCheckStamp is the sidecar file whose mtime records the last passing
+// proactive check.
+func quickCheckStamp(path string) string { return path + ".quickcheck" }
+
+// quickCheckInterval returns how often WithQuickCheck actually runs a check.
+// RECARTO_QUICKCHECK_INTERVAL takes a Go duration; 0 (or an unparseable value
+// of "0") disables the check entirely.
+func quickCheckInterval() time.Duration {
+	v := strings.TrimSpace(os.Getenv("RECARTO_QUICKCHECK_INTERVAL"))
+	if v == "" {
+		return 24 * time.Hour
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		return 24 * time.Hour
+	}
+	if d < 0 {
+		return 0
+	}
+	return d
+}
+
+// runQuickCheck runs PRAGMA quick_check(1) at most once per interval, stamping
+// the sidecar on success. quick_check is used rather than integrity_check
+// because it stops at the first problem and skips the (expensive) index-content
+// verification — enough to decide "this file needs rebuilding".
+func runQuickCheck(db *sql.DB, path string) error {
+	interval := quickCheckInterval()
+	if interval == 0 {
+		return nil
+	}
+	stamp := quickCheckStamp(path)
+	if fi, err := os.Stat(stamp); err == nil && time.Since(fi.ModTime()) < interval {
+		return nil
+	}
+	if err := checkIntegrity(context.Background(), db, `PRAGMA quick_check(1)`); err != nil {
+		return err
+	}
+	// Best effort: a store dir we cannot stamp just means checking every open.
+	if f, err := os.OpenFile(stamp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644); err == nil {
+		_ = f.Close()
+		_ = os.Chtimes(stamp, time.Now(), time.Now())
+	}
+	return nil
 }
 
 // Close closes the underlying pool.
@@ -156,6 +315,9 @@ func (s *Store) WriteTxBulk(ctx context.Context, fn func(c Conn) error) error {
 func (s *Store) writeTx(ctx context.Context, fn func(c Conn) error, bulk bool) error {
 	for attempt := 0; ; attempt++ {
 		err := s.writeTxOnce(ctx, fn, bulk)
+		if IsCorrupt(err) {
+			return corruptGuidance(err)
+		}
 		if err == nil || !isBusy(err) || attempt >= maxWriteRetries {
 			return err
 		}
@@ -305,6 +467,23 @@ func (s *Store) writeTxOnce(ctx context.Context, fn func(c Conn) error, bulk boo
 		return err
 	}
 	return nil
+}
+
+// corruptGuidance turns a raw SQLite corruption error into an actionable one.
+// It is applied in writeTx, the single choke point every write goes through, so
+// the MCP handlers (record_memory and friends, which just propagate) and the CLI
+// both report the same next step instead of a bare "database disk image is
+// malformed (11)".
+//
+// Recovery is deliberately not attempted mid-session: repair renames the store
+// file set aside, which is not safe to do under a live connection pool that
+// unsynchronised readers all over the codebase are using. The next Open repairs
+// it — and `recarto serve` additionally checks proactively at startup
+// (WithQuickCheck), so the following session begins on a healthy store.
+func corruptGuidance(err error) error {
+	return fmt.Errorf("memory store is corrupt: %w — run 'recarto repair' to rebuild it "+
+		"(a quarantined copy of the damaged file is kept next to the store); "+
+		"a new session repairs it automatically on open", err)
 }
 
 // isBusy reports whether err is a transient SQLite lock contention error, the
