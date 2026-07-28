@@ -116,13 +116,28 @@ func (s *Server) storeFor(repoKey string) (*repoStore, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, fmt.Errorf("repo %s: %w", repoKey, err)
 	}
-	st, err := store.Open(path)
+	// The sync server is long-lived and holds each repo store open for its whole
+	// lifetime, so it takes the proactive corruption check on first open — the
+	// same reasoning as `recarto serve`.
+	st, err := store.Open(path, store.WithQuickCheck())
 	if err != nil {
 		return nil, fmt.Errorf("repo %s: open store: %w", repoKey, err)
 	}
 	if err := EnsureSyncSchema(st.DB); err != nil {
 		_ = st.Close()
 		return nil, fmt.Errorf("repo %s: ensure sync schema: %w", repoKey, err)
+	}
+	// sync_index is server-only bookkeeping that store.Repair deliberately does
+	// not salvage, so a store that was rebuilt after corruption comes back with
+	// its memories but no index — and would then serve empty pulls forever.
+	// Reindexing anything missing here makes that self-healing.
+	reindexed, err := reconcileSyncIndex(context.Background(), st)
+	if err != nil {
+		_ = st.Close()
+		return nil, fmt.Errorf("repo %s: reconcile sync index: %w", repoKey, err)
+	}
+	if reindexed > 0 {
+		log.Printf("sync: reindexed %d record(s) into %s's sync index", reindexed, repoKey)
 	}
 	rs := &repoStore{st: st, eng: memory.New(st, ledger.New(st), s.clk)}
 	s.stores[repoKey] = rs

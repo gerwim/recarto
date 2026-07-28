@@ -29,6 +29,13 @@ type Config struct {
 	CWD    string        // "" → os.Getwd()
 	Runner gitctx.Runner // nil → gitctx.Real{Dir: CWD}
 	Clock  clock.Clock   // nil → clock.Real{}
+	// QuickCheck enables the store's proactive corruption check at open time
+	// (store.WithQuickCheck) for every store this App opens: the primary repo,
+	// the RECARTO_REPOS extras and the workspace store. Only long-lived serving
+	// processes set it — `recarto serve` — so a session starts on a store that
+	// has been proven readable rather than discovering damage on its first write.
+	// One-shot commands and hooks leave it off and stay as cheap as before.
+	QuickCheck bool
 }
 
 // RepoContext is one served repo root with its own store, engine and graph.
@@ -122,7 +129,8 @@ func Open(cfg Config) (*App, error) {
 	if err != nil {
 		return nil, err
 	}
-	st, err := store.Open(path)
+	storeOpts := storeOptions(cfg)
+	st, err := store.Open(path, storeOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -135,7 +143,7 @@ func Open(cfg Config) (*App, error) {
 	}
 	eng.SetRefResolver(graphRefResolver{st: st})
 	syncer, _ := remotesync.New(remotesync.ConfigFromEnv(), gc, eng, st)
-	ws, err := workspace.Open(clk)
+	ws, err := workspace.Open(clk, storeOpts...)
 	if err != nil {
 		gr.Close()
 		_ = st.Close()
@@ -144,13 +152,22 @@ func Open(cfg Config) (*App, error) {
 
 	a := &App{
 		Git: gc, Runner: runner, Store: st, Ledger: led, Engine: eng, Graph: gr, Clock: clk,
-		Sync: syncer, Workspace: ws, Repos: openRepos(gc.RepoID, clk), SyncTrigger: make(chan struct{}, 1),
+		Sync: syncer, Workspace: ws, Repos: openRepos(gc.RepoID, clk, storeOpts...), SyncTrigger: make(chan struct{}, 1),
 	}
 	if err := a.writeMeta(context.Background()); err != nil {
 		_ = a.Close()
 		return nil, err
 	}
 	return a, nil
+}
+
+// storeOptions maps the App config onto the store-level options every store
+// this process opens should share.
+func storeOptions(cfg Config) []store.Option {
+	if cfg.QuickCheck {
+		return []store.Option{store.WithQuickCheck()}
+	}
+	return nil
 }
 
 // Close releases the graph engine's parser, the workspace store, the extra
@@ -237,7 +254,7 @@ func (a *App) SyncAll(ctx context.Context) {
 // unmounted host's config), not a git repo, unresolvable, or a duplicate of
 // the primary or an earlier entry is skipped — an incomplete list must never
 // fail the session.
-func openRepos(primaryID string, clk clock.Clock) []*RepoContext {
+func openRepos(primaryID string, clk clock.Clock, storeOpts ...store.Option) []*RepoContext {
 	seen := map[string]bool{primaryID: true}
 	var out []*RepoContext
 	for _, p := range filepath.SplitList(os.Getenv("RECARTO_REPOS")) {
@@ -252,7 +269,7 @@ func openRepos(primaryID string, clk clock.Clock) []*RepoContext {
 		if err != nil {
 			continue
 		}
-		st, err := store.Open(path)
+		st, err := store.Open(path, storeOpts...)
 		if err != nil {
 			continue
 		}

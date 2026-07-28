@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"time"
 
@@ -31,26 +32,19 @@ func Doctor(ctx context.Context, a *app.App, w io.Writer) error {
 
 	// integrity_check returns "ok" as a single row when healthy, or one row per
 	// problem when corrupt — read them all so the detail isn't silently truncated.
-	rows, err := a.Store.DB.QueryContext(ctx, `PRAGMA integrity_check`)
+	// A hard failure of the query or the scan is itself a common corruption
+	// outcome, so it reports as a failed check with the repair hint rather than
+	// aborting doctor with a bare SQLite error.
+	integ, err := integrityDetail(ctx, a)
 	if err != nil {
-		return err
+		integ = err.Error()
 	}
-	var msgs []string
-	for rows.Next() {
-		var s string
-		if err := rows.Scan(&s); err != nil {
-			rows.Close()
-			return err
-		}
-		msgs = append(msgs, s)
+	check("integrity", err == nil && integ == "ok", integ)
+	if err != nil || integ != "ok" {
+		fmt.Fprintln(w, "  hint: run 'recarto repair' to rebuild the store, salvaging your memories")
 	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return err
-	}
-	rows.Close()
-	integ := strings.Join(msgs, "; ")
-	check("integrity", integ == "ok", integ)
+
+	reportLastRepair(ctx, a, w)
 
 	var uv int
 	if err := a.Store.DB.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&uv); err != nil {
@@ -82,4 +76,48 @@ func Doctor(ctx context.Context, a *app.App, w io.Writer) error {
 		return fmt.Errorf("doctor: one or more checks failed")
 	}
 	return nil
+}
+
+// integrityDetail runs PRAGMA integrity_check and joins its findings. A healthy
+// store answers with the single row "ok".
+func integrityDetail(ctx context.Context, a *app.App) (string, error) {
+	rows, err := a.Store.DB.QueryContext(ctx, `PRAGMA integrity_check`)
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+	var msgs []string
+	for rows.Next() {
+		var s string
+		if err := rows.Scan(&s); err != nil {
+			return "", err
+		}
+		msgs = append(msgs, s)
+	}
+	if err := rows.Err(); err != nil {
+		return "", err
+	}
+	return strings.Join(msgs, "; "), nil
+}
+
+// reportLastRepair surfaces what an earlier automatic (or manual) repair did, so
+// a store that has been silently rebuilt — and a recurring source of corruption —
+// is visible rather than invisible. Absent keys simply print nothing.
+func reportLastRepair(ctx context.Context, a *app.App, w io.Writer) {
+	var ts, blob string
+	err := a.Store.DB.QueryRowContext(ctx,
+		`SELECT COALESCE(MAX(CASE WHEN key='repair_last_ts'    THEN value END), ''),
+		        COALESCE(MAX(CASE WHEN key='repair_last_stats' THEN value END), '')
+		   FROM meta WHERE key IN ('repair_last_ts','repair_last_stats')`).Scan(&ts, &blob)
+	if err != nil || ts == "" {
+		return
+	}
+	when := ts
+	if n, cerr := strconv.ParseInt(ts, 10, 64); cerr == nil {
+		when = time.Unix(n, 0).Format(time.RFC3339)
+	}
+	fmt.Fprintf(w, "[warn] last repair: %s\n", when)
+	if blob != "" {
+		fmt.Fprintf(w, "  %s\n", blob)
+	}
 }

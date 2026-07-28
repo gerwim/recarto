@@ -7,6 +7,7 @@ import (
 	"git.gerwim.nl/gerwim/recarto/internal/app"
 	"git.gerwim.nl/gerwim/recarto/internal/feedback"
 	"git.gerwim.nl/gerwim/recarto/internal/memory"
+	"git.gerwim.nl/gerwim/recarto/internal/store"
 	"git.gerwim.nl/gerwim/recarto/internal/version"
 )
 
@@ -37,7 +38,10 @@ func reportRecartoIssue(ctx context.Context, a *app.App, in ReportRecartoIssueIn
 	if in.SignalType == "" || in.Title == "" || in.Detail == "" {
 		return ReportRecartoIssueOutput{}, fmt.Errorf("signal_type, title and detail are required")
 	}
-	b, err := feedback.Open(a.Clock)
+	// This handler is the only thing that opens the feedback store inside a
+	// long-lived `serve` process, so it carries the proactive corruption check
+	// (rate-limited to once a day by the store's stamp file).
+	b, err := feedback.Open(a.Clock, store.WithQuickCheck())
 	if err != nil {
 		return ReportRecartoIssueOutput{}, err
 	}

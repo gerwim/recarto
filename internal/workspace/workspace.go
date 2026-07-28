@@ -58,8 +58,10 @@ type Bundle struct {
 
 // Open opens (creating and migrating on first use) the workspace store named
 // by RECARTO_WORKSPACE, or (nil, nil) when the env var is unset — the feature
-// is entirely opt-in and its absence is never an error.
-func Open(clk clock.Clock) (*Bundle, error) {
+// is entirely opt-in and its absence is never an error. storeOpts are passed
+// through to store.Open, so a long-lived serving process can request the
+// proactive corruption check (store.WithQuickCheck) for this store too.
+func Open(clk clock.Clock, storeOpts ...store.Option) (*Bundle, error) {
 	name := Name()
 	if name == "" {
 		return nil, nil
@@ -72,7 +74,7 @@ func Open(clk clock.Clock) (*Bundle, error) {
 	if err != nil {
 		return nil, err
 	}
-	st, err := store.Open(path)
+	st, err := store.Open(path, storeOpts...)
 	if err != nil {
 		return nil, err
 	}

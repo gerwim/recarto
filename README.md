@@ -187,6 +187,7 @@ recarto graph <sub>       query the code graph (search|grep|callers|callees|impl
                           graph annotated <Attribute>  (symbols decorated with [Attribute] / @decorator)
                           graph outline <file>  (a file's symbols/signatures/lines, instead of reading it)
 recarto compact           prune/decay memory (--force --dry-run --budget-tokens)
+recarto repair            rebuild a corrupt store, salvaging memories (--path <store.db>)
 recarto serve             run the MCP server over stdio (used by the agents)
 ```
 
@@ -255,6 +256,46 @@ Measure-Command { recarto recall "auth flow" }
 - **No daemon.** Hooks are pure exit-0 CLI invocations; the code graph reconciles
   lazily at session start and incrementally on each edit.
 - **Languages:** Go, C#, TypeScript (+TSX), JavaScript (+JSX) via tree-sitter.
+
+## If the store gets corrupted
+
+A SQLite file can be damaged by things outside Recarto's control — a host crash
+mid-write, a disk error, a backup tool or antivirus rewriting the cache. The symptom
+is `database disk image is malformed (11)`: often reads keep working for a whole
+session and the first write is what fails, because the damage sits in pages a read
+never touches.
+
+Recarto repairs itself:
+
+- **On open.** A store that fails to open is rebuilt automatically, and the session
+  continues.
+- **At `recarto serve` startup.** A `PRAGMA quick_check` runs at most once per
+  `RECARTO_QUICKCHECK_INTERVAL` (default `24h`; `0` disables it), so a store that
+  opens and reads fine but is damaged underneath is caught *before* the session's
+  first write rather than by it. Hooks and one-shot CLI commands skip this and stay
+  as fast as before.
+- **On demand.** `recarto repair` rebuilds this repo's store; `recarto repair --path
+  <store.db>` targets any other one (the workspace or feedback store, another repo's
+  cache). It has no corruption precondition, so it doubles as "rebuild my store,
+  keep my memories".
+
+A repair never edits the damaged file. It builds a replacement next to it, salvaging
+row by row everything unregenerable — memories, their refs and MinHash bands,
+counters, sessions, sync tombstones/outbox and graph deltas — verifies the result on a
+fresh connection, and only then swaps it in. **The code graph is deliberately not
+salvaged:** it is derived from your source, and the next session reindexes it.
+
+The damaged file is renamed aside to `<store.db>.corrupt-<timestamp>` (with its
+`-wal`/`-shm`), never deleted; quarantines older than 7 days are pruned, and the
+newest is always kept. `recarto doctor` reports the last repair and its per-table
+salvage counts. If HTTP sync is configured, the next sync re-converges anything
+salvage could not recover.
+
+A write that hits corruption *during* a session is not repaired in place — swapping
+the file under a live connection pool is not safe — so it returns an actionable error
+instead; the next session heals the store. `RECARTO_AUTO_REPAIR=0` disables every
+automatic repair (`recarto repair` still works) if you would rather inspect a damaged
+store before anything rewrites it.
 
 ## Cross-repo workspace memory (RECARTO_WORKSPACE)
 
