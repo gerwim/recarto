@@ -42,6 +42,14 @@ import (
 // Other PROCESSES may still hold the file. The repair lockfile serialises
 // repairers and is also honoured by ordinary openers (waitForRepair), so a
 // concurrent recarto process does not open the store during the rename window.
+// The lock is HEARTBEATED: its owner touches the file's mtime every
+// repairHeartbeatInterval, so a fresh mtime means "a repairer is alive right
+// now" no matter how long the repair takes. Waiters therefore have no deadline
+// — they block for exactly as long as the repair runs — while a lock whose
+// heartbeat stopped for repairLockStaleAfter is treated as abandoned and
+// claimed by an atomic rename, so two processes can never both conclude they
+// stole it and start overlapping repairs.
+//
 // A foreign process that is mid-write on the quarantined inode loses those
 // writes; that is acceptable for an exceptional event (those writes were
 // failing anyway) and configured HTTP sync re-converges the store afterwards.
@@ -63,9 +71,11 @@ type TableStats struct {
 type RepairStats struct {
 	// Tables maps table name to its salvage outcome.
 	Tables map[string]TableStats `json:"tables"`
-	// SourceOpen reports whether the corrupt file's schema could be read at all.
-	// False means nothing was salvageable and the replacement is an empty,
-	// healthy store (the original is still in Quarantine).
+	// SourceOpen reports whether ANYTHING was readable in the corrupt file: true
+	// when its schema could be enumerated, and also when enumeration failed but a
+	// blind per-table salvage still recovered rows. False therefore means nothing
+	// at all was readable and the replacement is an empty, healthy store (the
+	// original is still in Quarantine).
 	SourceOpen bool `json:"source_open"`
 	// Quarantine is the path the corrupt file was renamed to, or "" when there
 	// was no pre-existing file.
@@ -109,6 +119,12 @@ var ErrRepairContended = errors.New("store: a repair of this store is already in
 // symbol-level index changes read by graph.Engine.DeltaBaseline/DeltasSince
 // alongside sessions, NOT rebuildable graph state (migration v19 introduced it
 // specifically outside the wipe set).
+//
+// The sync server's sync_index is deliberately absent: it is server-only (not in
+// the client migration set, so a freshly migrated replacement has no such table
+// to copy into), and a PARTIALLY salvaged index is worse than none — rows missing
+// from it would silently vanish from every future pull. The server rebuilds it on
+// open instead, via syncserver.reconcileSyncIndex.
 var preciousTables = []string{
 	"meta",
 	"counters",
@@ -141,16 +157,22 @@ var orphanCleanup = []struct{ table, sql string }{
 	{"memory_sync_outbox", `DELETE FROM memory_sync_outbox WHERE memory_id NOT IN (SELECT id FROM memories)`},
 }
 
-const (
-	// repairLockTTL is how long a repair lockfile is honoured before it is
-	// treated as stale (left by a killed process) and stolen.
-	repairLockTTL = 10 * time.Minute
-	// repairWaitTimeout bounds how long an ordinary opener waits for an
-	// in-progress repair before giving up and opening anyway.
-	repairWaitTimeout = 30 * time.Second
-	// quarantineRetention is how long quarantined corrupt files are kept. The
-	// newest set is always kept regardless of age.
-	quarantineRetention = 7 * 24 * time.Hour
+// quarantineRetention is how long quarantined corrupt files are kept. The
+// newest set is always kept regardless of age.
+const quarantineRetention = 7 * 24 * time.Hour
+
+// The repair lock's liveness parameters. They are variables, not constants, so
+// tests can shrink them to milliseconds instead of sleeping for real minutes.
+var (
+	// repairHeartbeatInterval is how often the lock's owner refreshes its mtime.
+	// This is what makes "the mtime is fresh" mean "a repairer is alive", so a
+	// repair of any duration keeps its lock honoured.
+	repairHeartbeatInterval = 5 * time.Second
+	// repairLockStaleAfter is the mtime age at which a lock is considered
+	// abandoned (its owner was killed, the machine crashed). It must be a
+	// comfortable multiple of the heartbeat so a merely slow scheduler never
+	// looks like a dead process.
+	repairLockStaleAfter = 90 * time.Second
 )
 
 // repairVerify runs the final integrity check on the freshly built replacement.
@@ -214,8 +236,15 @@ func Repair(path string) (RepairStats, error) {
 	if err := os.Rename(tmp, path); err != nil {
 		// Put the original back so a failed swap is a no-op (this is the
 		// Windows failure mode: renaming over open handles is refused).
-		restoreQuarantine(q, path)
 		removeDBFiles(tmp)
+		if rerr := restoreQuarantine(q, path); rerr != nil {
+			// The rollback failed too: the store is NOT where it was. Keep
+			// Quarantine set so the caller can tell the user exactly where their
+			// data is.
+			return stats, fmt.Errorf(
+				"install repaired store: %w; the original store could not be restored and remains at %s (%v)",
+				err, q, rerr)
+		}
 		stats.Quarantine = ""
 		return stats, fmt.Errorf("install repaired store: %w", err)
 	}
@@ -361,6 +390,10 @@ func checkIntegrity(ctx context.Context, db *sql.DB, pragma string) error {
 	return &errCorruptCheck{detail: strings.Join(msgs, "; ")}
 }
 
+// listSourceTables enumerates the source's tables. It is a package variable so a
+// test can force enumeration to fail and prove salvage still runs.
+var listSourceTables = sourceTables
+
 // salvageInto copies the precious tables out of the (corrupt) database at
 // srcPath into dst. A source that cannot be opened at all is not an error:
 // availability wins, the replacement is simply empty, stats.SourceOpen is false
@@ -376,23 +409,32 @@ func salvageInto(ctx context.Context, srcPath string, dst *sql.DB, stats *Repair
 	defer src.Close()
 
 	// sql.Open is lazy, so "did it open" must be answered by an actual schema
-	// query — that is also what proves the b-tree root pages are readable.
-	present, err := sourceTables(ctx, src)
-	if err != nil {
-		return nil
-	}
-	stats.SourceOpen = true
+	// query. A FAILING enumeration is not proof that nothing is readable, though:
+	// a full sqlite_master scan can die on one damaged page while PRAGMA
+	// table_info — which reads a single schema row — still answers for the tables
+	// we actually want. So an enumeration failure downgrades to "try every
+	// precious table blind" rather than writing off the data; salvageTable
+	// already degrades per table.
+	present, listErr := listSourceTables(ctx, src)
 
 	for _, t := range preciousTables {
-		ts := TableStats{}
-		if !present[t] {
+		if listErr == nil && !present[t] {
 			// An older store predating this table (sync tables arrived in v20/v21,
 			// graph_deltas in v19), or a table whose schema row is unreadable.
-			ts.Note = "absent from source schema"
-			stats.Tables[t] = ts
+			stats.Tables[t] = TableStats{Note: "absent from source schema"}
 			continue
 		}
 		stats.Tables[t] = salvageTable(ctx, src, dst, t)
+	}
+
+	stats.SourceOpen = listErr == nil
+	if !stats.SourceOpen {
+		for _, ts := range stats.Tables {
+			if ts.Salvaged > 0 {
+				stats.SourceOpen = true
+				break
+			}
+		}
 	}
 	return src.Close()
 }
@@ -486,13 +528,26 @@ func salvageTable(ctx context.Context, src, dst *sql.DB, table string) TableStat
 	for i := range vals {
 		ptrs[i] = &vals[i]
 	}
+	// rejected counts rows the INSERT OR IGNORE silently dropped (a UNIQUE, CHECK
+	// or NOT NULL violation); failed counts rows whose exec errored outright.
+	// Both are rows that were read but did NOT land, so neither may be counted as
+	// salvaged — otherwise the stats, the repair metadata and `recarto repair`'s
+	// output would all overstate what was recovered.
+	var rejected, failed int
 	for rows.Next() {
 		if err := rows.Scan(ptrs...); err != nil {
 			ts.Note = "truncated mid-scan: " + err.Error()
 			break
 		}
-		if _, err := stmt.ExecContext(ctx, vals...); err != nil {
-			// A row the destination schema refuses; count it as lost and continue.
+		res, err := stmt.ExecContext(ctx, vals...)
+		if err != nil {
+			failed++
+			continue
+		}
+		// modernc always reports RowsAffected; if some future driver does not,
+		// trust the successful exec rather than under-reporting the salvage.
+		if n, raErr := res.RowsAffected(); raErr == nil && n == 0 {
+			rejected++
 			continue
 		}
 		ts.Salvaged++
@@ -511,8 +566,16 @@ func salvageTable(ctx context.Context, src, dst *sql.DB, table string) TableStat
 		}
 		return ts
 	}
-	if total > ts.Salvaged {
+	switch {
+	case total > ts.Salvaged:
 		ts.Lost = total - ts.Salvaged
+	case total < 0:
+		// The row count was itself unreadable, so the only losses we can name are
+		// the ones we watched happen.
+		ts.Lost = rejected + failed
+	}
+	if n := rejected + failed; n > 0 && ts.Note == "" {
+		ts.Note = fmt.Sprintf("%d rows rejected by replacement constraints", n)
 	}
 	return ts
 }
@@ -597,6 +660,9 @@ func writeRepairMeta(ctx context.Context, db *sql.DB, stats RepairStats) error {
 // they always travel with the main file.
 var dbSuffixes = []string{"", "-wal", "-shm"}
 
+// dbSidecars is dbSuffixes without the main file.
+var dbSidecars = []string{"-wal", "-shm"}
+
 // removeDBFiles deletes path and its WAL/SHM siblings, ignoring absence.
 func removeDBFiles(path string) {
 	for _, sfx := range dbSuffixes {
@@ -625,28 +691,64 @@ func quarantineExisting(path string, ts int64) (string, error) {
 	if err := os.Rename(path, q); err != nil {
 		return "", fmt.Errorf("quarantine corrupt store: %w", err)
 	}
-	for _, sfx := range []string{"-wal", "-shm"} {
-		if _, err := os.Stat(path + sfx); err == nil {
-			_ = os.Rename(path+sfx, q+sfx)
+	// Moving the sidecars is MANDATORY, not best effort. A stale -wal left beside
+	// the freshly installed replacement is not litter: SQLite will happily replay
+	// it into the new file and re-corrupt it. And the quarantined WAL may hold the
+	// most recent commits, so it is forensic evidence — moved, never deleted.
+	// (-shm is the sole exception: it is pure shared-memory scratch for a live
+	// connection and is rebuilt on demand, so if it cannot be moved it may be
+	// removed instead.)
+	var moved []string
+	for _, sfx := range dbSidecars {
+		if _, err := os.Stat(path + sfx); err != nil {
+			continue
 		}
+		mvErr := os.Rename(path+sfx, q+sfx)
+		if mvErr == nil {
+			moved = append(moved, sfx)
+			continue
+		}
+		if sfx == "-shm" {
+			if os.Remove(path+sfx) == nil {
+				continue
+			}
+		}
+		// Roll the whole quarantine back so the caller's "nothing was touched"
+		// invariant still holds, then report which sidecar blocked it.
+		for _, m := range moved {
+			_ = os.Rename(q+m, path+m)
+		}
+		if rerr := os.Rename(q, path); rerr != nil {
+			return "", fmt.Errorf(
+				"quarantine corrupt store: could not move %s aside (%v), and rolling back %s to %s also failed: %w",
+				path+sfx, mvErr, q, path, rerr)
+		}
+		return "", fmt.Errorf("quarantine corrupt store: could not move %s aside: %w", path+sfx, mvErr)
 	}
 	return q, nil
 }
 
 // restoreQuarantine moves a quarantined file set back to path — the rollback for
-// a swap that failed after the quarantine rename succeeded.
-func restoreQuarantine(q, path string) {
+// a swap that failed after the quarantine rename succeeded. Its errors matter:
+// if the main file cannot be moved back, the user's only copy of their memories
+// is sitting at q while path is empty, and they have to be told.
+func restoreQuarantine(q, path string) error {
 	if q == "" {
-		return
+		return nil
 	}
 	if err := os.Rename(q, path); err != nil {
-		return
+		return fmt.Errorf("could not restore the original store from %s to %s: %w", q, path, err)
 	}
-	for _, sfx := range []string{"-wal", "-shm"} {
-		if _, err := os.Stat(q + sfx); err == nil {
-			_ = os.Rename(q+sfx, path+sfx)
+	var errs []error
+	for _, sfx := range dbSidecars {
+		if _, err := os.Stat(q + sfx); err != nil {
+			continue
+		}
+		if err := os.Rename(q+sfx, path+sfx); err != nil {
+			errs = append(errs, fmt.Errorf("could not restore %s: %w", q+sfx, err))
 		}
 	}
+	return errors.Join(errs...)
 }
 
 // pruneQuarantines deletes quarantined file sets older than quarantineRetention,
@@ -690,20 +792,24 @@ func pruneQuarantines(path string) {
 // repairLockPath is the sidecar lockfile serialising repairers of path.
 func repairLockPath(path string) string { return path + ".repairlock" }
 
-// acquireRepairLock takes the exclusive repair lock for path. A lock younger
-// than repairLockTTL belongs to a live repairer and yields ErrRepairContended; an
-// older one was left by a killed process and is stolen.
+// acquireRepairLock takes the exclusive repair lock for path and starts its
+// heartbeat. A lock whose mtime is younger than repairLockStaleAfter belongs to
+// a live repairer and yields ErrRepairContended; an older one was abandoned by a
+// killed process and is claimed.
+//
+// The returned release stops the heartbeat and only then removes the lockfile,
+// so no stray Chtimes can resurrect a released lock.
 func acquireRepairLock(path string) (release func(), err error) {
 	lock := repairLockPath(path)
 	if err := os.MkdirAll(filepath.Dir(lock), 0o755); err != nil {
 		return nil, err
 	}
-	for attempt := 0; attempt < 2; attempt++ {
+	for attempt := 0; attempt < 3; attempt++ {
 		f, err := os.OpenFile(lock, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
 		if err == nil {
 			fmt.Fprintf(f, "pid=%d at=%d\n", os.Getpid(), time.Now().Unix())
 			_ = f.Close()
-			return func() { _ = os.Remove(lock) }, nil
+			return startRepairHeartbeat(lock), nil
 		}
 		if !os.IsExist(err) {
 			return nil, err
@@ -712,29 +818,76 @@ func acquireRepairLock(path string) (release func(), err error) {
 		if statErr != nil {
 			continue // vanished between OpenFile and Stat: retry the create
 		}
-		if time.Since(fi.ModTime()) < repairLockTTL {
+		if time.Since(fi.ModTime()) < repairLockStaleAfter {
 			return nil, ErrRepairContended
 		}
-		_ = os.Remove(lock) // stale: steal it
+		// Abandoned. Claim it by RENAME rather than remove: rename is atomic, so
+		// exactly one of several competitors succeeds and the losers re-evaluate
+		// from the top. A plain remove would let two processes each delete "the"
+		// lock, both create a fresh one, and run overlapping repairs.
+		//
+		// Residual race, accepted: an owner that was frozen for longer than
+		// repairLockStaleAfter (a paused VM, a stop-the-world pause) could resume
+		// heartbeating a lock that has already been claimed. That window is
+		// strictly narrower than the mtime-only steal it replaces, and the loser
+		// of the rename never proceeds.
+		claimed := fmt.Sprintf("%s.stale-%d", lock, os.Getpid())
+		if err := os.Rename(lock, claimed); err != nil {
+			continue // someone else claimed it first; re-evaluate
+		}
+		_ = os.Remove(claimed)
 	}
 	return nil, ErrRepairContended
 }
 
+// startRepairHeartbeat keeps lock's mtime fresh for as long as the repair runs,
+// and returns the release func that stops it and removes the lockfile.
+func startRepairHeartbeat(lock string) func() {
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		t := time.NewTicker(repairHeartbeatInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-t.C:
+				now := time.Now()
+				_ = os.Chtimes(lock, now, now)
+			}
+		}
+	}()
+	return func() {
+		close(stop)
+		<-done // no Chtimes can be in flight past this point
+		_ = os.Remove(lock)
+	}
+}
+
 // waitForRepair blocks while a live repair lock exists for path, so an ordinary
-// opener never touches the store during the quarantine/rename window. It gives
-// up after repairWaitTimeout (and ignores stale locks) so a crashed repairer can
-// never wedge every future open.
+// opener never touches the store during the quarantine/rename window.
+//
+// There is deliberately NO deadline: because the owner heartbeats the lockfile,
+// a fresh mtime is positive evidence that a repair is still running, and giving
+// up on it would mean opening the store mid-swap. The wait is therefore bounded
+// by the repair itself, and a repairer that dies unblocks every waiter within
+// repairLockStaleAfter.
 func waitForRepair(path string) {
 	lock := repairLockPath(path)
-	deadline := time.Now().Add(repairWaitTimeout)
+	poll := repairHeartbeatInterval / 4
+	if poll > 250*time.Millisecond {
+		poll = 250 * time.Millisecond
+	}
+	if poll < time.Millisecond {
+		poll = time.Millisecond
+	}
 	for {
 		fi, err := os.Stat(lock)
-		if err != nil || time.Since(fi.ModTime()) >= repairLockTTL {
+		if err != nil || time.Since(fi.ModTime()) >= repairLockStaleAfter {
 			return
 		}
-		if time.Now().After(deadline) {
-			return
-		}
-		time.Sleep(25 * time.Millisecond)
+		time.Sleep(poll)
 	}
 }

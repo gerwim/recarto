@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -494,6 +495,18 @@ func TestRepairRebuildsFromAnUnreadableSource(t *testing.T) {
 	}
 }
 
+// shrinkLockTimings makes the repair lock's heartbeat and staleness thresholds
+// millisecond-scale so the liveness tests below run in real time instead of
+// minutes. They are package vars precisely for this.
+func shrinkLockTimings(t *testing.T, heartbeat, stale time.Duration) {
+	t.Helper()
+	prevHeartbeat, prevStale := repairHeartbeatInterval, repairLockStaleAfter
+	repairHeartbeatInterval, repairLockStaleAfter = heartbeat, stale
+	t.Cleanup(func() {
+		repairHeartbeatInterval, repairLockStaleAfter = prevHeartbeat, prevStale
+	})
+}
+
 func TestRepairIsSerializedByItsLockFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "store.db")
 	buildStoreWithCorruptGraph(t, path)
@@ -509,18 +522,263 @@ func TestRepairIsSerializedByItsLockFile(t *testing.T) {
 	}
 	release()
 
-	// A lock older than its TTL was left by a killed process and is stolen.
-	release2, err := acquireRepairLock(path)
+	if _, err := Repair(path); err != nil {
+		t.Fatalf("Repair once the lock was released: %v", err)
+	}
+	if _, err := os.Stat(repairLockPath(path)); !os.IsNotExist(err) {
+		t.Errorf("lock not released after repair: %v", err)
+	}
+}
+
+// TestRepairLockHeartbeatProtectsALongRepair: a repair that takes longer than
+// the staleness threshold must keep its lock. Before the heartbeat, a repair
+// running past the fixed TTL could be "stolen" out from under itself and two
+// processes would rebuild the same store at once.
+func TestRepairLockHeartbeatProtectsALongRepair(t *testing.T) {
+	shrinkLockTimings(t, 20*time.Millisecond, 250*time.Millisecond)
+	path := filepath.Join(t.TempDir(), "store.db")
+
+	release, err := acquireRepairLock(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer release2()
-	old := time.Now().Add(-2 * repairLockTTL)
-	if err := os.Chtimes(repairLockPath(path), old, old); err != nil {
+	defer release()
+
+	time.Sleep(3 * repairLockStaleAfter)
+
+	release2, err := acquireRepairLock(path)
+	if err == nil {
+		release2()
+		t.Fatal("a heartbeating lock was stolen while its owner was still repairing")
+	}
+	if err != ErrRepairContended {
+		t.Fatalf("acquireRepairLock = %v, want ErrRepairContended", err)
+	}
+}
+
+// TestWaitForRepairWaitsOutTheWholeRepair: openers must not give up on a live
+// repair and open the store mid-swap, however long it takes.
+func TestWaitForRepairWaitsOutTheWholeRepair(t *testing.T) {
+	shrinkLockTimings(t, 20*time.Millisecond, 250*time.Millisecond)
+	path := filepath.Join(t.TempDir(), "store.db")
+
+	release, err := acquireRepairLock(path)
+	if err != nil {
 		t.Fatal(err)
 	}
+
+	waited := make(chan time.Duration, 1)
+	start := time.Now()
+	go func() {
+		waitForRepair(path)
+		waited <- time.Since(start)
+	}()
+
+	hold := 3 * repairLockStaleAfter
+	select {
+	case d := <-waited:
+		release()
+		t.Fatalf("waitForRepair returned after %v while the repair was still running", d)
+	case <-time.After(hold):
+	}
+
+	release()
+	select {
+	case d := <-waited:
+		if d < hold {
+			t.Fatalf("waitForRepair returned after %v, want at least the %v hold", d, hold)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("waitForRepair did not return after the lock was released")
+	}
+}
+
+// TestRepairClaimsAnAbandonedLock: a lock whose owner was killed (no heartbeat)
+// must not wedge repairs or openers forever.
+func TestRepairClaimsAnAbandonedLock(t *testing.T) {
+	shrinkLockTimings(t, 20*time.Millisecond, 250*time.Millisecond)
+	path := filepath.Join(t.TempDir(), "store.db")
+	buildStoreWithCorruptGraph(t, path)
+
+	lock := repairLockPath(path)
+	if err := os.WriteFile(lock, []byte("pid=999999 at=0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	abandoned := time.Now().Add(-10 * repairLockStaleAfter)
+	if err := os.Chtimes(lock, abandoned, abandoned); err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan struct{})
+	go func() { waitForRepair(path); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("waitForRepair blocked on a lock nobody is heartbeating")
+	}
+
 	if _, err := Repair(path); err != nil {
-		t.Fatalf("Repair did not steal a stale lock: %v", err)
+		t.Fatalf("Repair did not claim an abandoned lock: %v", err)
+	}
+	if _, err := os.Stat(lock); !os.IsNotExist(err) {
+		t.Errorf("lock not released after repair: %v", err)
+	}
+	claimed, _ := filepath.Glob(lock + ".stale-*")
+	if len(claimed) != 0 {
+		t.Errorf("claimed lock files left behind: %v", claimed)
+	}
+}
+
+// TestQuarantineRollsBackWhenASidecarCannotMove: a WAL left beside the freshly
+// installed replacement would be replayed into it and re-corrupt it, so failing
+// to move one must abort the quarantine entirely rather than proceed.
+func TestQuarantineRollsBackWhenASidecarCannotMove(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "store.db")
+	if err := os.WriteFile(path, []byte("main"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path+"-wal", []byte("wal"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	const ts = int64(1_700_000_000)
+	q := fmt.Sprintf("%s.corrupt-%d", path, ts)
+	// A non-empty directory at the WAL's destination makes its rename fail
+	// deterministically, on every platform.
+	if err := os.MkdirAll(filepath.Join(q+"-wal", "blocker"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := quarantineExisting(path, ts)
+	if err == nil {
+		t.Fatalf("quarantineExisting succeeded (%q) despite an unmovable WAL", got)
+	}
+	if !strings.Contains(err.Error(), "-wal") {
+		t.Errorf("error does not name the blocking sidecar: %v", err)
+	}
+	if b, rerr := os.ReadFile(path); rerr != nil || string(b) != "main" {
+		t.Errorf("main file not rolled back: %q %v", b, rerr)
+	}
+	if b, rerr := os.ReadFile(path + "-wal"); rerr != nil || string(b) != "wal" {
+		t.Errorf("WAL not left in place: %q %v", b, rerr)
+	}
+	if _, serr := os.Stat(q); !os.IsNotExist(serr) {
+		t.Errorf("a quarantined main file was left behind at %s", q)
+	}
+}
+
+// TestRepairSalvagesWhenSchemaEnumerationFails: a sqlite_master scan can die on
+// one damaged page while every table we care about is still readable one
+// PRAGMA table_info at a time — that must not be mistaken for "nothing is
+// readable, install an empty store".
+func TestRepairSalvagesWhenSchemaEnumerationFails(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "store.db")
+	st, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedPrecious(t, st)
+	if err := st.Checkpoint(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	orig := listSourceTables
+	listSourceTables = func(context.Context, *sql.DB) (map[string]bool, error) {
+		return nil, errors.New("injected sqlite_master read failure")
+	}
+	defer func() { listSourceTables = orig }()
+
+	stats, err := Repair(path)
+	if err != nil {
+		t.Fatalf("Repair: %v", err)
+	}
+	if got := stats.Tables["memories"].Salvaged; got != seedMemories {
+		t.Errorf("salvaged %d memories, want %d — enumeration failure must not skip salvage", got, seedMemories)
+	}
+	if got := stats.Tables["graph_deltas"].Salvaged; got != seedDeltas {
+		t.Errorf("salvaged %d graph_deltas, want %d", got, seedDeltas)
+	}
+	if !stats.SourceOpen {
+		t.Error("SourceOpen = false although rows were salvaged blind")
+	}
+
+	st, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if got := scalar(t, st.DB, `SELECT count(*) FROM memories`); got != seedMemories {
+		t.Errorf("memories = %d after repair, want %d", got, seedMemories)
+	}
+}
+
+// TestSalvageDoesNotCountRowsTheReplacementRejected: INSERT OR IGNORE swallows a
+// CHECK/UNIQUE violation silently, so counting an exec as a salvage overstates
+// what was actually recovered — in the stats, in the repair metadata, and in
+// what `recarto repair` tells the user.
+func TestSalvageDoesNotCountRowsTheReplacementRejected(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "store.db")
+
+	// A source whose memories table has the current columns but NO CHECK
+	// constraint, so it can hold rows the real schema refuses.
+	db, err := openRepairTarget(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`
+CREATE TABLE memories (
+  id          TEXT PRIMARY KEY,
+  kind        TEXT NOT NULL,
+  title       TEXT NOT NULL DEFAULT '',
+  body        TEXT NOT NULL DEFAULT '',
+  search_text TEXT NOT NULL DEFAULT '',
+  created_at  INTEGER NOT NULL,
+  updated_at  INTEGER NOT NULL,
+  status      TEXT NOT NULL DEFAULT 'active'
+);`); err != nil {
+		t.Fatal(err)
+	}
+	for i, kind := range []string{"learning", "learning", "learning", "garbled-kind", "garbled-kind"} {
+		if _, err := db.Exec(
+			`INSERT INTO memories(id,kind,title,body,search_text,created_at,updated_at)
+			 VALUES (?,?,?,?,?,?,?)`,
+			fmt.Sprintf("m%d", i), kind, "t", "b", "t b", 1, 1); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	stats, err := Repair(path)
+	if err != nil {
+		t.Fatalf("Repair: %v", err)
+	}
+	ts := stats.Tables["memories"]
+	if ts.Salvaged != 3 {
+		t.Errorf("Salvaged = %d, want 3 (only the rows the replacement accepted)", ts.Salvaged)
+	}
+	if ts.Lost != 2 {
+		t.Errorf("Lost = %d, want 2", ts.Lost)
+	}
+	if !strings.Contains(ts.Note, "rejected") {
+		t.Errorf("Note = %q, want it to mention the rejected rows", ts.Note)
+	}
+
+	st, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if got := scalar(t, st.DB, `SELECT count(*) FROM memories`); got != 3 {
+		t.Errorf("memories = %d in the repaired store, want 3", got)
 	}
 }
 

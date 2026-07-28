@@ -127,6 +127,18 @@ func (s *Server) storeFor(repoKey string) (*repoStore, error) {
 		_ = st.Close()
 		return nil, fmt.Errorf("repo %s: ensure sync schema: %w", repoKey, err)
 	}
+	// sync_index is server-only bookkeeping that store.Repair deliberately does
+	// not salvage, so a store that was rebuilt after corruption comes back with
+	// its memories but no index — and would then serve empty pulls forever.
+	// Reindexing anything missing here makes that self-healing.
+	reindexed, err := reconcileSyncIndex(context.Background(), st)
+	if err != nil {
+		_ = st.Close()
+		return nil, fmt.Errorf("repo %s: reconcile sync index: %w", repoKey, err)
+	}
+	if reindexed > 0 {
+		log.Printf("sync: reindexed %d record(s) into %s's sync index", reindexed, repoKey)
+	}
 	rs := &repoStore{st: st, eng: memory.New(st, ledger.New(st), s.clk)}
 	s.stores[repoKey] = rs
 	log.Printf("sync: opened store %s", repoKey)
