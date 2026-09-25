@@ -50,6 +50,8 @@ The whole product is decomposed into three phases. **This spec covers Phase 1 on
 | D9 | **TDD everywhere, proof-first** (RED→GREEN→REFACTOR); clock/fs/git are injected interfaces | Determinism + testability; drives clean module boundaries. |
 | D10 | **Hooks are Advisory + Augment + one opt-in bounded Stop gate** — never hard-block Read/Grep | Mirrors cbm (non-blocking) and OpenWolf (reminders, ~85–90% compliance); hard-blocking breaks invariants and risks loops. Structural recall is phrasing-independent, so advisory injection is already effective; the opt-in Stop gate raises compliance without deadlock risk. |
 
+Amended 2026-09-25: static, in-binary embeddings adopted for memory recall — see 2026-09-25-hybrid-memory-recall-design.md.
+
 ## 5. Architecture Overview
 
 One binary, three modes:

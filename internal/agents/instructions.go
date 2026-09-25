@@ -28,7 +28,7 @@ per-repo SQLite cache outside the working tree.
   read or edit that code — just-in-time, costing no tokens until it is relevant, and
   shown only once per session. Guidance with no refs only appears in the budgeted
   session-start tier, so anchor anything you want to fire at the point of change.
-- **Recall** with ` + "`recall_memory`" + ` and ` + "`search_bugs`" + ` before changing code.
+- **Recall** with ` + "`recall_memory`" + ` (describe the task in plain words as ` + "`task_hint`" + `; it is matched lexically and semantically, and an empty result means nothing stored is relevant) and ` + "`search_bugs`" + ` before changing code.
 - **Track open work** as a ` + "`todo`" + ` memory (` + "`record_memory`" + ` with kind ` + "`todo`" + `): it
   resurfaces at session start and when you touch its referenced files. Close it with
   ` + "`complete_todo`" + ` (or ` + "`recarto todo done <id>`" + `) when the work is finished.

@@ -220,6 +220,33 @@ func TestAugmentSuppressesRepeatedPattern(t *testing.T) {
 	}
 }
 
+type augmentCountingEmbedder struct{ calls int }
+
+func (e *augmentCountingEmbedder) ID() string { return "augment-test" }
+func (e *augmentCountingEmbedder) Embed(string) []float32 {
+	e.calls++
+	return []float32{1, 0}
+}
+
+func TestAugmentSkipsSemanticEmbedding(t *testing.T) {
+	a := newTestApp(t, "main")
+	fake := &augmentCountingEmbedder{}
+	a.Engine.SetEmbedder(fake)
+	ctx := context.Background()
+	if _, _, _, err := a.Engine.Record(ctx, memory.NewMemory{
+		Kind: memory.KindBug, Title: "Widget overflow", Body: "Widget overflow — fix: clamp",
+		Source: "cli", Extra: map[string]any{"fix": "clamp"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Handle(ctx, a, Event{Kind: KindAugment, Pattern: "Widget"}); err != nil {
+		t.Fatal(err)
+	}
+	if fake.calls != 0 {
+		t.Fatalf("augment Embed calls = %d, want 0", fake.calls)
+	}
+}
+
 func TestAugmentDedupsBugAlreadySurfacedOnRead(t *testing.T) {
 	a := newTestApp(t, "main")
 	ctx := context.Background()

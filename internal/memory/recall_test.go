@@ -313,7 +313,7 @@ func TestRecallPinSubBudgetCapsPins(t *testing.T) {
 		}
 	}
 	// kind="" so pins flow; tiny budget so the pin sub-budget (budget/2) bites.
-	set, err := e.Recall(ctx, RecallQuery{TaskHint: "anything", TokenBudget: 40})
+	set, err := e.Recall(ctx, RecallQuery{TaskHint: "busy_timeout pragma writers fail", TokenBudget: 40})
 	if err != nil {
 		t.Fatal(err)
 	}

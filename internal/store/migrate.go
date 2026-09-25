@@ -8,7 +8,7 @@ import (
 )
 
 // schemaVersion is the number of applied migrations.
-const schemaVersion = 21
+const schemaVersion = 22
 
 // migrations are applied in order; index+1 becomes user_version.
 var migrations = []string{
@@ -547,6 +547,18 @@ CREATE TABLE IF NOT EXISTS memory_sync_merges (
   canonical_id  TEXT NOT NULL,
   updated_at    INTEGER NOT NULL
 );
+`,
+	// v22 (semantic memory recall): model vectors and the FTS5 vocabulary view
+	// are derived state. Vectors are neither synced nor exported and are lazily
+	// re-embedded after repair; the vocabulary is recreated from the FTS index.
+	`
+CREATE TABLE IF NOT EXISTS memory_vectors (
+  memory_id TEXT PRIMARY KEY REFERENCES memories(id) ON DELETE CASCADE,
+  model     TEXT NOT NULL,
+  source_at INTEGER NOT NULL,
+  vec       BLOB NOT NULL
+);
+CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts_vocab USING fts5vocab(memories_fts, 'row');
 `,
 }
 

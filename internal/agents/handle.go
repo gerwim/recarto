@@ -502,7 +502,7 @@ func handleAugment(ctx context.Context, a *app.App, ev Event) (Result, error) {
 		}
 		set, err := rc.Engine.Recall(ctx, memory.RecallQuery{
 			TaskHint: term, Kind: memory.KindBug, Branch: rc.Git.Branch, Worktree: rc.Git.Worktree,
-			Limit: 5 - len(bugResults),
+			Limit: 5 - len(bugResults), LexicalOnly: true,
 		})
 		if err != nil {
 			continue

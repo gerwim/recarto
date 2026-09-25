@@ -5,10 +5,12 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"os"
 	"sort"
 	"strings"
 
 	"git.gerwim.nl/gerwim/recarto/internal/clock"
+	"git.gerwim.nl/gerwim/recarto/internal/embedding"
 	"git.gerwim.nl/gerwim/recarto/internal/ids"
 	"git.gerwim.nl/gerwim/recarto/internal/ledger"
 	"git.gerwim.nl/gerwim/recarto/internal/store"
@@ -16,16 +18,22 @@ import (
 
 // Engine is the memory subsystem: write+dedup and recall over the store.
 type Engine struct {
-	st  *store.Store
-	led *ledger.Ledger
-	clk clock.Clock
-	lex Lexical
-	res RefResolver // optional; nil → dangling-ref check disabled
+	st    *store.Store
+	led   *ledger.Ledger
+	clk   clock.Clock
+	lex   Lexical
+	res   RefResolver // optional; nil → dangling-ref check disabled
+	emb   Embedder
+	floor bool
 }
 
 // New returns an Engine with the default FTS5 lexical backend.
 func New(st *store.Store, led *ledger.Ledger, clk clock.Clock) *Engine {
-	return &Engine{st: st, led: led, clk: clk, lex: NewFTSLexical(st)}
+	e := &Engine{st: st, led: led, clk: clk, lex: NewFTSLexical(st), floor: os.Getenv("RECARTO_RECALL_FLOOR") != "0"}
+	if os.Getenv("RECARTO_SEMANTIC") != "0" {
+		e.emb = embedding.Default()
+	}
+	return e
 }
 
 const selectMemoriesSQL = `

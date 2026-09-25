@@ -20,8 +20,8 @@ feature parity across all three.
 ## What it does
 
 - **Memory** — `record_memory` / `recall_memory`: token-budgeted, branch-aware recall
-  ranked by lexical (BM25) + structural signals; near-duplicates are reinforced, not
-  duplicated.
+  ranked by hybrid BM25, semantic embeddings and structural refs behind a relevance
+  floor; near-duplicates are reinforced, not duplicated.
 - **Bugs** — `record_bug` / `search_bugs`: searchable bug history (error, root cause,
   fix), surfaced just-in-time when you read or edit the related file.
 - **Code graph** — `search_graph` / `get_code_snippet` / `trace_call_path` /
@@ -38,6 +38,11 @@ feature parity across all three.
 - **HTTP memory sync** (optional) — converge memories across machines working the same
   repo, while staying fully functional offline. See
   [Sharing memory across machines](#sharing-memory-across-machines-http-sync).
+
+Memory recall embeds with the in-binary Model2Vec `potion-base-8M` model (MIT; its
+WordPiece vocabulary derives from BERT/BGE) and adds about 8 MB to the binary. Set
+`RECARTO_SEMANTIC=0` to use lexical-only ranking or `RECARTO_RECALL_FLOOR=0` to disable
+the relevance floor.
 
 ## Install
 
