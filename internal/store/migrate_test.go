@@ -332,12 +332,12 @@ func TestLatestCheckMigrationPreservesMemoriesAndColumns(t *testing.T) {
 		VALUES('t2','todo','done',1,1)`)
 }
 
-func TestSchemaVersionIs21(t *testing.T) {
-	if schemaVersion != 21 {
-		t.Fatalf("schemaVersion = %d, want 21", schemaVersion)
+func TestSchemaVersionIs22(t *testing.T) {
+	if schemaVersion != 22 {
+		t.Fatalf("schemaVersion = %d, want 22", schemaVersion)
 	}
-	if len(migrations) != 21 {
-		t.Fatalf("len(migrations) = %d, want 21", len(migrations))
+	if len(migrations) != 22 {
+		t.Fatalf("len(migrations) = %d, want 22", len(migrations))
 	}
 	st, err := Open(filepath.Join(t.TempDir(), "store.db"))
 	if err != nil {
@@ -348,8 +348,43 @@ func TestSchemaVersionIs21(t *testing.T) {
 	if err := st.DB.QueryRow("PRAGMA user_version").Scan(&v); err != nil {
 		t.Fatal(err)
 	}
-	if v != 21 {
-		t.Fatalf("user_version = %d, want 21", v)
+	if v != 22 {
+		t.Fatalf("user_version = %d, want 22", v)
+	}
+}
+
+func TestV22CreatesMemoryVectorsAndVocab(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "store.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	for _, table := range []string{"memory_vectors", "memories_fts_vocab"} {
+		var count int
+		if err := st.DB.QueryRow(`SELECT count(*) FROM sqlite_master WHERE name=?`, table).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != 1 {
+			t.Fatalf("table %s exists %d times, want once", table, count)
+		}
+	}
+	mustExec(t, st, `INSERT INTO memories(id,kind,title,body,created_at,updated_at) VALUES('vector-test','learning','v22needle','body',1,1)`)
+	mustExec(t, st, `INSERT INTO memories_fts(memory_id,search_text) VALUES('vector-test','v22needle common')`)
+	var docs int
+	if err := st.DB.QueryRow(`SELECT doc FROM memories_fts_vocab WHERE term='v22needle'`).Scan(&docs); err != nil {
+		t.Fatal(err)
+	}
+	if docs != 1 {
+		t.Fatalf("vocabulary doc count = %d, want 1", docs)
+	}
+	mustExec(t, st, `INSERT INTO memory_vectors(memory_id,model,source_at,vec) VALUES('vector-test','test',1,X'00000000')`)
+	mustExec(t, st, `DELETE FROM memories WHERE id='vector-test'`)
+	var vectors int
+	if err := st.DB.QueryRow(`SELECT count(*) FROM memory_vectors WHERE memory_id='vector-test'`).Scan(&vectors); err != nil {
+		t.Fatal(err)
+	}
+	if vectors != 0 {
+		t.Fatalf("cascaded vectors = %d, want 0", vectors)
 	}
 }
 

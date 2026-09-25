@@ -84,6 +84,13 @@ func TestEngineWorksOnARepairedStore(t *testing.T) {
 	if !found {
 		t.Fatalf("recall did not find the salvaged memory (%d results)", len(got.Results))
 	}
+	var vectors int
+	if err := st.DB.QueryRow(`SELECT count(*) FROM memory_vectors`).Scan(&vectors); err != nil {
+		t.Fatal(err)
+	}
+	if vectors != 2 {
+		t.Fatalf("re-embedded memory_vectors = %d, want 2", vectors)
+	}
 
 	// Reinforcement depends on the salvaged MinHash bands: re-recording the same
 	// learning must reinforce the existing row, not create a second one.

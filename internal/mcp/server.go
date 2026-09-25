@@ -26,10 +26,10 @@ func NewServer(a *app.App) *sdk.Server {
 		"Record a bug with its error message, root cause, and fix (a convenience wrapper over record_memory).",
 		recordBug)
 	addTool(s, a, "recall_memory",
-		"Recall the most relevant memories for the current task — branch-aware, structurally ranked, and token-budgeted. Each memory reports matched_on (the signals behind it); the result reports truncated/budget_used. When a workspace is configured (RECARTO_WORKSPACE), cross-repo workspace memories are searched too and carry scope=\"workspace\".",
+		"Recall the most relevant memories for the current task — hybrid lexical (BM25) + semantic ranking plus structural refs, branch-aware and token-budgeted. Returns nothing when no stored memory is relevant to the task. Each memory reports matched_on (the signals behind it); the result reports truncated/budget_used. When a workspace is configured (RECARTO_WORKSPACE), cross-repo workspace memories are searched too and carry scope=\"workspace\".",
 		recallMemory)
 	addTool(s, a, "search_bugs",
-		"Search recorded bugs by keywords before attempting a fix.",
+		"Search recorded bugs (keywords or a plain-words description) before attempting a fix.",
 		searchBugs)
 	addTool(s, a, "get_memory",
 		"Fetch a single memory by id.",

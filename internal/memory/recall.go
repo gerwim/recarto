@@ -10,14 +10,18 @@ import (
 	"git.gerwim.nl/gerwim/recarto/internal/ledger"
 )
 
-// Recall scoring weights (golden-tested defaults). Structural overlap is the
-// strongest signal: an exact file/symbol match is the best relevance evidence.
+// Recall scoring weights. Structural overlap is strongest; lexical and semantic
+// ranking share the relevance weight when both retrieval arms run.
 const (
-	wStructural    = 0.45
-	wLexical       = 0.25
-	wRecency       = 0.15
-	wReinforcement = 0.10
-	wBranch        = 0.05
+	wStructural = 0.55
+	wRelevance  = 0.45
+	// Priors are 1/100 of their former weights, preserving their 3:2:1 ratio
+	// and baseline order. At the old weights they swamped RRF relevance (MRR
+	// 0.88 → 0.60) and lifted repo-global memories onto unrelated queries.
+	wRecency       = 0.0015
+	wReinforcement = 0.0010
+	wBranch        = 0.0005
+	rrfK           = 60
 
 	recencyHalfLifeMs  = float64(14 * 24 * 60 * 60 * 1000) // 14 days
 	defaultTokenBudget = 1500
@@ -46,6 +50,7 @@ type RecallQuery struct {
 	TokenBudget int     // 0 → default
 	Worktree    string  // current worktree absolute path, for ref-resolvability
 	MinScore    float64 // drop candidates scoring below this (0 → no floor)
+	LexicalOnly bool    // skip semantic retrieval on hot code-pattern hooks
 }
 
 // RecallResult is a selected memory with its score and per-signal breakdown.
@@ -61,9 +66,15 @@ type RecallResult struct {
 // signal's. It lets a consuming LLM see *why* a memory surfaced. Returns nil when
 // nothing contributed.
 func (r RecallResult) MatchedOn() []string {
+	arms := 1.0
 	weights := map[string]float64{
-		"structural": wStructural, "lexical": wLexical, "recency": wRecency,
+		"structural": wStructural, "lexical": wRelevance, "recency": wRecency,
 		"reinforcement": wReinforcement, "branch": wBranch,
+	}
+	if _, ok := r.Signals["semantic"]; ok {
+		arms = 2
+		weights["lexical"] = wRelevance / arms
+		weights["semantic"] = wRelevance / arms
 	}
 	type contrib struct {
 		name string
@@ -81,7 +92,12 @@ func (r RecallResult) MatchedOn() []string {
 	if top <= 0 {
 		return nil
 	}
-	sort.Slice(cs, func(i, j int) bool { return cs[i].v > cs[j].v })
+	sort.Slice(cs, func(i, j int) bool {
+		if cs[i].v != cs[j].v {
+			return cs[i].v > cs[j].v
+		}
+		return cs[i].name < cs[j].name
+	})
 	var out []string
 	for _, c := range cs {
 		if c.v >= 0.2*top {
@@ -100,9 +116,8 @@ type RecallResultSet struct {
 	Truncated  bool
 }
 
-// Recall scores and ranks memories by structural overlap, lexical (BM25),
-// recency, reinforcement, and branch affinity, all multiplied by confidence.
-// Task 12 wraps the budgeter around the sorted output.
+// Recall combines FTS5 BM25 and semantic ranks with structural references,
+// applying a calibrated relevance floor before adding pins and baseline seeds.
 func (e *Engine) Recall(ctx context.Context, q RecallQuery) (RecallResultSet, error) {
 	limit := q.Limit
 	if limit <= 0 {
@@ -113,13 +128,29 @@ func (e *Engine) Recall(ctx context.Context, q RecallQuery) (RecallResultSet, er
 	// degrade when the caller asks for only a few results.
 	candidateN := max(limit, defaultLimit)
 
-	lex, err := e.lex.Search(ctx, lexicalQueryText(q), candidateN)
+	text := lexicalQueryText(q)
+	lex, err := e.lex.Search(ctx, text, candidateN)
 	if err != nil {
 		return RecallResultSet{}, err
 	}
-	lexScore := make(map[string]float64, len(lex))
-	for _, r := range lex {
-		lexScore[r.ID] = r.Score
+	lexRank := make(map[string]float64, len(lex))
+	textCandidates := make([]string, 0, len(lex)+candidateN)
+	seenCandidates := make(map[string]bool, len(lex)+candidateN)
+	for rank, result := range lex {
+		lexRank[result.ID] = float64(rrfK+1) / float64(rrfK+1+rank)
+		textCandidates = append(textCandidates, result.ID)
+		seenCandidates[result.ID] = true
+	}
+	sem := e.semanticArm(ctx, q, candidateN)
+	semRank := map[string]float64{}
+	if sem != nil {
+		for rank, id := range sem.ranked {
+			semRank[id] = float64(rrfK+1) / float64(rrfK+1+rank)
+			if !seenCandidates[id] {
+				textCandidates = append(textCandidates, id)
+				seenCandidates[id] = true
+			}
+		}
 	}
 
 	refScore, err := e.structuralScores(ctx, q)
@@ -127,23 +158,32 @@ func (e *Engine) Recall(ctx context.Context, q RecallQuery) (RecallResultSet, er
 		return RecallResultSet{}, err
 	}
 
-	pinned, err := e.pinnedIDs(ctx, q.Branch)
-	if err != nil {
-		return RecallResultSet{}, err
+	terms := queryTerms(text)
+	floorApplies := e.floor && len(terms) > 0
+	gateOpen := true
+	if floorApplies {
+		textCandidates, gateOpen = e.applyFloor(ctx, terms, textCandidates, q.Kind, sem)
 	}
+	related := !floorApplies || gateOpen || len(refScore) > 0
 
 	idset := map[string]bool{}
-	for id := range lexScore {
+	for _, id := range textCandidates {
 		idset[id] = true
 	}
 	for id := range refScore {
 		idset[id] = true
 	}
-	for _, id := range pinned {
-		idset[id] = true
+	if related {
+		pinned, err := e.pinnedIDs(ctx, q.Branch)
+		if err != nil {
+			return RecallResultSet{}, err
+		}
+		for _, id := range pinned {
+			idset[id] = true
+		}
 	}
 
-	if q.Baseline {
+	if q.Baseline && related {
 		base, err := e.baselineIDs(ctx, q.Branch, candidateN)
 		if err != nil {
 			return RecallResultSet{}, err
@@ -172,17 +212,26 @@ func (e *Engine) Recall(ctx context.Context, q RecallQuery) (RecallResultSet, er
 		if q.Kind != "" && r.Kind != q.Kind {
 			continue
 		}
+		arms := 1.0
+		if sem != nil {
+			arms = 2
+		}
+		lexical := lexRank[r.ID]
+		semantic := semRank[r.ID]
 		sig := map[string]float64{
-			"lexical":       lexScore[r.ID],
+			"lexical":       lexical,
 			"structural":    refScore[r.ID],
 			"recency":       math.Exp(-float64(now-r.UpdatedAt) / recencyHalfLifeMs),
 			"reinforcement": math.Min(1, math.Log1p(float64(r.ReinforcementCount))/math.Log(11)),
 			"branch":        0,
 		}
+		if sem != nil {
+			sig["semantic"] = semantic
+		}
 		if r.Branch == "" || r.Branch == q.Branch {
 			sig["branch"] = 1
 		}
-		score := (wStructural*sig["structural"] + wLexical*sig["lexical"] +
+		score := (wStructural*sig["structural"] + wRelevance*(lexical+semantic)/arms +
 			wRecency*sig["recency"] + wReinforcement*sig["reinforcement"] +
 			wBranch*sig["branch"]) * r.Confidence
 
@@ -248,8 +297,14 @@ func selectWithinBudget(scored []RecallResult, budget, limit int) (out []RecallR
 			rest = append(rest, s)
 		}
 	}
-	sort.Slice(pinned, func(i, j int) bool { return pinned[i].Score > pinned[j].Score })
-	sort.Slice(rest, func(i, j int) bool { return rest[i].Score > rest[j].Score })
+	byScore := func(a, b RecallResult) bool {
+		if a.Score != b.Score {
+			return a.Score > b.Score
+		}
+		return a.Record.ID < b.Record.ID
+	}
+	sort.Slice(pinned, func(i, j int) bool { return byScore(pinned[i], pinned[j]) })
+	sort.Slice(rest, func(i, j int) bool { return byScore(rest[i], rest[j]) })
 
 	tokensOf := func(r *Record) int { return ledger.EstimateTokens(r.Title + " " + r.Body) }
 

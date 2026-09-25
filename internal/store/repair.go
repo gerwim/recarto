@@ -113,7 +113,9 @@ var ErrRepairContended = errors.New("store: a repair of this store is already in
 
 // preciousTables are the tables salvaged into the replacement, in
 // foreign-key-safe insertion order (parents before children). Everything not
-// listed here is derived state the next reconcile rebuilds from source.
+// listed here is derived state. This deliberately omits memory_vectors: they
+// are derived embeddings, never salvaged, and lazily re-embedded after repair.
+// The FTS vocabulary view is likewise recreated from memories_fts.
 //
 // graph_deltas is precious despite its name: it is a historical journal of
 // symbol-level index changes read by graph.Engine.DeltaBaseline/DeltasSince
