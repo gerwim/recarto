@@ -80,13 +80,13 @@ func TestParseRust(t *testing.T) {
 		"annotates derive  6", "annotates Debug  6", "annotates Clone  6",
 		"extends Display  11", "calls area self 11",
 		"calls make Self 12",
-		"extends Display  13", "calls write  13", "calls area self 13",
+		"extends Display  13", "references write  13", "calls area self 13",
 		"annotates test  16",
 		"calls new Circle 19",
 		"calls default Circle 21",
-		// inside assert_eq!: compute, foo.bar and helper are calls; `y, (1, 2)`
+		// inside assert_eq!: compute, foo.bar and inner::helper are calls; `y, (1, 2)`
 		// and the nested vec!(1) are not (punctuation separates them)
-		"calls assert_eq  23", "calls compute  23", "calls bar foo 23", "calls helper  23",
+		"references assert_eq  23", "calls compute  23", "calls bar foo 23", "calls helper inner 23",
 		"calls area x 24",
 		"calls up  25",
 	}
@@ -114,6 +114,118 @@ func TestParseRust(t *testing.T) {
 	for _, name := range []string{"self", "Self"} {
 		if !binds[name]["Circle"] || !binds[name]["Area"] {
 			t.Errorf("binding %s: want Circle and Area, got %v", name, binds[name])
+		}
+	}
+}
+
+// rustParser returns a parse func over one registry (compiling the queries is
+// the expensive part) closed when the test ends.
+func rustParser(t *testing.T) func(src string) Result {
+	t.Helper()
+	r, err := NewRegistry()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(r.Close)
+	return func(src string) Result {
+		t.Helper()
+		res, err := r.ParseFile("rust", "src/lib.rs", []byte(src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return res
+	}
+}
+
+// TestParseRustCallShapes pins one call edge (callee + receiver) for every call
+// shape, plain and turbofish, written directly and inside a macro's arguments.
+// The plain and turbofish forms are separate patterns in rust.scm and once
+// drifted apart (crate::f::<T>() emitted nothing). Inside a macro the receiver
+// is the token before `.` or `::`, so T::<u8>::f() keeps none there.
+func TestParseRustCallShapes(t *testing.T) {
+	parseRust := rustParser(t)
+	for _, c := range []struct{ call, recv, macroRecv string }{
+		{"f()", "", ""},
+		{"f::<u8>()", "", ""},
+		{"x.f()", "x", "x"},
+		{"x.f::<u8>()", "x", "x"},
+		{"self.f()", "self", "self"},
+		{"T::f()", "T", "T"},
+		{"T::f::<u8>()", "T", "T"},
+		{"a::T::f()", "T", "T"},
+		{"a::T::f::<u8>()", "T", "T"},
+		{"T::<u8>::f()", "T", ""},
+		{"Self::f()", "Self", "Self"},
+		{"self::f()", "", ""},
+		{"self::f::<u8>()", "", ""},
+		{"super::f()", "", ""},
+		{"super::f::<u8>()", "", ""},
+		{"crate::f()", "", ""},
+		{"crate::f::<u8, Vec<Vec<u8>>>()", "", ""},
+		{"<T as Tr>::f()", "", ""},
+		{"<T as Tr>::f::<u8>()", "", ""},
+	} {
+		for _, form := range []struct{ src, recv string }{
+			{"fn caller() { " + c.call + "; }", c.recv},
+			{"fn caller() { check!(1, " + c.call + "); }", c.macroRecv},
+		} {
+			var calls []string
+			for _, e := range parseRust(form.src).Edges {
+				if e.Kind == "calls" {
+					calls = append(calls, e.DstName+" recv="+e.Recv)
+				}
+			}
+			if want := []string{"f recv=" + form.recv}; !slices.Equal(calls, want) {
+				t.Errorf("%s: calls %v, want %v", form.src, calls, want)
+			}
+		}
+	}
+}
+
+// TestParseRustMacroNonCalls: inside a macro's token trees only an identifier
+// followed directly (or after a turbofish) by a parenthesized tree is a call,
+// and the macro invocation itself is a reference, not a call.
+func TestParseRustMacroNonCalls(t *testing.T) {
+	parseRust := rustParser(t)
+	for _, args := range []string{"x, (1, 2)", "vec![1]", "a::b", "f::<u8>", "x.y", "[1, 2] (3)", "f::<u8>::g"} {
+		src := "fn caller() { check!(" + args + "); }"
+		var calls, refs []string
+		for _, e := range parseRust(src).Edges {
+			switch e.Kind {
+			case "calls":
+				calls = append(calls, e.DstName)
+			case "references":
+				refs = append(refs, e.DstName)
+			}
+		}
+		if len(calls) != 0 || !slices.Equal(refs, []string{"check"}) {
+			t.Errorf("%s: calls %v (want none), references %v (want [check])", src, calls, refs)
+		}
+	}
+}
+
+// TestParseRustBindingShapes pins a receiver binding x -> Area for every type
+// shape, as a parameter AND as a typed let: the two once had separate type lists
+// and drifted (let x: &dyn Area<u32> bound nothing).
+func TestParseRustBindingShapes(t *testing.T) {
+	parseRust := rustParser(t)
+	shapes := []string{
+		"Area", "&Area", "&mut Area", "Area<u8>", "&Area<u8>", "a::Area", "&a::Area",
+		"a::Area<u8>", "&mut a::Area<u8>", "&dyn Area", "&dyn Area<u8>", "&mut dyn Area<u8>",
+		"&dyn a::Area", "&dyn a::Area<u8>",
+	}
+	var srcs []string
+	for _, ty := range shapes {
+		srcs = append(srcs, "fn f(x: "+ty+") {}", "fn f() { let x: "+ty+" = todo!(); }")
+	}
+	srcs = append(srcs, "fn f(x: impl Area) {}", "fn f(x: impl Area<u8>) {}", "fn f(x: impl a::Area) {}")
+	for _, src := range srcs {
+		var got []string
+		for _, b := range parseRust(src).Bindings {
+			got = append(got, b.Name+":"+b.TypeName)
+		}
+		if !slices.Equal(got, []string{"x:Area"}) {
+			t.Errorf("%s: bindings %v, want [x:Area]", src, got)
 		}
 	}
 }

@@ -45,16 +45,21 @@
 (call_expression function: (generic_function function: (scoped_identifier
   path: [(identifier) @recv (scoped_identifier name: (identifier) @recv) (generic_type type: (type_identifier) @recv)]
   name: (identifier) @name))) @reference.call
-(macro_invocation macro: (identifier) @name) @reference.call
-(macro_invocation macro: (scoped_identifier name: (identifier) @name)) @reference.call
+(call_expression function: (generic_function function: (scoped_identifier path: [(self) (super) (crate) (bracketed_type)] name: (identifier) @name))) @reference.call
+
+; a macro invocation is a reference to the macro (it resolves to the
+; macro_rules! definition), not a call: no callable target, nothing to trace
+(macro_invocation macro: (identifier) @name) @reference.macro
+(macro_invocation macro: (scoped_identifier name: (identifier) @name)) @reference.macro
 
 ; calls inside macro arguments: tree-sitter-rust keeps them as raw token trees,
-; so `assert_eq!(add(1, 2), 3)` holds no call_expression. An identifier followed
-; by a parenthesized token tree is a call; ParseFile enforces true adjacency (the
-; `.` anchor skips punctuation, so `x, (1, 2)` would match) and picks up a
-; `recv.` prefix. Two levels cover `f(g(x))` and `x.m(y.n())`.
-(macro_invocation (token_tree (identifier) @name @reference.call . (token_tree "(")))
-(macro_invocation (token_tree (token_tree (identifier) @name @reference.call . (token_tree "("))))
+; so `assert_eq!(add(1, 2), 3)` holds no call_expression. Every identifier is
+; proposed and ParseFile's macroArgCall keeps the calls: the identifier followed
+; directly, or after a `::<..>` turbofish, by a parenthesized tree (a query
+; anchor cannot express that: it skips punctuation, so `x, (1, 2)` would match).
+; Two levels cover `f(g(x))` and `x.m(y.n())`.
+(macro_invocation (token_tree (identifier) @name @reference.call))
+(macro_invocation (token_tree (token_tree (identifier) @name @reference.call)))
 
 ; use declarations emit the imported item's name, so the edge resolves to it
 (use_declaration argument: (identifier) @name) @reference.import
@@ -72,7 +77,7 @@
 (trait_item bounds: (trait_bounds [
   (type_identifier) @name
   (scoped_type_identifier name: (type_identifier) @name)
-  (generic_type type: (type_identifier) @name)
+  (generic_type type: [(type_identifier) @name (scoped_type_identifier name: (type_identifier) @name)])
 ])) @reference.extends
 
 ; attributes: #[test], #[tokio::main], and each derive in #[derive(Debug, Clone)].
@@ -80,30 +85,27 @@
 (attribute_item (attribute [(identifier) @name (scoped_identifier name: (identifier) @name)])) @reference.annotation
 (attribute_item (attribute (identifier) @_derive arguments: (token_tree (identifier) @name)) (#eq? @_derive "derive")) @reference.annotation
 
-; type bindings: parameter / typed let / struct literal / Type::new() and
-; Type::default() constructors; T, &T, &mut T, Generic<..>, dyn T and impl T
-(parameter pattern: (identifier) @bind.name type: [
+; type bindings. Parameter and typed let share ONE pattern (they are the only
+; nodes with both pattern: and type: fields), so their type shapes cannot drift:
+; T, a::T, T<..>, a::T<..>, each behind & / &mut, plus dyn and impl traits
+(_ pattern: (identifier) @bind.name type: [
   (type_identifier) @bind.type
-  (generic_type type: (type_identifier) @bind.type)
   (scoped_type_identifier name: (type_identifier) @bind.type)
+  (generic_type type: [(type_identifier) @bind.type (scoped_type_identifier name: (type_identifier) @bind.type)])
   (reference_type type: [
     (type_identifier) @bind.type
-    (generic_type type: (type_identifier) @bind.type)
     (scoped_type_identifier name: (type_identifier) @bind.type)
-    (dynamic_type trait: [(type_identifier) @bind.type (generic_type type: (type_identifier) @bind.type)])])
-  (dynamic_type trait: [(type_identifier) @bind.type (generic_type type: (type_identifier) @bind.type)])
-  (abstract_type trait: [(type_identifier) @bind.type (generic_type type: (type_identifier) @bind.type)])
-])
-(let_declaration pattern: (identifier) @bind.name type: [
-  (type_identifier) @bind.type
-  (generic_type type: (type_identifier) @bind.type)
-  (scoped_type_identifier name: (type_identifier) @bind.type)
-  (reference_type type: [
+    (generic_type type: [(type_identifier) @bind.type (scoped_type_identifier name: (type_identifier) @bind.type)])
+    (dynamic_type trait: [
+      (type_identifier) @bind.type
+      (scoped_type_identifier name: (type_identifier) @bind.type)
+      (generic_type type: [(type_identifier) @bind.type (scoped_type_identifier name: (type_identifier) @bind.type)])])])
+  (abstract_type trait: [
     (type_identifier) @bind.type
-    (generic_type type: (type_identifier) @bind.type)
     (scoped_type_identifier name: (type_identifier) @bind.type)
-    (dynamic_type trait: (type_identifier) @bind.type)])
+    (generic_type type: [(type_identifier) @bind.type (scoped_type_identifier name: (type_identifier) @bind.type)])])
 ])
+; let x = T { .. } / T::new() / T::default()
 (let_declaration pattern: (identifier) @bind.name value: (struct_expression name: [
   (type_identifier) @bind.type
   (scoped_type_identifier name: (type_identifier) @bind.type)

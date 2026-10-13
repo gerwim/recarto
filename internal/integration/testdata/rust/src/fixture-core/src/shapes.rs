@@ -54,6 +54,10 @@ pub fn is_large(shape: &dyn Shape) -> bool { //# def function is_large; ref Shap
     shape.area() > 100.0 //# ref area; call is_large -> Shape.area; call is_large -> Circle.area
 }
 
+pub fn area_of<S: Shape>(shape: &S) -> f64 { //# def function area_of; ref Shape
+    shape.area() //# ref area
+}
+
 pub fn label_of(shape: impl Shape) -> String { //# def function label_of; ref Shape
     shape.describe() //# ref describe; call label_of -> Shape.describe
 }
@@ -67,5 +71,12 @@ mod tests { //# def module tests
         let c = Circle::new(1.0); //# ref Circle; ref new; call tests.circle_area -> Circle.new
         assert!(!is_large(&c)); //# ref is_large; call tests.circle_area -> is_large
         assert_eq!(Square(2.0).area(), 4.0); //# ref Square; ref area; call tests.circle_area -> Square
+        assert!(super::area_of::<Circle>(&c) > 3.0); //# ref area_of; ref Circle; call tests.circle_area -> area_of
+    }
+
+    #[test] //# annot test on tests.square_area
+    fn square_area() { //# def function tests.square_area
+        let a = super::area_of::<Square>(&Square(2.0)); //# ref area_of; ref Square; call tests.square_area -> area_of; call tests.square_area -> Square
+        assert_eq!(a, 4.0);
     }
 }

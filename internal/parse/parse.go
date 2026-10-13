@@ -81,11 +81,12 @@ func edgeKind(suffix string) string {
 	}
 }
 
-// macroArgCall vets a call the Rust query proposes inside a macro's token tree
-// (tree-sitter-rust leaves macro arguments unparsed): the `.` anchor skips
-// punctuation, so the argument tree must follow the identifier immediately —
-// `x, (1, 2)` and `vec![..]` are not calls — and a `recv.` prefix becomes the
-// receiver. Names outside token trees pass untouched.
+// macroArgCall decides whether an identifier the Rust query proposes inside a
+// macro's token tree (tree-sitter-rust leaves macro arguments unparsed) is a
+// call: the arguments must follow it directly, or after a `::<..>` turbofish, as
+// a parenthesized tree — `x, (1, 2)`, `vec![..]` and `a::b` are not calls. A
+// `recv.` or `Path::` prefix becomes the receiver, as for calls outside macros.
+// Names outside token trees pass untouched.
 func macroArgCall(name *sitter.Node, src []byte, recv *string) bool {
 	if name == nil {
 		return true
@@ -93,11 +94,37 @@ func macroArgCall(name *sitter.Node, src []byte, recv *string) bool {
 	if p := name.Parent(); p == nil || p.Kind() != "token_tree" {
 		return true
 	}
-	if next := name.NextSibling(); next == nil || next.Kind() != "token_tree" {
+	next := name.NextSibling()
+	if next != nil && next.Kind() == "::" {
+		// Turbofish f::<T, Vec<U>>(..): step past the balanced angle brackets
+		// (the lexer fuses a closing `>>` into one token).
+		lt := next.NextSibling()
+		if lt == nil || lt.Kind() != "<" {
+			return false
+		}
+		depth := 0
+		for next = lt; next != nil; next = next.NextSibling() {
+			switch next.Kind() {
+			case "<":
+				depth++
+			case ">":
+				depth--
+			case ">>":
+				depth -= 2
+			}
+			if depth <= 0 {
+				break
+			}
+		}
+		if next != nil {
+			next = next.NextSibling()
+		}
+	}
+	if next == nil || next.Kind() != "token_tree" || next.Child(0) == nil || next.Child(0).Kind() != "(" {
 		return false
 	}
-	if dot := name.PrevSibling(); dot != nil && dot.Kind() == "." {
-		if r := dot.PrevSibling(); r != nil && (r.Kind() == "identifier" || r.Kind() == "self") {
+	if sep := name.PrevSibling(); sep != nil && (sep.Kind() == "." || sep.Kind() == "::") {
+		if r := sep.PrevSibling(); r != nil && (r.Kind() == "identifier" || (sep.Kind() == "." && r.Kind() == "self")) {
 			*recv = r.Utf8Text(src)
 		}
 	}

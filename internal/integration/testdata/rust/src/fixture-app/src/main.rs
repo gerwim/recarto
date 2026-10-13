@@ -23,6 +23,8 @@ fn run_geometry() { //# def function run_geometry
     assert_eq!(q, Quadrant::NorthEast); //# ref Quadrant; ref NorthEast
     println!("{d} {lo:?} {hi:?} {a} {b} {} {}", m.to_km(), square!(3)); //# ref to_km; ref square; call run_geometry -> to_km
     println!("{}", sort_pair(9, 4).0); //# ref sort_pair; call run_geometry -> sort_pair
+    let one = crate::first::<i32>(&[1, 2]); //# ref first; call run_geometry -> first
+    println!("{one}");
 }
 
 fn run_shapes() { //# def function run_shapes
@@ -33,14 +35,18 @@ fn run_shapes() { //# def function run_shapes
     let big = is_large(&s); //# ref is_large; call run_shapes -> is_large
     let u: Circle = Circle::unit(); //# ref Circle; ref unit; call run_shapes -> unit
     println!("{text} {big} {} {}", u.area(), label_of(s)); //# ref area; ref label_of; call run_shapes -> Circle.area; call run_shapes -> label_of
+    let half = self::first::<f64>(&[0.5]); //# ref first; call run_shapes -> first
+    println!("{half}");
 }
 
 fn run_storage() { //# def function run_storage
     let mut repo: InMemoryRepository<Circle> = InMemoryRepository::with_capacity(4); //# ref InMemoryRepository; ref Circle; ref with_capacity; call run_storage -> with_capacity
     let id = repo.save(Circle::unit()); //# ref save; ref Circle; ref unit; call run_storage -> InMemoryRepository.save
     let found = repo.find(id).map(|c| c.area()); //# ref find; ref area; call run_storage -> InMemoryRepository.find
+    let shared: &dyn Repository<Circle> = &repo; //# ref Repository; ref Circle
+    let again = shared.find(id).is_some(); //# ref find; call run_storage -> Repository.find
     let total = store_all(&mut repo, vec![Circle::new(1.0)]); //# ref store_all; ref Circle; ref new; call run_storage -> store_all
-    println!("{found:?} {total} {}", repo.count()); //# ref count; call run_storage -> count
+    println!("{found:?} {again} {total} {}", repo.count()); //# ref count; call run_storage -> count
 }
 
 fn store_all(repo: &mut dyn Repository<Circle>, items: Vec<Circle>) -> usize { //# def function store_all; ref Repository; ref Circle
@@ -49,6 +55,10 @@ fn store_all(repo: &mut dyn Repository<Circle>, items: Vec<Circle>) -> usize { /
         last = repo.save(item); //# ref save; call store_all -> Repository.save; call store_all -> InMemoryRepository.save
     }
     last
+}
+
+fn first<T: Copy>(items: &[T]) -> T { //# def function first
+    items[0]
 }
 
 fn sort_pair(a: i32, b: i32) -> (i32, i32) { //# def function sort_pair

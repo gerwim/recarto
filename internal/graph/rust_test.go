@@ -31,6 +31,14 @@ pub mod geo {
 }
 
 fn len(x: f64) -> usize { x as usize }
+
+pub trait Measure<T> {
+    fn measure(&self) -> T;
+}
+
+impl Measure<f64> for Circle {
+    fn measure(&self) -> f64 { self.r }
+}
 `)
 
 var rustMain = []byte(`use crate::shapes::{Area, Circle};
@@ -42,6 +50,13 @@ fn main() {
     println!("{}", c.area());
     total(&c);
 }
+
+fn measured(input: &dyn Measure<f64>) -> f64 {
+    let m: &dyn Measure<f64> = input;
+    m.measure() + crate::helper::<u32>()
+}
+
+fn helper<T>() -> f64 { 0.0 }
 
 #[cfg(test)]
 mod tests {
@@ -109,15 +124,18 @@ func TestRustGraph(t *testing.T) {
 
 	got := rustCandidates(t, e)
 	for _, want := range []string{
-		"Circle.new -> Circle.make (typed)", // Self::make via the impl's Self binding
-		"Circle.len -> len (name)",          // bare len(...) is the free function
-		"total -> Area.area (typed)",        // s: &dyn Area
-		"total -> Circle.area (iface)",      // ... dispatched to the trait impl
-		"main -> Circle.new (static)",       // Circle::new
-		"main -> Circle.area (typed)",       // c.area() inside println!, c = Circle::new(..)
-		"main -> total (name)",              //
-		"tests.checks -> total (name)",      // inside assert_eq!
-		"tests.checks -> Circle.new (name)", // inside assert_eq!
+		"Circle.new -> Circle.make (typed)",   // Self::make via the impl's Self binding
+		"Circle.len -> len (name)",            // bare len(...) is the free function
+		"total -> Area.area (typed)",          // s: &dyn Area
+		"total -> Circle.area (iface)",        // ... dispatched to the trait impl
+		"main -> Circle.new (static)",         // Circle::new
+		"main -> Circle.area (typed)",         // c.area() inside println!, c = Circle::new(..)
+		"main -> total (name)",                //
+		"tests.checks -> total (name)",        // inside assert_eq!
+		"tests.checks -> Circle.new (static)", // Circle::new inside assert_eq!
+		"measured -> Measure.measure (typed)", // let m: &dyn Measure<f64>
+		"measured -> Circle.measure (iface)",  // ... dispatched to the trait impl
+		"measured -> helper (name)",           // crate::helper::<u32>()
 	} {
 		if !slices.Contains(got, want) {
 			t.Errorf("missing candidate %q", want)
