@@ -130,8 +130,8 @@ func runLanguageSuite(t *testing.T, dir string) {
 	t.Run("search", func(t *testing.T) {
 		byLeaf := map[string]map[string]bool{} // leaf -> expected qualified names
 		for _, d := range fx.defs {
-			if d.Kind == "namespace" {
-				continue // ranked search demotes namespace declarations by design
+			if d.Kind == "namespace" || d.Kind == "impl" {
+				continue // ranked search folds and demotes container declarations by design
 			}
 			if byLeaf[d.name()] == nil {
 				byLeaf[d.name()] = map[string]bool{}
@@ -160,6 +160,9 @@ func runLanguageSuite(t *testing.T, dir string) {
 	t.Run("snippet", func(t *testing.T) {
 		byQN := map[string][]def{}
 		for _, d := range fx.defs {
+			if d.Kind == "impl" {
+				continue // a Rust impl block folds into its same-named type; its methods are Type.method
+			}
 			byQN[d.QN] = append(byQN[d.QN], d)
 		}
 		qns := make([]string, 0, len(byQN))
@@ -261,12 +264,12 @@ func runLanguageSuite(t *testing.T, dir string) {
 	})
 
 	t.Run("type-dead-end-hint", func(t *testing.T) {
-		// A type that is never constructed (an interface) has no caller chains;
+		// A type that is never constructed (an interface, a trait) has no caller chains;
 		// the dead-end must be diagnosed as "this is a type" — steering to impls
 		// and grep — never as "may be an entrypoint", which describes methods and
 		// sent a real user hunting in the wrong direction.
 		for _, d := range fx.defs {
-			if d.Kind != "interface" {
+			if d.Kind != "interface" && d.Kind != "trait" {
 				continue
 			}
 			out := runGraph(t, a, "callers", d.QN)

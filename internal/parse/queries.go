@@ -14,6 +14,9 @@ var typescriptQuery string
 //go:embed queries/javascript.scm
 var javascriptQuery string
 
+//go:embed queries/rust.scm
+var rustQuery string
+
 // querySources maps a language id to its compiled-query source. tsx reuses the
 // TypeScript query (the tsx grammar shares the same definition/reference nodes).
 func querySources() map[string]string {
@@ -23,5 +26,6 @@ func querySources() map[string]string {
 		"typescript": typescriptQuery,
 		"tsx":        typescriptQuery,
 		"javascript": javascriptQuery,
+		"rust":       rustQuery,
 	}
 }

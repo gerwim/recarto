@@ -1,0 +1,119 @@
+package parse
+
+import (
+	"fmt"
+	"slices"
+	"strings"
+	"testing"
+)
+
+const rustSrc = `use std::fmt::{self, Display};
+use crate::geo::Point as P;
+mod inner { pub fn helper() {} }
+mod decl;
+/// docs
+#[derive(Debug, Clone)]
+pub struct Circle<T> { r: T }
+pub union Bits { a: u32 }
+pub enum Shape { Round(f64), Empty }
+type Alias = Circle<f64>;
+pub trait Area: Display { fn area(&self) -> f64; fn twice(&self) -> f64 { self.area() * 2.0 } }
+impl<T> Circle<T> { pub fn new(r: T) -> Self { Self::make(r) } fn make(r: T) -> Self { Circle { r } } }
+impl fmt::Display for Circle<f64> { fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result { write!(f, "{}", self.area()) } }
+macro_rules! sq { ($x:expr) => { $x * $x }; }
+extern "C" { fn abs(x: i32) -> i32; }
+#[test]
+// a comment between attribute and item
+fn run(s: &dyn Area, m: &mut Circle<f64>) {
+    let x: Circle<f64> = Circle::new(1.0);
+    let y = Circle { r: 2.0 };
+    let z = Circle::<f64>::default();
+    fn nested() {}
+    assert_eq!(compute(foo.bar(1), inner::helper()), y, (1, 2), vec!(1));
+    x.area();
+    super::up();
+}
+`
+
+// TestParseRust pins the Rust extraction end to end on one file: every item
+// kind exactly once (no function_item double-captured as function and method),
+// attribute-widened spans, every edge kind, and the receiver bindings.
+func TestParseRust(t *testing.T) {
+	r, err := NewRegistry()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	res, err := r.ParseFile("rust", "src/lib.rs", []byte(rustSrc))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var syms []string
+	for _, s := range res.Symbols {
+		syms = append(syms, fmt.Sprintf("%s %s %d-%d@%d", s.Kind, s.Name, s.StartLine, s.EndLine, s.NameLine))
+	}
+	wantSyms := []string{
+		"module inner 3-3@3", "function helper 3-3@3",
+		"struct Circle 6-7@7", // span widened over #[derive], not the doc comment
+		"struct Bits 8-8@8",
+		"enum Shape 9-9@9", "enum_member Round 9-9@9", "enum_member Empty 9-9@9",
+		"type Alias 10-10@10",
+		"trait Area 11-11@11", "method area 11-11@11", "method twice 11-11@11",
+		"impl Circle 12-12@12", "method new 12-12@12", "method make 12-12@12",
+		"impl Circle 13-13@13", "method fmt 13-13@13",
+		"macro sq 14-14@14",
+		"function abs 15-15@15",
+		"function run 16-26@18", // #[test] widened across the comment
+		"function nested 22-22@22",
+	}
+	if !slices.Equal(syms, wantSyms) {
+		t.Errorf("symbols:\n got %s\nwant %s", strings.Join(syms, ", "), strings.Join(wantSyms, ", "))
+	}
+
+	var edges []string
+	for _, e := range res.Edges {
+		edges = append(edges, fmt.Sprintf("%s %s %s %d", e.Kind, e.DstName, e.Recv, e.Line))
+	}
+	wantEdges := []string{
+		"imports Display  1", "imports Point  2",
+		"annotates derive  6", "annotates Debug  6", "annotates Clone  6",
+		"extends Display  11", "calls area self 11",
+		"calls make Self 12",
+		"extends Display  13", "calls write  13", "calls area self 13",
+		"annotates test  16",
+		"calls new Circle 19",
+		"calls default Circle 21",
+		// inside assert_eq!: compute, foo.bar and helper are calls; `y, (1, 2)`
+		// and the nested vec!(1) are not (punctuation separates them)
+		"calls assert_eq  23", "calls compute  23", "calls bar foo 23", "calls helper  23",
+		"calls area x 24",
+		"calls up  25",
+	}
+	slices.Sort(edges)
+	slices.Sort(wantEdges)
+	if !slices.Equal(edges, wantEdges) {
+		t.Errorf("edges:\n got %s\nwant %s", strings.Join(edges, ", "), strings.Join(wantEdges, ", "))
+	}
+
+	binds := map[string]map[string]bool{}
+	for _, b := range res.Bindings {
+		if binds[b.Name] == nil {
+			binds[b.Name] = map[string]bool{}
+		}
+		binds[b.Name][b.TypeName] = true
+	}
+	for name, typ := range map[string]string{
+		"s": "Area", "m": "Circle", "x": "Circle", "y": "Circle", "z": "Circle", "f": "Formatter",
+	} {
+		if !binds[name][typ] {
+			t.Errorf("binding %s: want %s, got %v", name, typ, binds[name])
+		}
+	}
+	// self/Self are bound to the impl (or trait) type for each body.
+	for _, name := range []string{"self", "Self"} {
+		if !binds[name]["Circle"] || !binds[name]["Area"] {
+			t.Errorf("binding %s: want Circle and Area, got %v", name, binds[name])
+		}
+	}
+}

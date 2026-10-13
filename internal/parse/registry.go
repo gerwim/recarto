@@ -13,6 +13,7 @@ import (
 	tscs "github.com/tree-sitter/tree-sitter-c-sharp/bindings/go"
 	tsgo "github.com/tree-sitter/tree-sitter-go/bindings/go"
 	tsjs "github.com/tree-sitter/tree-sitter-javascript/bindings/go"
+	tsrust "github.com/tree-sitter/tree-sitter-rust/bindings/go"
 	tsts "github.com/tree-sitter/tree-sitter-typescript/bindings/go"
 )
 
@@ -32,6 +33,7 @@ func NewRegistry() (*Registry, error) {
 		"typescript": sitter.NewLanguage(tsts.LanguageTypescript()),
 		"tsx":        sitter.NewLanguage(tsts.LanguageTSX()),
 		"javascript": sitter.NewLanguage(tsjs.Language()),
+		"rust":       sitter.NewLanguage(tsrust.Language()),
 	}
 	queries := map[string]*sitter.Query{}
 	for lang, src := range querySources() {
@@ -68,6 +70,8 @@ func LangForExt(path string) (string, bool) {
 		return "tsx", true
 	case ".js", ".jsx", ".mjs", ".cjs":
 		return "javascript", true
+	case ".rs":
+		return "rust", true
 	}
 	return "", false
 }

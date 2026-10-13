@@ -4,9 +4,9 @@ Correctness of the extraction queries (`internal/parse/queries/*.scm`) rests on
 three independent, machine-checked layers — provenance alone is none of them:
 
 1. **Compiler-validated fixtures, LSP-semantics expectations** (this suite):
-   the C# fixture builds with `dotnet build`, and every `def`/`ref` marker
-   encodes what a language server reports; results are asserted exactly, in
-   both directions.
+   the C# fixture builds with `dotnet build` and the Rust one with
+   `cargo build`, and every `def`/`ref` marker encodes what a language server
+   reports; results are asserted exactly, in both directions.
 2. **Upstream cross-check** (`internal/parse/coverage_test.go`): every
    definition/reference construct in the grammar's own `tags.scm` (the query
    GitHub code navigation runs, version-pinned to the exact grammar we link,
@@ -86,7 +86,8 @@ Authoring rules (the `fixture-hygiene` subtest enforces them mechanically):
   bytes the engine does, and hygiene checks the stripped text.
 - Dotted names (namespaces) are exempt from hygiene: `\bA\.B\b` also matches
   `A.B.C` — textual-search semantics, not a fixture defect.
-- Keep the fixture COMPILABLE (`dotnet build` for C#): ground truth for `ref`
+- Keep the fixture COMPILABLE (`dotnet build` for C#, `cargo build` for Rust,
+  in a scratch copy of `src/`): ground truth for `ref`
   markers is what the language's LSP would report, and that is only
   well-defined for valid code.
 

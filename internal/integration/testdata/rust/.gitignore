@@ -1,0 +1,5 @@
+# Building the fixture workspace (done ad hoc to validate it compiles) must
+# never commit artifacts. The harness also excludes target/ at runtime via
+# manifest.json exclude_dirs.
+src/target/
+src/Cargo.lock

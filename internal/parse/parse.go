@@ -81,6 +81,29 @@ func edgeKind(suffix string) string {
 	}
 }
 
+// macroArgCall vets a call the Rust query proposes inside a macro's token tree
+// (tree-sitter-rust leaves macro arguments unparsed): the `.` anchor skips
+// punctuation, so the argument tree must follow the identifier immediately —
+// `x, (1, 2)` and `vec![..]` are not calls — and a `recv.` prefix becomes the
+// receiver. Names outside token trees pass untouched.
+func macroArgCall(name *sitter.Node, src []byte, recv *string) bool {
+	if name == nil {
+		return true
+	}
+	if p := name.Parent(); p == nil || p.Kind() != "token_tree" {
+		return true
+	}
+	if next := name.NextSibling(); next == nil || next.Kind() != "token_tree" {
+		return false
+	}
+	if dot := name.PrevSibling(); dot != nil && dot.Kind() == "." {
+		if r := dot.PrevSibling(); r != nil && (r.Kind() == "identifier" || r.Kind() == "self") {
+			*recv = r.Utf8Text(src)
+		}
+	}
+	return true
+}
+
 // ParseFile parses src as lang and extracts symbols/edges using the language's
 // compiled query. All C-allocating objects are closed before returning. path is
 // currently unused but retained for future qualified-name construction.
@@ -113,8 +136,9 @@ func (r *Registry) ParseFile(lang, path string, src []byte) (Result, error) {
 		var defKind, refKind string
 		var sb, eb, sl, el uint
 		var nameByte, nameLine uint
-		var recvNameByte, bindByte uint
-		var defNode *sitter.Node
+		var recvNameByte, bindByte, selfByte uint
+		var isSelf bool
+		var defNode, nameNode *sitter.Node
 		for _, c := range m.Captures {
 			cn := captureNames[c.Index]
 			switch {
@@ -122,6 +146,8 @@ func (r *Registry) ParseFile(lang, path string, src []byte) (Result, error) {
 				name = strings.Trim(c.Node.Utf8Text(src), `"`)
 				nameByte = c.Node.StartByte()
 				nameLine = c.Node.StartPosition().Row + 1
+				n := c.Node
+				nameNode = &n
 			case cn == "recv":
 				recv = c.Node.Utf8Text(src)
 			case cn == "recv.type":
@@ -134,6 +160,8 @@ func (r *Registry) ParseFile(lang, path string, src []byte) (Result, error) {
 				bindByte = c.Node.StartByte()
 			case cn == "bind.type":
 				bindType = strings.TrimPrefix(c.Node.Utf8Text(src), "*")
+			case cn == "bind.self":
+				isSelf, selfByte = true, c.Node.StartByte()
 			case strings.HasPrefix(cn, "definition."):
 				defKind = strings.TrimPrefix(cn, "definition.")
 				n := c.Node
@@ -145,6 +173,9 @@ func (r *Registry) ParseFile(lang, path string, src []byte) (Result, error) {
 				sb = c.Node.StartByte()
 				sl = c.Node.StartPosition().Row + 1
 			}
+		}
+		if refKind == "call" && lang == "rust" && !macroArgCall(nameNode, src, &recv) {
+			continue
 		}
 		switch {
 		case defKind != "" && name != "":
@@ -160,6 +191,19 @@ func (r *Registry) ParseFile(lang, path string, src []byte) (Result, error) {
 					sl, el = p.StartPosition().Row+1, p.EndPosition().Row+1
 				}
 			}
+			// Rust attributes (#[derive(..)], #[test]) precede their item as
+			// siblings rather than nesting in it like a C# attribute list. Widen the
+			// span over them so snippets show them and annotation edges land on the
+			// item; comments between attribute and item are stepped over.
+			if lang == "rust" && defNode != nil {
+				for p := defNode.PrevNamedSibling(); p != nil; p = p.PrevNamedSibling() {
+					if k := p.Kind(); k == "attribute_item" {
+						sb, sl = p.StartByte(), p.StartPosition().Row+1
+					} else if k != "line_comment" && k != "block_comment" {
+						break
+					}
+				}
+			}
 			res.Symbols = append(res.Symbols, Symbol{
 				Kind: defKind, Name: name, QualifiedName: name, RecvType: recvType,
 				StartByte: sb, EndByte: eb, StartLine: sl, EndLine: el,
@@ -173,6 +217,12 @@ func (r *Registry) ParseFile(lang, path string, src []byte) (Result, error) {
 			res.Edges = append(res.Edges, Edge{
 				Kind: edgeKind(refKind), DstName: name, Recv: recv, StartByte: sb, Line: sl,
 			})
+		case isSelf && bindType != "":
+			// Rust impl/trait body: `self` and `Self` both denote the implementing
+			// type, scoped (via the enclosing impl/trait symbol) to the whole body.
+			res.Bindings = append(res.Bindings,
+				TypeBinding{Name: "self", TypeName: bindType, StartByte: selfByte},
+				TypeBinding{Name: "Self", TypeName: bindType, StartByte: selfByte})
 		case bindName != "" && bindType != "" && bindType != "var":
 			// C# `var x = …` yields an implicit_type "var"; skip it — the real type
 			// comes from the object-creation binding pattern. ("var" is a contextual

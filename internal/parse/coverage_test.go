@@ -78,6 +78,7 @@ func TestUpstreamTagsCoverage(t *testing.T) {
 		"go":         {"go-tags.scm"},
 		"typescript": {"typescript-tags.scm", "javascript-tags.scm"},
 		"javascript": {"javascript-tags.scm"},
+		"rust":       {"rust-tags.scm"},
 	}
 
 	for lang, files := range upstreamFor {

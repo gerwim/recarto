@@ -8,7 +8,7 @@ import (
 )
 
 // schemaVersion is the number of applied migrations.
-const schemaVersion = 22
+const schemaVersion = 23
 
 // migrations are applied in order; index+1 becomes user_version.
 var migrations = []string{
@@ -559,6 +559,14 @@ CREATE TABLE IF NOT EXISTS memory_vectors (
   vec       BLOB NOT NULL
 );
 CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts_vocab USING fts5vocab(memories_fts, 'row');
+`,
+	// v23 (Rust support): .rs files are now indexed. Existing worktrees already
+	// hold them on disk, but the git-state freshness token does not change on a
+	// binary upgrade, so ReconcileIfStale would never look. Clearing the tokens
+	// forces one reconcile, which indexes the never-seen .rs files and skips every
+	// unchanged file by mtime/size. No wipe: no existing language's output changed.
+	`
+DELETE FROM meta WHERE key LIKE 'graph_token:%';
 `,
 }
 

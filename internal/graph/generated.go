@@ -87,14 +87,16 @@ func demoteGenerated(in []SearchResult, protect map[string]bool) []SearchResult 
 }
 
 // containerKinds are declaration kinds that name a scope rather than a navigable
-// unit of code — a C# namespace, a TS internal module. One is re-declared in
-// every file of the scope, so a concept query whose terms land in the scope name
+// unit of code — a C# namespace, a TS internal module, a Rust impl block (named
+// after its type, which usually has several). One is re-declared in every file of
+// the scope, so a concept query whose terms land in the scope name
 // (e.g. "execution pipeline" → namespace App.Execution.Pipeline) otherwise floods
 // the page with dozens of identical container rows that crowd out the classes and
 // methods the agent actually wants. They are deduped to one (see symbolKey) and
 // demoted here so concrete symbols always lead; the container still appears, last.
 var containerKinds = map[string]bool{
 	"namespace": true,
+	"impl":      true,
 }
 
 // demoteNamespaces stably partitions results so container (namespace) nodes sink
