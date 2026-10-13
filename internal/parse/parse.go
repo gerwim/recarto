@@ -81,54 +81,76 @@ func edgeKind(suffix string) string {
 	}
 }
 
-// macroArgCall decides whether an identifier the Rust query proposes inside a
-// macro's token tree (tree-sitter-rust leaves macro arguments unparsed) is a
-// call: the arguments must follow it directly, or after a `::<..>` turbofish, as
-// a parenthesized tree — `x, (1, 2)`, `vec![..]` and `a::b` are not calls. A
-// `recv.` or `Path::` prefix becomes the receiver, as for calls outside macros.
-// Names outside token trees pass untouched.
-func macroArgCall(name *sitter.Node, src []byte, recv *string) bool {
-	if name == nil {
-		return true
-	}
-	if p := name.Parent(); p == nil || p.Kind() != "token_tree" {
-		return true
-	}
-	next := name.NextSibling()
-	if next != nil && next.Kind() == "::" {
-		// Turbofish f::<T, Vec<U>>(..): step past the balanced angle brackets
-		// (the lexer fuses a closing `>>` into one token).
-		lt := next.NextSibling()
-		if lt == nil || lt.Kind() != "<" {
-			return false
+// macroCalls returns the calls written in a Rust macro's argument token tree
+// (tree-sitter-rust leaves macro arguments unparsed) and in the trees nested one
+// level in it. An identifier is a call when a parenthesized tree follows it
+// directly or after a `::<..>` turbofish — `x, (1, 2)`, `vec![..]` and `a::b` are
+// not calls — and a `recv.` or `Path::` prefix becomes the receiver, as for calls
+// outside macros. Each tree's tokens are read once through cur and every `<` is
+// matched to its closer in one stack pass, so the scan stays linear in the size
+// of the macro however its angle brackets nest (an unbalanced `a::<a::<…` run
+// must not rescan the rest of the tree per identifier).
+func macroCalls(args sitter.Node, cur *sitter.TreeCursor, src []byte, nested bool) []Edge {
+	toks := args.Children(cur)
+	// closer: index of a `<` -> index of the token closing it, or -1 when it
+	// closes inside a fused `>>` (in `a::<b::<T>>()` only the outer `a` is followed
+	// by the call's arguments).
+	closer := map[int]int{}
+	var open []int
+	pop := func(at int) {
+		if len(open) > 0 {
+			closer[open[len(open)-1]] = at
+			open = open[:len(open)-1]
 		}
-		depth := 0
-		for next = lt; next != nil; next = next.NextSibling() {
-			switch next.Kind() {
-			case "<":
-				depth++
-			case ">":
-				depth--
-			case ">>":
-				depth -= 2
+	}
+	for i := range toks {
+		switch toks[i].Kind() {
+		case "<":
+			open = append(open, i)
+		case ">":
+			pop(i)
+		case ">>": // the lexer fuses two closers into one token
+			pop(-1)
+			pop(i)
+		}
+	}
+	var out []Edge
+	for i := range toks {
+		tok := toks[i]
+		if tok.Kind() == "token_tree" && !nested {
+			out = append(out, macroCalls(tok, cur, src, true)...)
+			continue
+		}
+		if tok.Kind() != "identifier" {
+			continue
+		}
+		next := i + 1
+		if next+1 < len(toks) && toks[next].Kind() == "::" && toks[next+1].Kind() == "<" {
+			c, ok := closer[next+1]
+			if !ok || c < 0 {
+				continue // unclosed, or closed inside a `>>`
 			}
-			if depth <= 0 {
-				break
+			next = c + 1
+		}
+		if next >= len(toks) || toks[next].Kind() != "token_tree" {
+			continue
+		}
+		if open := toks[next].Child(0); open == nil || open.Kind() != "(" {
+			continue
+		}
+		recv := ""
+		if i >= 2 {
+			sep, r := toks[i-1].Kind(), toks[i-2]
+			if (sep == "." || sep == "::") && (r.Kind() == "identifier" || (sep == "." && r.Kind() == "self")) {
+				recv = r.Utf8Text(src)
 			}
 		}
-		if next != nil {
-			next = next.NextSibling()
-		}
+		out = append(out, Edge{
+			Kind: "calls", DstName: tok.Utf8Text(src), Recv: recv,
+			StartByte: tok.StartByte(), Line: tok.StartPosition().Row + 1,
+		})
 	}
-	if next == nil || next.Kind() != "token_tree" || next.Child(0) == nil || next.Child(0).Kind() != "(" {
-		return false
-	}
-	if sep := name.PrevSibling(); sep != nil && (sep.Kind() == "." || sep.Kind() == "::") {
-		if r := sep.PrevSibling(); r != nil && (r.Kind() == "identifier" || (sep.Kind() == "." && r.Kind() == "self")) {
-			*recv = r.Utf8Text(src)
-		}
-	}
-	return true
+	return out
 }
 
 // ParseFile parses src as lang and extracts symbols/edges using the language's
@@ -154,6 +176,8 @@ func (r *Registry) ParseFile(lang, path string, src []byte) (Result, error) {
 
 	cur := sitter.NewQueryCursor()
 	defer cur.Close()
+	walker := tree.Walk() // reused by macroCalls
+	defer walker.Close()
 
 	captureNames := q.CaptureNames()
 	var res Result
@@ -165,7 +189,7 @@ func (r *Registry) ParseFile(lang, path string, src []byte) (Result, error) {
 		var nameByte, nameLine uint
 		var recvNameByte, bindByte, selfByte uint
 		var isSelf bool
-		var defNode, nameNode *sitter.Node
+		var defNode *sitter.Node
 		for _, c := range m.Captures {
 			cn := captureNames[c.Index]
 			switch {
@@ -173,8 +197,6 @@ func (r *Registry) ParseFile(lang, path string, src []byte) (Result, error) {
 				name = strings.Trim(c.Node.Utf8Text(src), `"`)
 				nameByte = c.Node.StartByte()
 				nameLine = c.Node.StartPosition().Row + 1
-				n := c.Node
-				nameNode = &n
 			case cn == "recv":
 				recv = c.Node.Utf8Text(src)
 			case cn == "recv.type":
@@ -189,6 +211,8 @@ func (r *Registry) ParseFile(lang, path string, src []byte) (Result, error) {
 				bindType = strings.TrimPrefix(c.Node.Utf8Text(src), "*")
 			case cn == "bind.self":
 				isSelf, selfByte = true, c.Node.StartByte()
+			case cn == "macro.args":
+				res.Edges = append(res.Edges, macroCalls(c.Node, walker, src, false)...)
 			case strings.HasPrefix(cn, "definition."):
 				defKind = strings.TrimPrefix(cn, "definition.")
 				n := c.Node
@@ -200,9 +224,6 @@ func (r *Registry) ParseFile(lang, path string, src []byte) (Result, error) {
 				sb = c.Node.StartByte()
 				sl = c.Node.StartPosition().Row + 1
 			}
-		}
-		if refKind == "call" && lang == "rust" && !macroArgCall(nameNode, src, &recv) {
-			continue
 		}
 		switch {
 		case defKind != "" && name != "":

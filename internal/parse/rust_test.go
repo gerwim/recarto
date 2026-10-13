@@ -5,6 +5,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 const rustSrc = `use std::fmt::{self, Display};
@@ -162,6 +163,7 @@ func TestParseRustCallShapes(t *testing.T) {
 		{"super::f::<u8>()", "", ""},
 		{"crate::f()", "", ""},
 		{"crate::f::<u8, Vec<Vec<u8>>>()", "", ""},
+		{"f::<g::<u8>>()", "", ""}, // g sits in f's turbofish: not a call
 		{"<T as Tr>::f()", "", ""},
 		{"<T as Tr>::f::<u8>()", "", ""},
 	} {
@@ -226,6 +228,35 @@ func TestParseRustBindingShapes(t *testing.T) {
 		}
 		if !slices.Equal(got, []string{"x:Area"}) {
 			t.Errorf("%s: bindings %v, want [x:Area]", src, got)
+		}
+	}
+}
+
+// TestParseRustMacroScanIsLinear guards security finding F1: an unbalanced
+// `a::<a::<…` run inside one macro made every identifier rescan the rest of the
+// token tree for its turbofish closer — 32 KB took 4m16s to parse. The matching
+// is now one stack pass, so even 4x that input parses in well under a second.
+func TestParseRustMacroScanIsLinear(t *testing.T) {
+	parseRust := rustParser(t)
+	for _, c := range []struct {
+		src   string
+		calls int
+	}{
+		{"fn f() { m!(" + strings.Repeat("a::<", 32000) + "); }", 0},
+		{"fn f() { m!(" + strings.Repeat("a::<", 16000) + strings.Repeat(">", 16000) + "()); }", 1},
+		{"fn f() { m!(" + strings.Repeat("a::<u8>(), ", 16000) + "); }", 16000},
+	} {
+		start := time.Now()
+		res := parseRust(c.src)
+		elapsed := time.Since(start)
+		calls := 0
+		for _, e := range res.Edges {
+			if e.Kind == "calls" {
+				calls++
+			}
+		}
+		if calls != c.calls || elapsed > 10*time.Second {
+			t.Errorf("%d-byte macro: %d calls in %v, want %d calls in well under 10s", len(c.src), calls, elapsed, c.calls)
 		}
 	}
 }

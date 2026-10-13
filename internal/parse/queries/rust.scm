@@ -53,13 +53,12 @@
 (macro_invocation macro: (scoped_identifier name: (identifier) @name)) @reference.macro
 
 ; calls inside macro arguments: tree-sitter-rust keeps them as raw token trees,
-; so `assert_eq!(add(1, 2), 3)` holds no call_expression. Every identifier is
-; proposed and ParseFile's macroArgCall keeps the calls: the identifier followed
-; directly, or after a `::<..>` turbofish, by a parenthesized tree (a query
-; anchor cannot express that: it skips punctuation, so `x, (1, 2)` would match).
-; Two levels cover `f(g(x))` and `x.m(y.n())`.
-(macro_invocation (token_tree (identifier) @name @reference.call))
-(macro_invocation (token_tree (token_tree (identifier) @name @reference.call)))
+; so `assert_eq!(add(1, 2), 3)` holds no call_expression. ParseFile's macroCalls
+; scans the argument tree (and the trees nested one level in it) in one linear
+; pass: an identifier followed directly, or after a `::<..>` turbofish, by a
+; parenthesized tree is a call. A query anchor cannot express that (it skips
+; punctuation, so `x, (1, 2)` would match).
+(macro_invocation (token_tree) @macro.args)
 
 ; use declarations emit the imported item's name, so the edge resolves to it
 (use_declaration argument: (identifier) @name) @reference.import
