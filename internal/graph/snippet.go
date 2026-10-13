@@ -209,7 +209,9 @@ SELECT n.start_byte, n.end_byte, n.start_line, n.end_line
 // file-less lookup for the type matched both and bounced the caller with a
 // spurious "ambiguous" prompt; the constructor's source is a subset of the type's
 // and is not a genuine alternative. Real ambiguity — two distinct same-named
-// types — is untouched, since neither type owns the other's constructor.
+// types — is untouched, since neither type owns the other's constructor. A Rust
+// impl block shares its type's qualified name the same way and folds into the
+// type likewise (its methods stay reachable as Type.method).
 func collapseOwnedConstructors(cands []SnippetCandidate) []SnippetCandidate {
 	typeQNs := make(map[string]bool, len(cands))
 	for _, c := range cands {
@@ -222,6 +224,9 @@ func collapseOwnedConstructors(cands []SnippetCandidate) []SnippetCandidate {
 	}
 	out := cands[:0:0]
 	for _, c := range cands {
+		if c.Kind == "impl" && typeQNs[c.QualifiedName] {
+			continue
+		}
 		if c.Kind == "constructor" {
 			if i := lastDot(c.QualifiedName); i >= 0 && typeQNs[c.QualifiedName[:i]] {
 				continue // owned by a type already in the candidate set

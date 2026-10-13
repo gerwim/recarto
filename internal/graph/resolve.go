@@ -13,7 +13,7 @@ import (
 // Resolve links reference edges to a defining node within the same worktree.
 // Non-call edges (extends/implements/imports/references) bind dst_node_id by
 // matching dst_name to a node name/qualified_name, scoped to the language FAMILY
-// ({csharp}, {go}, web {typescript,tsx,javascript}) so a C# `.Select(...)` can
+// ({csharp}, {go}, {rust}, web {typescript,tsx,javascript}) so a C# `.Select(...)` can
 // never bind to a React `Select`, preferring same-file then same-directory then a
 // stable id order. Call edges are resolved into a confidence-ranked candidate set
 // (edge_candidates) by the strategy passes in callStrategies; edges.dst_node_id
@@ -847,10 +847,10 @@ SELECT ed.id, m.id, 0.45, 'ctor'
    AND ef.language = mf.language
    AND NOT EXISTS (SELECT 1 FROM edge_candidates ec0 WHERE ec0.edge_id = ed.id)`
 
-// stratInterface (S4, C#): the receiver's bound type T is an interface or base
-// class; expand to <method> on each implementing/deriving type, found via the
-// extends edges (X extends/implements T) and X's contained methods. Confidence
-// 0.5 — a set of possible dispatch targets. Go interfaces are structural (no
+// stratInterface (S4, C#/Rust): the receiver's bound type T is an interface, base
+// class or trait; expand to <method> on each implementing/deriving type (a Rust
+// impl block), found via the extends edges (X extends/implements T) and X's
+// contained methods. Confidence 0.5 — a set of possible dispatch targets. Go interfaces are structural (no
 // extends edge), so this yields nothing for Go (intended: Go stays S5).
 const stratInterface = `
 INSERT OR IGNORE INTO edge_candidates(edge_id, dst_node_id, confidence, method)
@@ -863,7 +863,7 @@ SELECT ed.id, m.id, 0.5, 'iface'
        AND tb.name = ed.dst_recv
        AND tb.scope_start_byte <= src.start_byte
        AND src.end_byte <= tb.scope_end_byte
-  CROSS JOIN nodes iface ON iface.name = tb.type_name AND iface.kind IN ('interface','class')
+  CROSS JOIN nodes iface ON iface.name = tb.type_name AND iface.kind IN ('interface','class','trait')
   CROSS JOIN edges ext ON ext.kind = 'extends' AND ext.dst_node_id = iface.id
   CROSS JOIN edges cm  ON cm.kind = 'contains' AND cm.src_node_id = ext.src_node_id
   CROSS JOIN nodes m   ON m.id = cm.dst_node_id AND m.kind = 'method' AND m.name = ed.dst_name
@@ -896,7 +896,7 @@ const stratInterfaceShared = `
 INSERT OR IGNORE INTO edge_candidates(edge_id, dst_node_id, confidence, method)
 SELECT rt.edge_id, m.id, 0.5, 'iface'
   FROM recv_types rt
-  CROSS JOIN nodes iface ON iface.name = rt.type_name AND iface.kind IN ('interface','class')
+  CROSS JOIN nodes iface ON iface.name = rt.type_name AND iface.kind IN ('interface','class','trait')
   CROSS JOIN edges ext ON ext.kind = 'extends' AND ext.dst_node_id = iface.id
   CROSS JOIN edges cm  ON cm.kind = 'contains' AND cm.src_node_id = ext.src_node_id
   CROSS JOIN nodes m   ON m.id = cm.dst_node_id AND m.kind = 'method' AND m.name = rt.dst_name
@@ -940,6 +940,8 @@ SELECT ed.id, m.id, 0.9, 'static'
 // stratSelf (S1): a bare M() or this.M() inside a class binds to a sibling method
 // of the same class, linked via contains edges (class -> caller, class -> target).
 // Confidence 0.95. (C#; Go self-calls use an explicit receiver and go via S2.)
+// Rust is excluded for bare calls: a bare f() there can never name a method (that
+// takes self.f() / Self::f(), resolved by S2 via the impl's self/Self bindings).
 // The second bound parameter is unused here but kept so every callStrategies
 // entry has the same (worktree, worktree) arity; "? IS NOT NULL" is always true.
 const stratSelf = `
@@ -947,7 +949,7 @@ INSERT OR IGNORE INTO edge_candidates(edge_id, dst_node_id, confidence, method)
 SELECT ed.id, m.id, 0.95, 'self'
   FROM files ef
   CROSS JOIN edges ed ON ed.file_id = ef.id
-       AND ed.kind = 'calls' AND (ed.dst_recv = '' OR ed.dst_recv = 'this')
+       AND ed.kind = 'calls' AND (ed.dst_recv = 'this' OR (ed.dst_recv = '' AND ef.language <> 'rust'))
   CROSS JOIN edges pc ON pc.kind = 'contains' AND pc.dst_node_id = ed.src_node_id
   CROSS JOIN edges cm ON cm.kind = 'contains' AND cm.src_node_id = pc.src_node_id
   CROSS JOIN nodes m ON m.id = cm.dst_node_id

@@ -332,12 +332,12 @@ func TestLatestCheckMigrationPreservesMemoriesAndColumns(t *testing.T) {
 		VALUES('t2','todo','done',1,1)`)
 }
 
-func TestSchemaVersionIs22(t *testing.T) {
-	if schemaVersion != 22 {
-		t.Fatalf("schemaVersion = %d, want 22", schemaVersion)
+func TestSchemaVersionIs23(t *testing.T) {
+	if schemaVersion != 23 {
+		t.Fatalf("schemaVersion = %d, want 23", schemaVersion)
 	}
-	if len(migrations) != 22 {
-		t.Fatalf("len(migrations) = %d, want 22", len(migrations))
+	if len(migrations) != 23 {
+		t.Fatalf("len(migrations) = %d, want 23", len(migrations))
 	}
 	st, err := Open(filepath.Join(t.TempDir(), "store.db"))
 	if err != nil {
@@ -348,8 +348,45 @@ func TestSchemaVersionIs22(t *testing.T) {
 	if err := st.DB.QueryRow("PRAGMA user_version").Scan(&v); err != nil {
 		t.Fatal(err)
 	}
-	if v != 22 {
-		t.Fatalf("user_version = %d, want 22", v)
+	if v != 23 {
+		t.Fatalf("user_version = %d, want 23", v)
+	}
+}
+
+// TestV23ResetsGraphTokensOnly pins the Rust-support migration: it clears the
+// graph freshness tokens (so the next reconcile indexes .rs files already on
+// disk) but keeps the indexed graph, which no existing language's output changed.
+func TestV23ResetsGraphTokensOnly(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "store.db")
+	st, err := Open(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustExec(t, st, `INSERT INTO files(id,worktree,path,language,content_hash,mtime,size,last_indexed_at)
+		VALUES('f1','/wt','a.go','go','h',1,1,1)`)
+	mustExec(t, st, `INSERT INTO nodes(id,file_id,kind,name,qualified_name,signature,start_byte,end_byte,start_line,end_line)
+		VALUES('n1','f1','function','F','F','',0,1,1,1)`)
+	mustExec(t, st, `INSERT INTO meta(key,value) VALUES('graph_token:/wt','tok'),('keep','1')`)
+	mustExec(t, st, `PRAGMA user_version = 22`)
+	st.Close()
+
+	st2, err := Open(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st2.Close()
+	var tokens, nodes, kept int
+	if err := st2.DB.QueryRow(`SELECT COUNT(*) FROM meta WHERE key LIKE 'graph_token:%'`).Scan(&tokens); err != nil {
+		t.Fatal(err)
+	}
+	if err := st2.DB.QueryRow(`SELECT COUNT(*) FROM nodes`).Scan(&nodes); err != nil {
+		t.Fatal(err)
+	}
+	if err := st2.DB.QueryRow(`SELECT COUNT(*) FROM meta WHERE key='keep'`).Scan(&kept); err != nil {
+		t.Fatal(err)
+	}
+	if tokens != 0 || nodes != 1 || kept != 1 {
+		t.Errorf("after v23: graph tokens=%d (want 0), nodes=%d (want 1), other meta=%d (want 1)", tokens, nodes, kept)
 	}
 }
 

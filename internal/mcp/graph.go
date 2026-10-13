@@ -22,7 +22,7 @@ func leafName(sym string) string {
 }
 
 // canonicalIdentifier removes the redundant short name from a list result. Across
-// every indexed language (go, csharp, typescript, tsx, javascript) a symbol's name
+// every indexed language (go, csharp, typescript, tsx, javascript, rust) a symbol's name
 // is exactly the trailing segment of its qualified_name — verified over 124k nodes,
 // 100% — so emitting both duplicates the leaf on every row. qualified_name is the
 // precise, overload-safe form that get_code_snippet/trace_call_path/find_* already
@@ -91,7 +91,7 @@ type SearchGraphInput struct {
 	Query            string   `json:"query" jsonschema:"the concept or symbol name to find, in plain natural language"`
 	CandidateSymbols []string `json:"candidate_symbols,omitempty" jsonschema:"the identifier names you expect to exist for this concept (3-8 best guesses). Any form is accepted and matched leniently: PascalCase (AddressLookup), interface-prefixed (IAddressLookupService), snake_case (address_lookup), plain phrases (address lookup), or partial/qualified names. Provide these whenever searching by concept rather than an exact known name."`
 	Kind             string   `json:"kind,omitempty" jsonschema:"restrict to a node kind (function, method, class, …)"`
-	Language         string   `json:"language,omitempty" jsonschema:"restrict to a language (go, csharp, typescript, tsx, javascript)"`
+	Language         string   `json:"language,omitempty" jsonschema:"restrict to a language (go, csharp, typescript, tsx, javascript, rust)"`
 	Limit            int      `json:"limit,omitempty" jsonschema:"max results"`
 }
 type GraphSymbol struct {
@@ -387,7 +387,7 @@ type SearchContentInput struct {
 	Regex      bool   `json:"regex,omitempty" jsonschema:"treat pattern as a regular expression instead of a literal substring"`
 	IgnoreCase bool   `json:"ignore_case,omitempty" jsonschema:"case-insensitive match"`
 	PathGlob   string `json:"path_glob,omitempty" jsonschema:"restrict to files whose path matches this glob (e.g. *.cs, src/**). A glob without a slash matches the filename."`
-	Language   string `json:"language,omitempty" jsonschema:"restrict to a language (go, csharp, typescript, tsx, javascript). NOTE: this scopes the search to indexed code of that language; omit it to also search config/docs/data files (.csproj, .json, .yaml, .md, …)."`
+	Language   string `json:"language,omitempty" jsonschema:"restrict to a language (go, csharp, typescript, tsx, javascript, rust). NOTE: this scopes the search to indexed code of that language; omit it to also search config/docs/data files (.csproj, .json, .yaml, .md, …)."`
 	Limit      int    `json:"limit,omitempty" jsonschema:"max matches (default 50)"`
 	MaxPerFile int    `json:"max_per_file,omitempty" jsonschema:"max matches per file (default 5) so one file cannot dominate the page"`
 	Offset     int    `json:"offset,omitempty" jsonschema:"skip the first N matches of the stable result order — page with offset+limit instead of re-fetching with a bigger limit. Pages the returned (per-file-capped) order: when per_file_capped is true, the withheld same-file matches are reached by raising max_per_file, not by paging deeper"`

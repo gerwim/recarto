@@ -7,11 +7,12 @@ import (
 )
 
 // testFileSuffixes are unambiguous test-file naming conventions across ecosystems
-// (Go, xUnit/NUnit C#, Jest/Vitest TS/JS). Like the generated-file list these are
-// deliberately narrow: a false positive demotes hand-written product code, which
-// would be a quality regression.
+// (Go, xUnit/NUnit C#, Jest/Vitest TS/JS, Rust — whose tests/ dir is a segment
+// match below). Like the generated-file list these are deliberately narrow: a
+// false positive demotes hand-written product code, which would be a quality
+// regression.
 var testFileSuffixes = []string{
-	"_test.go",
+	"_test.go", "_test.rs", "_tests.rs",
 	"tests.cs", "test.cs",
 	".test.ts", ".test.tsx", ".test.js", ".test.jsx",
 	".spec.ts", ".spec.tsx", ".spec.js", ".spec.jsx",

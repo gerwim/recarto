@@ -260,7 +260,7 @@ Measure-Command { recarto recall "auth flow" }
   markdown is on-demand export only.
 - **No daemon.** Hooks are pure exit-0 CLI invocations; the code graph reconciles
   lazily at session start and incrementally on each edit.
-- **Languages:** Go, C#, TypeScript (+TSX), JavaScript (+JSX) via tree-sitter.
+- **Languages:** Go, C#, TypeScript (+TSX), JavaScript (+JSX), Rust via tree-sitter.
 
 ## If the store gets corrupted
 

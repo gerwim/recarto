@@ -37,7 +37,7 @@ func (e *Engine) HasEmbedder() bool { return e.emb != nil }
 // semantic search targets, which only degrades recall@k and index time.
 var embeddableKinds = map[string]bool{
 	"class": true, "interface": true, "struct": true, "record": true,
-	"enum": true, "type": true, "namespace": true,
+	"enum": true, "type": true, "namespace": true, "trait": true,
 	"function": true, "method": true, "delegate": true,
 }
 

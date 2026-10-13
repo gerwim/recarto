@@ -16,6 +16,7 @@ import (
 	tscs "github.com/tree-sitter/tree-sitter-c-sharp/bindings/go"
 	tsgo "github.com/tree-sitter/tree-sitter-go/bindings/go"
 	tsjs "github.com/tree-sitter/tree-sitter-javascript/bindings/go"
+	tsrust "github.com/tree-sitter/tree-sitter-rust/bindings/go"
 	tsts "github.com/tree-sitter/tree-sitter-typescript/bindings/go"
 )
 
@@ -31,6 +32,8 @@ func langFor(path string) *sitter.Language {
 		return sitter.NewLanguage(tsts.LanguageTSX())
 	case ".js", ".jsx", ".mjs", ".cjs":
 		return sitter.NewLanguage(tsjs.Language())
+	case ".rs":
+		return sitter.NewLanguage(tsrust.Language())
 	}
 	return nil
 }

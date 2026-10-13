@@ -1,0 +1,7 @@
+{
+  "language": "rust",
+  "comment": "//",
+  "source_exts": [".rs"],
+  "exclude_dirs": ["target"],
+  "lsp_command": ["rust-analyzer"]
+}

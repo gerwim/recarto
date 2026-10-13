@@ -366,7 +366,7 @@ func qnMatches(qn, spec string) bool {
 // like "InMemoryRepository" from also matching its constructor (whose qualified
 // name ends with the same segment).
 var (
-	typeKinds     = map[string]bool{"class": true, "interface": true, "struct": true, "record": true, "enum": true, "delegate": true, "type": true}
+	typeKinds     = map[string]bool{"class": true, "interface": true, "struct": true, "record": true, "enum": true, "delegate": true, "type": true, "trait": true, "impl": true}
 	callableKinds = map[string]bool{"method": true, "constructor": true, "function": true}
 	anyKind       map[string]bool // nil: no kind restriction
 )

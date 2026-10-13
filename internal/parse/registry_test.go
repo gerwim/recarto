@@ -6,7 +6,7 @@ func TestLangForExt(t *testing.T) {
 	cases := map[string]string{
 		"a/b/main.go": "go", "x.cs": "csharp", "x.ts": "typescript",
 		"x.tsx": "tsx", "x.js": "javascript", "x.jsx": "javascript",
-		"x.mjs": "javascript", "x.cjs": "javascript",
+		"x.mjs": "javascript", "x.cjs": "javascript", "src/lib.rs": "rust",
 	}
 	for path, want := range cases {
 		got, ok := LangForExt(path)
@@ -25,7 +25,7 @@ func TestNewRegistryCompilesAllQueries(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer r.Close()
-	for _, lang := range []string{"go", "csharp", "typescript", "tsx", "javascript"} {
+	for _, lang := range []string{"go", "csharp", "typescript", "tsx", "javascript", "rust"} {
 		if r.queries[lang] == nil || r.langs[lang] == nil {
 			t.Errorf("%s language/query not registered", lang)
 		}
