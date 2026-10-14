@@ -1,8 +1,6 @@
 {
   // internal/parse links tree-sitter through CGO, which needs a C compiler.
-  // The commands run with a bare PATH; expose the Go 1.26.4 toolchain (go.mod) on
-  // it, installing it when the base sandbox does not already carry /root/goroot.
-  "setup": {"run": "apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq gcc libc6-dev curl ca-certificates && { [ -x /root/goroot/go/bin/go ] || { mkdir -p /root/goroot && curl -fsSL https://go.dev/dl/go1.26.4.linux-amd64.tar.gz | tar -C /root/goroot -xz; }; } && ln -sf /root/goroot/go/bin/go /root/goroot/go/bin/gofmt /usr/local/bin/"},
+  "setup": {"run": "apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq gcc libc6-dev"},
   "commands": [
     {"name": "Build", "run": "go build ./..."},
     {"name": "Vet", "run": "go vet ./..."},
