@@ -44,7 +44,7 @@ func (e *Engine) References(ctx context.Context, worktree, symbol string, limit 
 	if limit <= 0 {
 		limit = 50
 	}
-	symbol = strings.TrimSpace(symbol)
+	symbol = canonicalSymbol(strings.TrimSpace(symbol))
 	if symbol == "" {
 		return nil, meta, nil
 	}

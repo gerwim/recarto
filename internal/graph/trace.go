@@ -76,6 +76,7 @@ func (e *Engine) TraceCallPath(ctx context.Context, worktree, symbol, direction 
 // minConf 0 uses the adaptive default (each call site shows its high/medium
 // candidates, or its low ones only when it has nothing better).
 func (e *Engine) TraceCallPathFiltered(ctx context.Context, worktree, symbol, direction string, depth int, minConf float64) ([][]CallNode, []string, error) {
+	symbol = canonicalSymbol(symbol)
 	if depth <= 0 {
 		depth = 3
 	}

@@ -66,7 +66,7 @@ SELECT n.id, n.name, n.qualified_name, n.kind, f.path, n.start_line, n.signature
 	}
 	if spec.NameLike != "" {
 		b.WriteString(" AND (n.name LIKE ? OR n.qualified_name LIKE ?)")
-		like := "%" + spec.NameLike + "%"
+		like := "%" + canonicalSymbol(spec.NameLike) + "%"
 		args = append(args, like, like)
 	}
 	if spec.Path != "" {
