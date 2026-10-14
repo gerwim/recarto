@@ -206,3 +206,83 @@ func TestRustGraph(t *testing.T) {
 		t.Errorf("Annotated(test) = %+v, want tests.checks", ann)
 	}
 }
+
+// TestRustPathSymbols: Rust writes item paths with "::" (Body::let_go) while
+// qualified names are dotted (Body.let_go); every symbol lookup accepts both.
+func TestRustPathSymbols(t *testing.T) {
+	e := newTestEngine(t)
+	ctx := context.Background()
+	wt := t.TempDir()
+	src := []byte(`pub struct Body;
+
+impl Body {
+    pub fn let_go(&self) {}
+}
+
+pub mod geo {
+    pub struct Square;
+    impl Clone for Square { fn clone(&self) -> Self { Square } }
+}
+
+fn run(b: &Body) { b.let_go(); }
+`)
+	if err := os.MkdirAll(filepath.Join(wt, "src"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wt, "src", "lib.rs"), src, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.IndexFile(ctx, wt, "src/lib.rs", src, 1, int64(len(src))); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.Resolve(ctx, wt, noopProgress{}); err != nil {
+		t.Fatal(err)
+	}
+
+	if snip, cands, err := e.SnippetByName(ctx, wt, "Body::let_go"); err != nil || !snip.Found || snip.QualifiedName != "Body.let_go" {
+		t.Errorf("SnippetByName(Body::let_go) = %+v, candidates %+v, err %v; want Body.let_go", snip, cands, err)
+	}
+	if snip, err := e.Snippet(ctx, wt, "src/lib.rs", "Body::let_go"); err != nil || !snip.Found || snip.QualifiedName != "Body.let_go" {
+		t.Errorf("Snippet(src/lib.rs, Body::let_go) = %+v, err %v; want Body.let_go", snip, err)
+	}
+	chains, sugg, err := e.TraceCallPathFiltered(ctx, wt, "Body::let_go", "callers", 3, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	called := false
+	for _, ch := range chains {
+		if len(ch) >= 2 && ch[1].Name == "run" {
+			called = true
+		}
+	}
+	if !called {
+		t.Errorf("callers(Body::let_go) = %+v, suggestions %v; want run", chains, sugg)
+	}
+	refs, meta, err := e.References(ctx, wt, "Body::let_go", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fromRun := false
+	for _, r := range refs {
+		if r.Kind == "calls" && r.From == "run" {
+			fromRun = true
+		}
+	}
+	if !meta.Resolved || !fromRun {
+		t.Errorf("References(Body::let_go) = %+v (resolved %v); want the calls edge from run", refs, meta.Resolved)
+	}
+	rels, err := e.Implementations(ctx, wt, "geo::Square", "up", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !relNames(rels)["Clone"] {
+		t.Errorf("Implementations(geo::Square, up) = %+v; want Clone", rels)
+	}
+	nodes, err := e.Query(ctx, wt, QuerySpec{NameLike: "Body::let_go"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nodes) != 1 || nodes[0].QualifiedName != "Body.let_go" {
+		t.Errorf("Query(name Body::let_go) = %+v; want Body.let_go", nodes)
+	}
+}

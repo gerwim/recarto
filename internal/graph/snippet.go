@@ -45,6 +45,7 @@ const maxSnippetCandidates = 25
 // return Found=false with no candidates. This removes the search→snippet
 // round-trip and the wrong-path errors of having to know the file first.
 func (e *Engine) SnippetByName(ctx context.Context, worktree, symbol string) (SnippetResult, []SnippetCandidate, error) {
+	symbol = canonicalSymbol(symbol)
 	// A dotted input like "A.Run" (Type.Method without the namespace) is matched as
 	// a suffix of the fully qualified name — mirroring trace's nodesByName — so an
 	// identifier an LLM copied out of `graph callees`/`callers` resolves here too
@@ -243,6 +244,13 @@ var typeLikeKinds = map[string]bool{
 	"interface": true, "enum": true, "type": true,
 }
 
+// canonicalSymbol rewrites a symbol to the stored qualified-name form: every
+// indexed language's qualified name is dot-separated, but Rust writes paths with
+// "::", so "Body::let_go" (an impl method) is looked up as "Body.let_go" and
+// "geo::Square" as "geo.Square". No stored name contains "::", so this never
+// changes what a dotted or bare input matches.
+func canonicalSymbol(s string) string { return strings.ReplaceAll(s, "::", ".") }
+
 // lastDot returns the index of the final '.' in s, or -1 if there is none.
 func lastDot(s string) int {
 	for i := len(s) - 1; i >= 0; i-- {
@@ -257,6 +265,7 @@ func lastDot(s string) int {
 // file, using its stored byte range. It records the tokens saved vs. reading the
 // whole file into the ledger.
 func (e *Engine) Snippet(ctx context.Context, worktree, path, symbol string) (SnippetResult, error) {
+	symbol = canonicalSymbol(symbol)
 	var sb, eb int64
 	var sl, el int
 	var qn string

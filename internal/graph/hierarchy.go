@@ -33,7 +33,7 @@ func (e *Engine) Implementations(ctx context.Context, worktree, symbol, directio
 	if limit <= 0 {
 		limit = 50
 	}
-	symbol = strings.TrimSpace(symbol)
+	symbol = canonicalSymbol(strings.TrimSpace(symbol))
 	if symbol == "" {
 		return nil, nil
 	}
