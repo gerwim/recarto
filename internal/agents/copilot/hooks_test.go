@@ -1,0 +1,93 @@
+package copilot
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"strings"
+	"testing"
+	"time"
+
+	"git.gerwim.nl/gerwim/recarto/internal/app"
+	"git.gerwim.nl/gerwim/recarto/internal/clock"
+)
+
+// fakeGit + newTestApp duplicated per test package (no shared testutil yet).
+type fakeGit struct{}
+
+func (fakeGit) Run(args ...string) (string, error) {
+	switch {
+	case args[0] == "rev-parse" && args[len(args)-1] == "--git-common-dir":
+		return "/repo/.git", nil
+	case args[0] == "rev-parse" && args[len(args)-1] == "--show-toplevel":
+		return "/repo", nil
+	case args[0] == "symbolic-ref":
+		return "main", nil
+	case args[0] == "rev-list":
+		return "rootsha0000", nil
+	}
+	return "", fmt.Errorf("unexpected git args: %v", args)
+}
+
+func newTestApp(t *testing.T) *app.App {
+	t.Helper()
+	for _, k := range []string{
+		"RECARTO_WORKSPACE", "RECARTO_REPOS",
+		"RECARTO_SYNC_URL", "RECARTO_SYNC_KEY", "RECARTO_SYNC_REPO",
+	} {
+		t.Setenv(k, "")
+	}
+	t.Setenv("RECARTO_CACHE_DIR", t.TempDir())
+	a, err := app.Open(app.Config{CWD: "/repo", Runner: fakeGit{}, Clock: clock.NewFake(time.UnixMilli(1_700_000_000_000))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = a.Close() })
+	return a
+}
+
+// TestPostToolUseFanOutCountsOnlyTheRightHook replays what Copilot before
+// v1.0.36 did (matchers ignored: every postToolUse hook runs for every tool) and
+// checks each tool lands only in its own ledger counter.
+func TestPostToolUseFanOutCountsOnlyTheRightHook(t *testing.T) {
+	a := newTestApp(t)
+	ctx := context.Background()
+	call := func(session, tool string) {
+		in := `{"sessionId":"` + session + `","toolName":"` + tool + `","toolArgs":{"path":"/repo/a.go","pattern":"Foo"}}`
+		for _, run := range []func(context.Context, *app.App, io.Reader, io.Writer) error{PostEdit, PostRead, Augment} {
+			if err := run(ctx, a, strings.NewReader(in), io.Discard); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	count := func(scope, metric string) int64 {
+		n, err := a.Ledger.Get(ctx, scope, metric)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	for _, c := range []struct {
+		tool         string
+		edits, reads int64
+	}{
+		{"view", 0, 1},
+		{"edit", 1, 0},
+		{"create", 1, 0},
+		{"grep", 0, 0},
+		{"glob", 0, 0},
+		{"bash", 0, 0},
+		{"powershell", 0, 0},
+		{"task", 0, 0},
+		{"web_fetch", 0, 0},
+		{"ask_user", 0, 0},
+	} {
+		call(c.tool, c.tool) // one session per tool
+		if e, r := count(c.tool, "edits"), count("session:"+c.tool, "reads"); e != c.edits || r != c.reads {
+			t.Errorf("%s: edits %d reads %d, want %d %d", c.tool, e, r, c.edits, c.reads)
+		}
+	}
+	if n := count("lifetime", "reads"); n != 1 {
+		t.Errorf("lifetime reads = %d, want 1 (the view alone)", n)
+	}
+}

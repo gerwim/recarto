@@ -48,3 +48,55 @@ func TestEncodeStopIsEmptyObject(t *testing.T) {
 		t.Errorf("stop should emit empty object, got %s", sb.String())
 	}
 }
+
+func TestDecodeRoutesBuiltinToolsToTheirOwnHook(t *testing.T) {
+	payload := func(tool, args string) string {
+		return `{"sessionId":"s","toolName":"` + tool + `","toolArgs":` + args + `}`
+	}
+	view := payload("view", `{"path":"/r/a.go"}`)
+	edit := payload("edit", `{"path":"/r/a.go","old_str":"x","new_str":"y"}`)
+	create := payload("create", `{"path":"/r/b.go","file_text":"package r"}`)
+	grep := payload("grep", `{"pattern":"Foo","path":"/r"}`)
+	glob := payload("glob", `{"pattern":"**/*Foo*.go","path":"/r"}`)
+	bash := payload("bash", `{"command":"go test ./...","description":"run"}`)
+	cases := []struct {
+		kind          agents.EventKind
+		in            string
+		path, pattern string
+	}{
+		{agents.KindPostRead, view, "/r/a.go", ""},
+		{agents.KindPostEdit, view, "", ""}, // a view never re-indexes or counts as an edit
+		{agents.KindAugment, view, "", ""},
+		{agents.KindPostEdit, edit, "/r/a.go", ""},
+		{agents.KindPostEdit, create, "/r/b.go", ""},
+		{agents.KindPostRead, edit, "", ""}, // edit/create never count as reads
+		{agents.KindPostRead, create, "", ""},
+		{agents.KindAugment, grep, "/r", "Foo"}, // augment reads only the pattern
+		{agents.KindAugment, glob, "/r", "**/*Foo*.go"},
+		{agents.KindPostRead, grep, "", ""}, // a search's dir is neither a read nor an edit
+		{agents.KindPostEdit, glob, "", ""},
+		{agents.KindPostRead, bash, "", ""},
+		{agents.KindPostEdit, bash, "", ""},
+		{agents.KindAugment, bash, "", ""},
+	}
+	for _, c := range cases {
+		ev, err := Adapter{}.Decode(c.kind, strings.NewReader(c.in))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ev.FilePath != c.path || ev.Pattern != c.pattern || ev.SessionID != "s" {
+			t.Errorf("kind %d, %s: path %q pattern %q, want %q %q", c.kind, c.in, ev.FilePath, ev.Pattern, c.path, c.pattern)
+		}
+	}
+}
+
+func TestDecodeAcceptsStringToolArgs(t *testing.T) {
+	in := strings.NewReader(`{"sessionId":"s","toolName":"view","toolArgs":"{\"path\":\"/a/b.go\"}"}`)
+	ev, err := Adapter{}.Decode(agents.KindPostRead, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ev.FilePath != "/a/b.go" {
+		t.Errorf("path = %q from a JSON-string toolArgs", ev.FilePath)
+	}
+}

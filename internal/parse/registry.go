@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	sitter "github.com/tree-sitter/go-tree-sitter"
 	tscs "github.com/tree-sitter/tree-sitter-c-sharp/bindings/go"
@@ -17,43 +18,56 @@ import (
 	tsts "github.com/tree-sitter/tree-sitter-typescript/bindings/go"
 )
 
-// Registry holds the per-language grammars and pre-compiled queries. Build once
-// per process; safe for concurrent ParseFile calls (each creates its own Parser).
+// Registry holds the per-language grammars and their queries, each compiled on
+// first use. Build once per process; safe for concurrent ParseFile calls (each
+// creates its own Parser).
 type Registry struct {
-	langs   map[string]*sitter.Language
+	langs map[string]*sitter.Language
+
+	mu      sync.Mutex
 	queries map[string]*sitter.Query
 }
 
-// NewRegistry compiles every language's query. A malformed query is a programmer
-// error surfaced at startup.
+// NewRegistry registers every language. It compiles no query: compiling all six
+// costs ~0.25 s of CPU, which every hook and CLI process paid at start-up even
+// when it parsed nothing. A malformed query surfaces on that language's first
+// ParseFile (and in the package tests).
 func NewRegistry() (*Registry, error) {
-	langs := map[string]*sitter.Language{
-		"go":         sitter.NewLanguage(tsgo.Language()),
-		"csharp":     sitter.NewLanguage(tscs.Language()),
-		"typescript": sitter.NewLanguage(tsts.LanguageTypescript()),
-		"tsx":        sitter.NewLanguage(tsts.LanguageTSX()),
-		"javascript": sitter.NewLanguage(tsjs.Language()),
-		"rust":       sitter.NewLanguage(tsrust.Language()),
+	return &Registry{
+		langs: map[string]*sitter.Language{
+			"go":         sitter.NewLanguage(tsgo.Language()),
+			"csharp":     sitter.NewLanguage(tscs.Language()),
+			"typescript": sitter.NewLanguage(tsts.LanguageTypescript()),
+			"tsx":        sitter.NewLanguage(tsts.LanguageTSX()),
+			"javascript": sitter.NewLanguage(tsjs.Language()),
+			"rust":       sitter.NewLanguage(tsrust.Language()),
+		},
+		queries: map[string]*sitter.Query{},
+	}, nil
+}
+
+// query returns lang's compiled query, compiling it on first use.
+func (r *Registry) query(lang string) (*sitter.Query, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if q, ok := r.queries[lang]; ok {
+		return q, nil
 	}
-	queries := map[string]*sitter.Query{}
-	for lang, src := range querySources() {
-		q, qErr := sitter.NewQuery(langs[lang], src)
-		if qErr != nil {
-			// Close any already-compiled queries before bailing (must-Close).
-			for _, already := range queries {
-				already.Close()
-			}
-			return nil, fmt.Errorf("parse: compile %s query: %v", lang, qErr)
-		}
-		queries[lang] = q
+	q, qErr := sitter.NewQuery(r.langs[lang], querySources()[lang])
+	if qErr != nil {
+		return nil, fmt.Errorf("parse: compile %s query: %v", lang, qErr)
 	}
-	return &Registry{langs: langs, queries: queries}, nil
+	r.queries[lang] = q
+	return q, nil
 }
 
 // Close releases the compiled queries (must-Close discipline).
 func (r *Registry) Close() {
-	for _, q := range r.queries {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for lang, q := range r.queries {
 		q.Close()
+		delete(r.queries, lang)
 	}
 }
 

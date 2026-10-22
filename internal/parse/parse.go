@@ -161,7 +161,10 @@ func (r *Registry) ParseFile(lang, path string, src []byte) (Result, error) {
 	if !ok {
 		return Result{}, fmt.Errorf("parse: unsupported language %q", lang)
 	}
-	q := r.queries[lang]
+	q, err := r.query(lang)
+	if err != nil {
+		return Result{}, err
+	}
 
 	p := sitter.NewParser()
 	defer p.Close()
