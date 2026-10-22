@@ -152,7 +152,7 @@ func TestRunHookShellWithNothingToDoOpensNoStore(t *testing.T) {
 	for _, tc := range []struct{ command, cmd string }{
 		{"go build ./... && git status", ""},
 		{"go test ./... | grep FAIL", "grep"},
-		{"cat " + outside, "cat"},
+		{"cat " + filepath.ToSlash(outside), "cat"},
 		{"rg Foo | head", "head"}, // the rg hook answers it
 		{"rg Foo | head", "grep"}, // a hook Claude Code would not even start
 	} {

@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -182,10 +183,15 @@ func TestShellViewsSurfaceAnchoredMemories(t *testing.T) {
 	if err := a.Graph.IndexFile(ctx, dir, "f.go", src, 1, int64(len(src))); err != nil {
 		t.Fatal(err)
 	}
-	for _, command := range []string{
+	commands := []string{
 		`cat f.go`, `head -n 50 f.go`, `tail f.go`, `sed -n '10,40p' f.go`, `cat f.go | head`, `grep -n Foo f.go`,
-		`cd internal && cat ../f.go`, `cat ` + filepath.Join(dir, "f.go"),
-	} {
+		`cd internal && cat ../f.go`, `cat ` + filepath.ToSlash(filepath.Join(dir, "f.go")),
+	}
+	if vol := filepath.VolumeName(dir); runtime.GOOS == "windows" && len(vol) == 2 {
+		// Git Bash spells C:\x\f.go as /c/x/f.go.
+		commands = append(commands, `cat /`+strings.ToLower(vol[:1])+filepath.ToSlash(filepath.Join(dir, "f.go")[2:]))
+	}
+	for _, command := range commands {
 		first := shellHook(t, a, Event{SessionID: command, Command: command, CWD: dir})
 		for _, want := range []string{"f.go panics on nil", "never inline f.go helpers", "split f.go"} {
 			if !strings.Contains(first, want) {
@@ -244,7 +250,7 @@ func TestShellViewOutsideServedRepos(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if got := shellHook(t, a, Event{SessionID: "s", Command: `cat ` + filepath.Join(other, "f.go"), CWD: dir}); got != "" {
+	if got := shellHook(t, a, Event{SessionID: "s", Command: `cat ` + filepath.ToSlash(filepath.Join(other, "f.go")), CWD: dir}); got != "" {
 		t.Errorf("view outside the served repos: %q", got)
 	}
 }
@@ -285,7 +291,7 @@ func TestShellViewSurfacesSiblingRepoMemories(t *testing.T) {
 	}
 	defer func() { _ = a.Close() }()
 	for _, command := range []string{
-		`cat ` + filepath.Join(repo1, "a", "b", "c.go"),
+		`cat ` + filepath.ToSlash(filepath.Join(repo1, "a", "b", "c.go")),
 		`cd ../repo1 && head -n 5 a/b/c.go`,
 		`tail ~/repo1/a/b/c.go`,
 	} {

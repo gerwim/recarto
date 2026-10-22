@@ -362,14 +362,14 @@ func wordOf(w *syntax.Word) shellWord {
 	for i, part := range w.Parts {
 		switch p := part.(type) {
 		case *syntax.Lit:
-			v := p.Value
-			if i == 0 && (v == "~" || strings.HasPrefix(v, "~/")) {
+			v := unescape(p.Value, false) // before ~ expansion: a Windows home has backslashes
+			if i == 0 && (p.Value == "~" || strings.HasPrefix(p.Value, "~/")) {
 				home, err := os.UserHomeDir()
 				out.dyn = out.dyn || err != nil
 				v = home + v[1:]
 			}
-			out.glob = out.glob || strings.ContainsAny(v, "*?[")
-			b.WriteString(unescape(v, false))
+			out.glob = out.glob || strings.ContainsAny(p.Value, "*?[")
+			b.WriteString(v)
 		case *syntax.SglQuoted:
 			out.dyn = out.dyn || p.Dollar // $'…' escapes are not decoded
 			b.WriteString(p.Value)

@@ -96,7 +96,7 @@ func TestParseShell(t *testing.T) {
 		{`cd internal; cd ..; cat f.go`, want{"cat", nil, []string{f}}},
 		{`(cd internal && cat x.go); cat f.go`, want{"cat", nil, []string{x, f}}},
 		{`cd internal | true; cat f.go`, want{"cat", nil, []string{f}}},
-		{`cat ` + x, want{"cat", nil, []string{x}}},
+		{`cat ` + filepath.ToSlash(x), want{"cat", nil, []string{x}}},
 		{`cat ~/h.go`, want{"cat", nil, []string{filepath.Join(home, "h.go")}}},
 		{`cd && cat h.go`, want{"cat", nil, []string{filepath.Join(home, "h.go")}}},
 		{`cd - && cat f.go`, want{"cat", nil, nil}},
