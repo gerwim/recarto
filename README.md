@@ -12,8 +12,8 @@ Everything lives in a shared per-repo SQLite cache **outside** your working tree
 (`~/.cache/recarto/<repo-id>/`), keyed by the repository and tagged per branch and
 worktree. Nothing is committed, so there are no file-merge conflicts.
 
-Supported agents: **Claude Code**, **OpenCode**, and **GitHub Copilot CLI** — with
-feature parity across all three.
+Supported agents: **Claude Code**, **OpenCode** (1.x and 2.x), and **GitHub Copilot
+CLI** — with feature parity across all three.
 
 ---
 
@@ -161,11 +161,19 @@ What each agent gets:
 | Agent | MCP server | Hooks | Instructions |
 |---|---|---|---|
 | **Claude Code** | `.mcp.json` (repo) / `~/.claude.json` (user) | `.claude/settings.json` / `~/.claude/settings.json` | `AGENTS.md` / `~/.claude/CLAUDE.md` |
-| **OpenCode** | `opencode.json` / `~/.config/opencode/opencode.json` | `.opencode/plugins/recarto.js` (generated) | `AGENTS.md` / `~/.config/opencode/AGENTS.md` |
+| **OpenCode** | `opencode.json` / `~/.config/opencode/opencode.json` | `.opencode/plugins/recarto.js` / `~/.config/opencode/plugins/recarto.js` (generated) | `AGENTS.md` / `~/.config/opencode/AGENTS.md` |
 | **Copilot CLI** | `.mcp.json` / `~/.copilot/mcp-config.json` | `.github/hooks/recarto.json` / `~/.copilot/hooks/recarto.json` | `AGENTS.md` / `~/.copilot/copilot-instructions.md` |
 
 `recarto init` is idempotent — re-running merges only what's missing and preserves
 your existing config.
+
+The generated OpenCode plugin works with both OpenCode 1.x and OpenCode 2.x (its
+default export carries the 2.x `setup` entrypoint and the 1.x `server` one), so it
+keeps working across an OpenCode upgrade. OpenCode 2 does not load plugins written by
+older Recarto releases: re-run `recarto init` once to regenerate it. The MCP entry is
+written in the 1.x shape both read, unless your `opencode.json` already uses 2.x's
+native `mcp.servers` map — then it goes there. Auto-detection also finds OpenCode 2's
+`opencode2` executable.
 
 After `init`, **restart your agent** (Claude Code, OpenCode or Copilot CLI) so it
 picks up the new MCP server and hooks. Verify the MCP server is connected with your

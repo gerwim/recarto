@@ -13,7 +13,9 @@ import (
 type Adapter struct{}
 
 // Decode parses the subset of the Claude Code hook payload we use into a neutral
-// Event. The grep pattern falls back to the glob query field.
+// Event. The grep pattern falls back to the glob query field; the tool output
+// (sized for the read ledger) comes from tool_response, falling back to the
+// tool_result spelling older payloads used.
 func (Adapter) Decode(kind agents.EventKind, in io.Reader) (agents.Event, error) {
 	var p struct {
 		SessionID string `json:"session_id"`
@@ -24,6 +26,7 @@ func (Adapter) Decode(kind agents.EventKind, in io.Reader) (agents.Event, error)
 			Query    string `json:"query"`
 		} `json:"tool_input"`
 		ToolResult     json.RawMessage `json:"tool_result"`
+		ToolResponse   json.RawMessage `json:"tool_response"` // what Claude Code actually sends
 		StopHookActive bool            `json:"stop_hook_active"`
 	}
 	if err := json.NewDecoder(in).Decode(&p); err != nil && err != io.EOF {
@@ -33,6 +36,10 @@ func (Adapter) Decode(kind agents.EventKind, in io.Reader) (agents.Event, error)
 	if pattern == "" {
 		pattern = p.ToolInput.Query
 	}
+	result := p.ToolResult
+	if len(result) == 0 {
+		result = p.ToolResponse
+	}
 	return agents.Event{
 		Kind:       kind,
 		Agent:      "claude-code",
@@ -40,7 +47,7 @@ func (Adapter) Decode(kind agents.EventKind, in io.Reader) (agents.Event, error)
 		Source:     p.Source,
 		FilePath:   p.ToolInput.FilePath,
 		Pattern:    pattern,
-		ToolResult: string(p.ToolResult),
+		ToolResult: string(result),
 		StopActive: p.StopHookActive,
 	}, nil
 }

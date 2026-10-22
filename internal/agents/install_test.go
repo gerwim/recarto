@@ -3,6 +3,8 @@ package agents
 import (
 	"os"
 	"path/filepath"
+	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -56,5 +58,19 @@ func TestScopePathsRepoVsUser(t *testing.T) {
 	}
 	if ScopeUser.String() != "user" || ScopeRepo.String() != "repo" {
 		t.Errorf("scope strings wrong")
+	}
+}
+
+func TestDetectFindsOpenCode2Alias(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("PATH lookup needs an .exe on Windows")
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "opencode2"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+	if got := Detect(); !reflect.DeepEqual(got, []string{"opencode"}) {
+		t.Errorf("Detect() = %v, want [opencode]", got)
 	}
 }

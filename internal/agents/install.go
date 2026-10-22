@@ -49,19 +49,25 @@ type InstallResult struct {
 }
 
 // Supported is the ordered set of agent names recarto can integrate with, each
-// paired with the executable it looks for on PATH during auto-detection.
-var Supported = []struct{ Name, Exe string }{
-	{"claude", "claude"},
-	{"opencode", "opencode"},
-	{"copilot", "copilot"},
+// paired with the executables it looks for on PATH during auto-detection.
+var Supported = []struct {
+	Name string
+	Exes []string
+}{
+	{"claude", []string{"claude"}},
+	{"opencode", []string{"opencode", "opencode2"}}, // OpenCode 2 also installs an opencode2 alias
+	{"copilot", []string{"copilot"}},
 }
 
 // Detect returns the supported agent names whose CLI is found on PATH.
 func Detect() []string {
 	var found []string
 	for _, s := range Supported {
-		if _, err := exec.LookPath(s.Exe); err == nil {
-			found = append(found, s.Name)
+		for _, exe := range s.Exes {
+			if _, err := exec.LookPath(exe); err == nil {
+				found = append(found, s.Name)
+				break
+			}
 		}
 	}
 	return found
