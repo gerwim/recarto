@@ -1,4 +1,4 @@
-// Package opencode integrates Recarto with OpenCode: opencode.json MCP
+// Package opencode integrates Recarto with OpenCode 1 and 2: opencode.json MCP
 // registration, a generated JS plugin that bridges OpenCode lifecycle hooks to
 // `recarto hook … --agent opencode`, the AGENTS.md instructions file, and a neutral
 // hook-payload adapter. Because recarto owns both ends of the plugin bridge, the
@@ -42,13 +42,18 @@ func (Adapter) Decode(kind agents.EventKind, in io.Reader) (agents.Event, error)
 }
 
 // Encode writes the neutral result the plugin reads from recarto's stdout. The
-// plugin applies additionalContext via output.system.push (session start) or by
-// appending to a tool result.
+// plugin applies additionalContext to the system prompt (session start) or by
+// appending to a tool result; a Stop block becomes decision/reason, which the
+// OpenCode 2 plugin hands back to the model as a synthetic message.
 func (Adapter) Encode(_ agents.EventKind, out io.Writer, res agents.Result) error {
-	return json.NewEncoder(out).Encode(map[string]any{
+	m := map[string]any{
 		"additionalContext": res.Context,
 		"systemMessage":     res.SystemMessage,
-	})
+	}
+	if res.Block {
+		m["decision"], m["reason"] = "block", res.Reason
+	}
+	return json.NewEncoder(out).Encode(m)
 }
 
 // Public hook entrypoints (used by `recarto hook <event> --agent opencode`).

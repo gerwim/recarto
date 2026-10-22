@@ -9,30 +9,45 @@ import (
 )
 
 // ensureMCPServer keeps the recarto entry in an opencode.json "mcp" doc current.
-// OpenCode local servers use type:"local" with command as a string array. It
-// creates the entry when absent and refreshes the command in place when a shipped
-// update drifts the binary, preserving any unrelated keys the user added (e.g.
-// enabled). It reports whether it changed doc.
+// OpenCode local servers use type:"local" with command as a string array. The V1
+// shape (mcp.recarto, enabled) is read by OpenCode 1 and 2; OpenCode 2's native
+// shape nests servers under mcp.servers (disabled), and a native entry wins over
+// a legacy one of the same name. So it refreshes the command of every recarto
+// entry present — preserving any unrelated keys the user added (e.g. enabled) —
+// and, when there is none, creates one in the doc's own format. It reports
+// whether it changed doc.
 func ensureMCPServer(doc map[string]any, binary string) bool {
 	mcp, ok := doc["mcp"].(map[string]any)
 	if !ok {
 		mcp = map[string]any{}
 		doc["mcp"] = mcp
 	}
-	existing, ok := mcp["recarto"].(map[string]any)
-	if !ok {
-		mcp["recarto"] = map[string]any{
-			"type":    "local",
-			"command": []any{binary, "serve"},
-			"enabled": true,
-		}
-		return true
+	// mcp.servers is OpenCode 2's server map unless it is itself a V1 server entry.
+	native, _ := mcp["servers"].(map[string]any)
+	if t := native["type"]; t == "local" || t == "remote" {
+		native = nil
 	}
 	want := []any{binary, "serve"}
-	if reflect.DeepEqual(existing["command"], want) {
-		return false
+	changed, found := false, false
+	for _, m := range []map[string]any{mcp, native} {
+		existing, ok := m["recarto"].(map[string]any)
+		if !ok {
+			continue
+		}
+		found = true
+		if !reflect.DeepEqual(existing["command"], want) {
+			existing["command"] = want
+			changed = true
+		}
 	}
-	existing["command"] = want
+	if found {
+		return changed
+	}
+	if native != nil {
+		native["recarto"] = map[string]any{"type": "local", "command": want, "disabled": false}
+	} else {
+		mcp["recarto"] = map[string]any{"type": "local", "command": want, "enabled": true}
+	}
 	return true
 }
 

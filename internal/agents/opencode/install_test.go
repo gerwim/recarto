@@ -3,6 +3,7 @@ package opencode
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -26,7 +27,7 @@ func TestInstallRepoScope(t *testing.T) {
 	}
 	plug, _ := os.ReadFile(filepath.Join(dir, ".opencode", "plugins", "recarto.js"))
 	ps := string(plug)
-	for _, want := range []string{"experimental.chat.system.transform", "file.edited", "/bin/recarto", `run("session-start"`, "--agent opencode"} {
+	for _, want := range []string{`export default { id: "recarto", setup, server };`, `ctx.session.hook("context"`, "experimental.chat.system.transform", `const BIN = "/bin/recarto";`} {
 		if !strings.Contains(ps, want) {
 			t.Errorf("plugin missing %q", want)
 		}
@@ -68,6 +69,72 @@ func TestEnsureMCPServerPreservesEnabledFlag(t *testing.T) {
 	rc := doc["mcp"].(map[string]any)["recarto"].(map[string]any)
 	if rc["enabled"] != false {
 		t.Errorf("user-set enabled flag was clobbered: %#v", rc)
+	}
+}
+
+func TestEnsureMCPServerFormats(t *testing.T) {
+	cmd := func(bin string) []any { return []any{bin, "serve"} }
+	for _, tc := range []struct {
+		name   string
+		mcp    map[string]any
+		legacy map[string]any // want mcp.recarto
+		native map[string]any // want mcp.servers.recarto
+	}{
+		{
+			name:   "empty config gets the V1 shape OpenCode 1 and 2 both read",
+			mcp:    map[string]any{},
+			legacy: map[string]any{"type": "local", "command": cmd("/new"), "enabled": true},
+		},
+		{
+			name:   "OpenCode 2 native config gets a native entry, not a legacy twin",
+			mcp:    map[string]any{"servers": map[string]any{"other": map[string]any{"type": "local"}}},
+			native: map[string]any{"type": "local", "command": cmd("/new"), "disabled": false},
+		},
+		{
+			name:   "drifted native entry is refreshed, keeping the user's disabled flag",
+			mcp:    map[string]any{"servers": map[string]any{"recarto": map[string]any{"type": "local", "command": cmd("/old"), "disabled": true}}},
+			native: map[string]any{"type": "local", "command": cmd("/new"), "disabled": true},
+		},
+		{
+			name: "legacy entry in a native config is refreshed in place",
+			mcp: map[string]any{
+				"recarto": map[string]any{"type": "local", "command": cmd("/old"), "enabled": true},
+				"servers": map[string]any{"other": map[string]any{"type": "local"}},
+			},
+			legacy: map[string]any{"type": "local", "command": cmd("/new"), "enabled": true},
+		},
+		{
+			name: "legacy and native twins are both refreshed",
+			mcp: map[string]any{
+				"recarto": map[string]any{"type": "local", "command": cmd("/old"), "enabled": true},
+				"servers": map[string]any{"recarto": map[string]any{"type": "local", "command": cmd("/old")}},
+			},
+			legacy: map[string]any{"type": "local", "command": cmd("/new"), "enabled": true},
+			native: map[string]any{"type": "local", "command": cmd("/new")},
+		},
+		{
+			name:   "a V1 server named servers is not the OpenCode 2 server map",
+			mcp:    map[string]any{"servers": map[string]any{"type": "local", "command": cmd("/x")}},
+			legacy: map[string]any{"type": "local", "command": cmd("/new"), "enabled": true},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			doc := map[string]any{"mcp": tc.mcp}
+			if !ensureMCPServer(doc, "/new") {
+				t.Fatal("expected a change")
+			}
+			if ensureMCPServer(doc, "/new") {
+				t.Error("second run should be a no-op")
+			}
+			mcp := doc["mcp"].(map[string]any)
+			servers, _ := mcp["servers"].(map[string]any)
+			if got, _ := mcp["recarto"].(map[string]any); !reflect.DeepEqual(got, tc.legacy) {
+				t.Errorf("mcp.recarto = %#v, want %#v", got, tc.legacy)
+			}
+			if got, _ := servers["recarto"].(map[string]any); !reflect.DeepEqual(got, tc.native) {
+				t.Errorf("mcp.servers.recarto = %#v, want %#v", got, tc.native)
+			}
+		})
 	}
 }
 
