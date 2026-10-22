@@ -246,6 +246,20 @@ func TestAdapterDecodePostEditFilePath(t *testing.T) {
 	}
 }
 
+// Claude Code reports a tool's output as tool_response; the read ledger sizes
+// reads from it (repeated-read cost, large-read nudge).
+func TestAdapterDecodeToolResponse(t *testing.T) {
+	in := strings.NewReader(`{"session_id":"s","tool_name":"Read","tool_input":{"file_path":"/x/y.go"},` +
+		`"tool_response":{"type":"text","file":{"filePath":"/x/y.go","content":"package y"}}}`)
+	ev, err := Adapter{}.Decode(agents.KindPostRead, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(ev.ToolResult, "package y") {
+		t.Errorf("ToolResult = %q, want the tool_response content", ev.ToolResult)
+	}
+}
+
 func TestStopEncodesBlockOnce(t *testing.T) {
 	ctx := context.Background()
 	a := newTestApp(t, "main")
