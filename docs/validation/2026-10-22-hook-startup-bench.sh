@@ -178,3 +178,22 @@ EOF
 	done
 	echo "measured $env opencode" >&2
 done
+
+# A real session also runs `recarto serve` (the MCP server), whose pooled
+# connection keeps the primary store open: a hook is then never the store's
+# last connection and skips SQLite's WAL checkpoint (and its fsyncs) on close.
+plain
+SERVES=()
+for b in base new; do
+	use $b
+	mkfifo "$W/stdin-$b"
+	"$(bin $b)" serve <"$W/stdin-$b" >/dev/null 2>&1 &
+	SERVES+=($!)
+	exec {fd}>"$W/stdin-$b" # hold stdin open so serve keeps running
+done
+trap 'kill $S1 $S2 ${SERVES[*]}' EXIT
+sleep 1
+for row in session-start post-read post-edit search; do
+	measure serve $row $row "@BIN@ hook $( [ $row = search ] && echo augment || echo $row ) --agent claude"
+done
+measure serve stop "stop @BIN@" "@BIN@ hook stop --agent claude"

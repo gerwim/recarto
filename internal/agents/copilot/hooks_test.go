@@ -2,8 +2,10 @@ package copilot
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -12,15 +14,16 @@ import (
 	"git.gerwim.nl/gerwim/recarto/internal/clock"
 )
 
-// fakeGit + newTestApp duplicated per test package (no shared testutil yet).
-type fakeGit struct{}
+// fakeGit + newTestApp duplicated per test package (no shared testutil yet). The
+// worktree is a real temp dir so its paths are absolute on every OS.
+type fakeGit struct{ root string }
 
-func (fakeGit) Run(args ...string) (string, error) {
+func (f fakeGit) Run(args ...string) (string, error) {
 	switch {
 	case args[0] == "rev-parse" && args[len(args)-1] == "--git-common-dir":
-		return "/repo/.git", nil
+		return filepath.Join(f.root, ".git"), nil
 	case args[0] == "rev-parse" && args[len(args)-1] == "--show-toplevel":
-		return "/repo", nil
+		return f.root, nil
 	case args[0] == "symbolic-ref":
 		return "main", nil
 	case args[0] == "rev-list":
@@ -29,7 +32,7 @@ func (fakeGit) Run(args ...string) (string, error) {
 	return "", fmt.Errorf("unexpected git args: %v", args)
 }
 
-func newTestApp(t *testing.T) *app.App {
+func newTestApp(t *testing.T, root string) *app.App {
 	t.Helper()
 	for _, k := range []string{
 		"RECARTO_WORKSPACE", "RECARTO_REPOS",
@@ -38,7 +41,7 @@ func newTestApp(t *testing.T) *app.App {
 		t.Setenv(k, "")
 	}
 	t.Setenv("RECARTO_CACHE_DIR", t.TempDir())
-	a, err := app.Open(app.Config{CWD: "/repo", Runner: fakeGit{}, Clock: clock.NewFake(time.UnixMilli(1_700_000_000_000))})
+	a, err := app.Open(app.Config{CWD: root, Runner: fakeGit{root}, Clock: clock.NewFake(time.UnixMilli(1_700_000_000_000))})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,10 +54,12 @@ func newTestApp(t *testing.T) *app.App {
 // entries run for every tool) and checks each tool lands only in its own
 // ledger counter, once.
 func TestPostToolUseFanOutCountsOnlyTheRightHook(t *testing.T) {
-	a := newTestApp(t)
+	root := t.TempDir()
+	a := newTestApp(t, root)
 	ctx := context.Background()
+	file, _ := json.Marshal(filepath.Join(root, "a.go"))
 	call := func(session, tool string) {
-		in := `{"sessionId":"` + session + `","toolName":"` + tool + `","toolArgs":{"path":"/repo/a.go","pattern":"Foo"}}`
+		in := `{"sessionId":"` + session + `","toolName":"` + tool + `","toolArgs":{"path":` + string(file) + `,"pattern":"Foo"}}`
 		for _, run := range []func(context.Context, *app.App, io.Reader, io.Writer) error{PostEdit, PostRead, Augment} {
 			if err := run(ctx, a, strings.NewReader(in), io.Discard); err != nil {
 				t.Fatal(err)

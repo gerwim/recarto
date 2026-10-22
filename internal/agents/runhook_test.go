@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -78,10 +79,11 @@ func TestIdleEventsAreHandlerNoOps(t *testing.T) {
 
 func TestRunHookOpenFailureWritesNothing(t *testing.T) {
 	boom := errors.New("store cannot open")
+	file := filepath.Join(t.TempDir(), "a.go") // absolute on every OS
 	for _, ev := range []Event{
 		{Kind: KindSessionStart, SessionID: "s"},
-		{Kind: KindPostRead, SessionID: "s", FilePath: "/repo/a.go"},
-		{Kind: KindPostEdit, SessionID: "s", FilePath: "/repo/a.go"},
+		{Kind: KindPostRead, SessionID: "s", FilePath: file},
+		{Kind: KindPostEdit, SessionID: "s", FilePath: file},
 		{Kind: KindAugment, SessionID: "s", Pattern: "Foo"},
 		{Kind: KindStop, SessionID: "s"},
 	} {

@@ -149,3 +149,22 @@ func TestResolveCachedBypassedByGitDir(t *testing.T) {
 		t.Fatal("GIT_DIR must bypass the cache")
 	}
 }
+
+// TestResolveCachedThroughSymlink: git prints the symlink-resolved worktree (as
+// for macOS's /var -> /private/var temp and home dirs) while the cwd keeps the
+// link's spelling; the cache must still hit.
+func TestResolveCachedThroughSymlink(t *testing.T) {
+	cache, base := t.TempDir(), t.TempDir()
+	repo, link := filepath.Join(base, "repo"), filepath.Join(base, "link")
+	if err := os.Mkdir(repo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	commitRepo(t, repo)
+	if err := os.Symlink(repo, link); err != nil {
+		t.Skipf("no symlinks here: %v", err)
+	}
+	gc, _ := resolve(t, cache, link)
+	if again, n := resolve(t, cache, link); n != 0 || again != gc {
+		t.Fatalf("symlinked checkout not reused: %d git calls, %+v vs %+v", n, again, gc)
+	}
+}
