@@ -47,8 +47,9 @@ func newTestApp(t *testing.T) *app.App {
 }
 
 // TestPostToolUseFanOutCountsOnlyTheRightHook replays what Copilot before
-// v1.0.36 did (matchers ignored: every postToolUse hook runs for every tool) and
-// checks each tool lands only in its own ledger counter.
+// v1.0.63 does with the hook file (postToolUse matchers ignored: all three
+// entries run for every tool) and checks each tool lands only in its own
+// ledger counter, once.
 func TestPostToolUseFanOutCountsOnlyTheRightHook(t *testing.T) {
 	a := newTestApp(t)
 	ctx := context.Background()

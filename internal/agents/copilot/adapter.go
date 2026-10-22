@@ -18,8 +18,8 @@ type Adapter struct{}
 
 // toolKinds routes Copilot's built-in tools: each one Recarto handles to the one
 // hook kind it feeds, the others to none. The hook file's matchers already do
-// this, but Copilot before v1.0.36 ignored matchers and ran every postToolUse
-// hook for every tool.
+// this, but Copilot before v1.0.63 ignored postToolUse matchers and ran every
+// postToolUse hook for every tool (as does a hook file from before matchers).
 var toolKinds = map[string]agents.EventKind{
 	"view":       agents.KindPostRead,
 	"edit":       agents.KindPostEdit,

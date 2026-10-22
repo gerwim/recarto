@@ -96,8 +96,7 @@ func TestHookFileRoutesEachToolOnBothShells(t *testing.T) {
 	want := map[string]string{
 		"sessionStart/":    "session-start",
 		"agentStop/":       "stop",
-		"postToolUse/view": "post-read", "postToolUse/edit": "post-edit", "postToolUse/create": "post-edit",
-		"postToolUse/grep": "augment", "postToolUse/glob": "augment",
+		"postToolUse/view": "post-read", "postToolUse/edit|create": "post-edit", "postToolUse/grep|glob": "augment",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("hook routing = %v, want %v", got, want)
