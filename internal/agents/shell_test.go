@@ -91,6 +91,20 @@ func TestParseShell(t *testing.T) {
 		{`sed -n -i 's/a/b/p' f.go`, want{"sed", nil, nil}},
 		{`sed 's/a/b/' f.go`, want{"sed", nil, nil}},
 		{`head -5 f.go > out.txt`, want{"head", nil, nil}},
+		// Redirected output reaches a file, not the agent: searches too, and
+		// whatever a group, subshell or pipeline's last stage redirects.
+		{`rg Widget > results.txt`, want{"rg", nil, nil}},
+		{`find . -name '*Widget*.go' > results.txt`, want{"find", nil, nil}},
+		{`grep -rn Foo . &>> log.txt`, want{"grep", nil, nil}},
+		{`{ cat f.go; } > copied.go`, want{"cat", nil, nil}},
+		{`(head f.go) > copied.go`, want{"head", nil, nil}},
+		{`cat f.go | head > copied.go`, want{"cat", nil, nil}},
+		{`cat f.go | sort | uniq > copied.go`, want{"cat", nil, nil}},
+		{`{ rg Foo | head; } > out.txt`, want{"rg", nil, nil}},
+		{`rg Foo > out.txt; cat f.go`, want{"rg", nil, []string{f}}},
+		{`rg Foo 2> err.txt`, want{"rg", []string{"Foo"}, nil}},
+		{`cat f.go > copied.go | rg Foo`, want{"cat", nil, nil}},
+		{`cat f.go | rg Foo | tee out.txt`, want{"cat", nil, []string{f}}},
 		// Paths: cd, absolute, ~, subshells.
 		{`cd internal && cat x.go`, want{"cat", nil, []string{x}}},
 		{`cd internal; cd ..; cat f.go`, want{"cat", nil, []string{f}}},

@@ -36,44 +36,61 @@ func parseShell(command, cwd string) shellPlan {
 		return shellPlan{}
 	}
 	w := &shellWalker{}
-	w.stmts(f.Stmts, cwd, false)
+	w.stmts(f.Stmts, cwd, false, true)
 	return w.plan
 }
 
 type shellWalker struct{ plan shellPlan }
 
 // stmts walks a statement list in order, threading the cwd a `cd` changes.
-// piped marks a statement whose input comes from a pipe.
-func (w *shellWalker) stmts(list []*syntax.Stmt, cwd string, piped bool) string {
+// piped marks a statement whose input comes from a pipe; printed one whose
+// output reaches the agent rather than a file.
+func (w *shellWalker) stmts(list []*syntax.Stmt, cwd string, piped, printed bool) string {
 	for _, s := range list {
-		cwd = w.stmt(s, cwd, piped)
+		cwd = w.stmt(s, cwd, piped, printed)
 	}
 	return cwd
 }
 
 // stmt walks one statement and returns the cwd after it. Pipeline parts and
-// subshells run in their own process, so their `cd` does not leak out.
-func (w *shellWalker) stmt(s *syntax.Stmt, cwd string, piped bool) string {
+// subshells run in their own process, so their `cd` does not leak out. A
+// redirect on a group, subshell or pipeline's last stage sends every command
+// inside it (or upstream of it) to the file.
+func (w *shellWalker) stmt(s *syntax.Stmt, cwd string, piped, printed bool) string {
+	printed = printed && !stdoutToFile(s.Redirs)
 	switch c := s.Cmd.(type) {
 	case *syntax.CallExpr:
-		return w.call(c, s.Redirs, cwd, piped)
+		return w.call(c, cwd, piped, printed)
 	case *syntax.BinaryCmd:
 		if c.Op == syntax.Pipe || c.Op == syntax.PipeAll {
-			w.stmt(c.X, cwd, piped)
-			w.stmt(c.Y, cwd, true)
+			w.stmt(c.X, cwd, piped, printed && pipeOutPrinted(c.Y))
+			w.stmt(c.Y, cwd, true, printed)
 			return cwd
 		}
-		return w.stmt(c.Y, w.stmt(c.X, cwd, piped), piped)
+		return w.stmt(c.Y, w.stmt(c.X, cwd, piped, printed), piped, printed)
 	case *syntax.Subshell:
-		w.stmts(c.Stmts, cwd, piped)
+		w.stmts(c.Stmts, cwd, piped, printed)
 	case *syntax.Block:
-		return w.stmts(c.Stmts, cwd, piped)
+		return w.stmts(c.Stmts, cwd, piped, printed)
 	}
 	return cwd
 }
 
-// call reads one simple command.
-func (w *shellWalker) call(c *syntax.CallExpr, redirs []*syntax.Redirect, cwd string, piped bool) string {
+// pipeOutPrinted reports whether a pipeline stage's output, after any later
+// stages, reaches the agent rather than a file.
+func pipeOutPrinted(s *syntax.Stmt) bool {
+	if stdoutToFile(s.Redirs) {
+		return false
+	}
+	if c, ok := s.Cmd.(*syntax.BinaryCmd); ok && (c.Op == syntax.Pipe || c.Op == syntax.PipeAll) {
+		return pipeOutPrinted(c.Y)
+	}
+	return true
+}
+
+// call reads one simple command. One whose output goes to a file is a write,
+// not a search or view: it still owns the line but adds nothing.
+func (w *shellWalker) call(c *syntax.CallExpr, cwd string, piped, printed bool) string {
 	args := make([]shellWord, len(c.Args))
 	for i, a := range c.Args {
 		args[i] = wordOf(a)
@@ -97,7 +114,9 @@ func (w *shellWalker) call(c *syntax.CallExpr, redirs []*syntax.Redirect, cwd st
 	if w.plan.owner == "" {
 		w.plan.owner = key
 	}
-	printed := !stdoutToFile(redirs)
+	if !printed {
+		return cwd
+	}
 	switch key {
 	case "find", "bfs":
 		for i := 0; i+1 < len(args); i++ {
@@ -107,9 +126,9 @@ func (w *shellWalker) call(c *syntax.CallExpr, redirs []*syntax.Redirect, cwd st
 			}
 		}
 	case "cat":
-		w.views(options(args, "", nil, nil), cwd, printed)
+		w.views(options(args, "", nil, nil), cwd)
 	case "head", "tail":
-		w.views(options(args, "ncs", headLong, nil), cwd, printed)
+		w.views(options(args, "ncs", headLong, nil), cwd)
 	case "sed":
 		quiet, script, inPlace := false, false, false
 		ops := options(args, "efl", sedLong, func(name string, _ shellWord) {
@@ -126,10 +145,10 @@ func (w *shellWalker) call(c *syntax.CallExpr, redirs []*syntax.Redirect, cwd st
 			ops = ops[1:] // the script
 		}
 		if quiet && !inPlace {
-			w.views(ops, cwd, printed)
+			w.views(ops, cwd)
 		}
 	default:
-		w.search(key, args, cwd, piped, printed)
+		w.search(key, args, cwd, piped)
 	}
 	return cwd
 }
@@ -138,7 +157,7 @@ func (w *shellWalker) call(c *syntax.CallExpr, redirs []*syntax.Redirect, cwd st
 // globs make it a search; a search over regular files only is a view of them.
 // With no file operand it searches only when the tool searches by default:
 // git grep always, rg and grep -r unless they read piped input.
-func (w *shellWalker) search(key string, args []shellWord, cwd string, piped, printed bool) {
+func (w *shellWalker) search(key string, args []shellWord, cwd string, piped bool) {
 	short, long := grepShort, grepLong
 	switch key {
 	case "rg":
@@ -194,7 +213,7 @@ func (w *shellWalker) search(key string, args []shellWord, cwd string, piped, pr
 			w.pattern(p)
 		}
 	}
-	w.views(files, cwd, printed)
+	w.views(files, cwd)
 }
 
 // grepShort, ugrepShort and rgShort are the short options that take a value;
@@ -277,12 +296,8 @@ func (w *shellWalker) pattern(p shellWord) {
 	}
 }
 
-// views records the regular files among ops as printed, unless the command's
-// output goes to a file instead.
-func (w *shellWalker) views(ops []shellWord, cwd string, printed bool) {
-	if !printed {
-		return
-	}
+// views records the regular files among ops as printed.
+func (w *shellWalker) views(ops []shellWord, cwd string) {
 	for _, o := range ops {
 		if o.dyn || o.glob {
 			continue

@@ -247,9 +247,10 @@ Recarto adds nothing to:
 - commands that filter another command's output, like `ps aux | grep foo` and
   `go test ./... | grep FAIL`, or that aren't `git grep`, like `git log --grep fix`;
 - builds, tests, git, and anything else that neither searches nor prints a file;
-- writes and edits: redirected output (`cat > f <<EOF`, `head f > g`), `sed -i` and
-  scripts. The code graph catches up with shell edits through its freshness check on
-  the next graph query. Claude Code's `tool_response.bashEditDiff` is not read;
+- writes and edits: searches and views whose output goes to a file (`cat > f <<EOF`,
+  `rg Foo > out.txt`, `cat f | head > g`, `{ cat f; } > g`), `sed -i` and scripts.
+  The code graph catches up with shell edits through its freshness check on the next
+  graph query. Claude Code's `tool_response.bashEditDiff` is not read;
 - PowerShell and cmd: Claude Code's `PowerShell` tool, Copilot's `powershell` tool, and
   OpenCode's shell when it runs PowerShell or cmd. On Windows these hosts keep their own
   grep/glob/read tools, which Recarto hooks;

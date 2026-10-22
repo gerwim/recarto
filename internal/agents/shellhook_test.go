@@ -146,6 +146,34 @@ func TestShellSearchNudgeOncePerSession(t *testing.T) {
 	}
 }
 
+// A search or view whose output goes to a file is a write: it injects
+// nothing and leaves the session's nudge, bug and view dedup untouched.
+func TestShellRedirectedOutputIsSilent(t *testing.T) {
+	a, dir := newTreeApp(t)
+	recordWidgetBug(t, a)
+	if _, _, _, err := a.Engine.Record(context.Background(), memory.NewMemory{
+		Kind: memory.KindTodo, Title: "split f.go", Body: "split f.go", Source: "cli", Branch: a.Git.Branch,
+		Refs: []memory.Ref{{Type: memory.RefFile, Value: "f.go"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, command := range []string{
+		`rg Widget > results.txt`, `find . -name '*Widget*' > results.txt`,
+		`{ cat f.go; } > copied.go`, `(head f.go) > copied.go`, `cat f.go | head > copied.go`,
+	} {
+		if got := shellHook(t, a, Event{SessionID: "s", Command: command, CWD: dir}); got != "" {
+			t.Errorf("%s: injected %q", command, got)
+		}
+	}
+	got := shellHook(t, a, Event{SessionID: "s", Command: `rg Widget`, CWD: dir})
+	if !strings.Contains(got, "Widget overflow") || !strings.Contains(got, "search_content") {
+		t.Errorf("first printed search after redirected ones lacks its bug or the nudge:\n%s", got)
+	}
+	if got := shellHook(t, a, Event{SessionID: "s", Command: `cat f.go`, CWD: dir}); !strings.Contains(got, "split f.go") {
+		t.Errorf("first printed view after redirected ones lacks its todo:\n%s", got)
+	}
+}
+
 // Grep/Glob and shell searches share the per-session repeat reminder.
 func TestShellSearchRepeatSharedWithGrep(t *testing.T) {
 	a, dir := newTreeApp(t)
