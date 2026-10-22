@@ -6,11 +6,15 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"git.gerwim.nl/gerwim/recarto/internal/app"
+	"git.gerwim.nl/gerwim/recarto/internal/clock"
+	"git.gerwim.nl/gerwim/recarto/internal/memory"
 )
 
 // fixedAdapter decodes every payload to ev and encodes results verbatim.
@@ -91,6 +95,51 @@ func TestRunHookOpenFailureWritesNothing(t *testing.T) {
 		err := RunHook(context.Background(), func(Event) (*app.App, error) { return nil, boom }, fixedAdapter{ev}, ev.Kind, strings.NewReader(""), &out)
 		if !errors.Is(err, boom) || out.Len() != 0 {
 			t.Errorf("%+v: err %v, output %q; want the open error and no output", ev, err, out.String())
+		}
+	}
+}
+
+// TestRunHookHandlerErrorWritesNothing: a handler that fails after the store
+// opened — even once its advisory context is built — writes nothing.
+func TestRunHookHandlerErrorWritesNothing(t *testing.T) {
+	clearRecartoEnv(t)
+	t.Setenv("RECARTO_CACHE_DIR", t.TempDir())
+	root := t.TempDir() // absolute on every OS
+	a, err := app.Open(app.Config{CWD: root, Runner: fakeGit{branch: "main", root: root}, Clock: clock.NewFake(time.UnixMilli(1_700_000_000_000))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = a.Close() })
+	ctx := context.Background()
+	file := filepath.Join(root, "a.go")
+	if err := os.WriteFile(file, []byte("package a\n\nfunc A() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := a.Engine.Record(ctx, memory.NewMemory{
+		Kind: memory.KindTodo, Title: "fix a.go", Body: "fix a.go",
+		Refs: []memory.Ref{{Type: memory.RefFile, Value: "a.go"}}, Branch: a.Git.Branch, Source: "cli",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Break the graph so post-edit's reindex fails after the todo is surfaced.
+	if _, err := a.Store.DB.ExecContext(ctx, "DROP TABLE nodes"); err != nil {
+		t.Fatal(err)
+	}
+	if res, err := Handle(ctx, a, Event{Kind: KindPostEdit, SessionID: "probe", FilePath: file}); err == nil || !strings.Contains(res.Context, "fix a.go") {
+		t.Fatalf("precondition: Handle = %q, %v; want the todo context and a reindex error", res.Context, err)
+	}
+	cancelled, cancel := context.WithCancel(ctx)
+	cancel()
+	for _, c := range []struct {
+		ctx context.Context
+		ev  Event
+	}{
+		{ctx, Event{Kind: KindPostEdit, SessionID: "s", FilePath: file}},
+		{cancelled, Event{Kind: KindPostRead, SessionID: "s", FilePath: file}},
+	} {
+		var out bytes.Buffer
+		if err := RunHook(c.ctx, Opened(a), fixedAdapter{c.ev}, c.ev.Kind, strings.NewReader(""), &out); err == nil || out.Len() != 0 {
+			t.Errorf("%+v: err %v, output %q; want the handler error and no output", c.ev, err, out.String())
 		}
 	}
 }

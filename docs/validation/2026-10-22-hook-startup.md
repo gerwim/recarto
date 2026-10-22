@@ -201,7 +201,9 @@ behaviour are unchanged.
 - **Fail-open.**
   - A store that cannot open, any other error, or a panic (`recover` in the hook command
     and in its background goroutines) ends the hook with exit 0 and nothing on stdout.
-  - Before, a goroutine panic exited 2, which Claude Code reads as "block".
+  - Before, a goroutine panic exited 2, which Claude Code reads as "block". A handler
+    error after the advisory context was built (e.g. post-edit's reindex failing) still
+    printed that context; it now prints nothing.
 - **Copilot.**
   - Three `postToolUse` entries, matched `view` → post-read, `edit|create` → post-edit
     and `grep|glob` → augment. Each entry has `bash` and `powershell` commands with the

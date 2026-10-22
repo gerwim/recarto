@@ -73,14 +73,13 @@ func KindFromString(s string) (EventKind, error) {
 }
 
 // RunHook decodes the event with ad, runs the shared Handle against the App
-// open returns, then encodes the result back through ad. Encode runs even when
-// Handle errors, so advisory output built before a failing best-effort side
-// effect is still emitted; the Handle error is returned afterward for the
-// (non-blocking) caller to log. open is called only for an event with
-// something to act on: an idle one encodes the empty result without resolving
-// git or opening a store. open may itself find the event idle (a nil App, e.g.
-// a post-edit outside every served repo); an open failure returns before any
-// output.
+// open returns, then encodes the result back through ad. Hooks fail open: an
+// open or Handle error returns before any output — even advisory context built
+// before a failing side effect is dropped — for the (non-blocking) caller to
+// log. open is called only for an event with something to act on: an idle one
+// encodes the empty result without resolving git or opening a store. open may
+// itself find the event idle (a nil App, e.g. a post-edit outside every served
+// repo).
 func RunHook(ctx context.Context, open func(Event) (*app.App, error), ad Adapter, kind EventKind, in io.Reader, out io.Writer) error {
 	ev, err := ad.Decode(kind, in)
 	if err != nil {
@@ -96,11 +95,11 @@ func RunHook(ctx context.Context, open func(Event) (*app.App, error), ad Adapter
 	if a == nil {
 		return ad.Encode(kind, out, Result{})
 	}
-	res, herr := Handle(ctx, a, ev)
-	if encErr := ad.Encode(kind, out, res); encErr != nil {
-		return encErr
+	res, err := Handle(ctx, a, ev)
+	if err != nil {
+		return err
 	}
-	return herr
+	return ad.Encode(kind, out, res)
 }
 
 // Opened adapts an already-open App to RunHook's opener.
