@@ -26,7 +26,7 @@ var toolKinds = map[string]agents.EventKind{
 	"create":     agents.KindPostEdit,
 	"grep":       agents.KindAugment,
 	"glob":       agents.KindAugment,
-	"bash":       noKind,
+	"bash":       agents.KindShell,
 	"powershell": noKind,
 	"task":       noKind,
 	"web_fetch":  noKind,
@@ -40,11 +40,13 @@ const noKind agents.EventKind = -1
 // routed to its EventKind by the caller; the file path and grep pattern are pulled
 // generically from toolArgs so the adapter is resilient to Copilot's tool names.
 // A built-in tool reaching a hook kind it does not feed (a view at post-edit, an
-// edit at post-read) decodes without path or pattern, i.e. as an idle event.
+// edit at post-read) decodes without path or pattern, i.e. as an idle event. The
+// shell kind reads only the bash tool's command, run in the payload's cwd.
 func (Adapter) Decode(kind agents.EventKind, in io.Reader) (agents.Event, error) {
 	var p struct {
 		SessionID  string          `json:"sessionId"`
 		Source     string          `json:"source"`
+		CWD        string          `json:"cwd"`
 		ToolName   string          `json:"toolName"`
 		ToolArgs   json.RawMessage `json:"toolArgs"`
 		ToolResult json.RawMessage `json:"toolResult"`
@@ -60,6 +62,12 @@ func (Adapter) Decode(kind agents.EventKind, in io.Reader) (agents.Event, error)
 		ToolResult: string(p.ToolResult),
 	}
 	if want, builtin := toolKinds[p.ToolName]; builtin && want != kind {
+		return ev, nil
+	}
+	if kind == agents.KindShell {
+		if p.ToolName == "bash" {
+			ev.Command, ev.CWD = pickString(p.ToolArgs, "command"), p.CWD
+		}
 		return ev, nil
 	}
 	ev.FilePath = pickString(p.ToolArgs, "path", "filePath", "file_path", "file")
@@ -119,4 +127,8 @@ func Augment(ctx context.Context, a *app.App, in io.Reader, out io.Writer) error
 
 func Stop(ctx context.Context, a *app.App, in io.Reader, out io.Writer) error {
 	return agents.RunHook(ctx, agents.Opened(a), Adapter{}, agents.KindStop, in, out)
+}
+
+func Shell(ctx context.Context, a *app.App, in io.Reader, out io.Writer) error {
+	return agents.RunHook(ctx, agents.Opened(a), Adapter{}, agents.KindShell, in, out)
 }

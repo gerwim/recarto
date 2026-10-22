@@ -15,8 +15,10 @@ import (
 // from all sources, so a dedicated file needs no JSON merge and is idempotent by
 // construction (overwrite). Each postToolUse entry is matched to the built-in
 // tools its handler feeds, so a tool call starts at most that one Recarto
-// handler and any other tool starts none. Copilot before v1.0.63 ignored
-// postToolUse matchers and ran all three entries for every tool; the adapter
+// handler and any other tool starts none. Copilot matches tool names only, so
+// every bash call starts the shell handler, which returns at once for a line
+// that neither searches nor prints a file. Copilot before v1.0.63 ignored
+// postToolUse matchers and ran every entry for every tool; the adapter
 // then lets only the tool's own handler act (see toolKinds). Every entry
 // carries both shell keys: Copilot runs `bash` on Linux/macOS and `powershell`
 // on Windows.
@@ -41,6 +43,7 @@ func hookFile(binary string) []byte {
 				cmd("post-read", "view"),
 				cmd("post-edit", "edit|create"),
 				cmd("augment", "grep|glob"),
+				cmd("shell", "bash"),
 			},
 			"agentStop": []any{cmd("stop", "")},
 		},

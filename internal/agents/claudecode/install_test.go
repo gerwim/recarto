@@ -178,7 +178,8 @@ func TestSyncHooksAddsMissingShellOnWindows(t *testing.T) {
 	settings := map[string]any{}
 	// Seed the current commands WITHOUT a shell, as an older installer would.
 	for _, hs := range hookSpecs("recarto") {
-		appendHook(settings, hs.event, hs.matcher, hs.command, "")
+		hs.shell = ""
+		appendHook(settings, hs)
 	}
 	if got := syncHooks(settings, "recarto"); got == "already present" {
 		t.Fatalf("syncHooks reported %q; expected a re-sync to add the shell", got)
@@ -210,5 +211,110 @@ func TestInstallUserScopeTargets(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(append([]string{home}, rel...)...)); err != nil {
 			t.Errorf("user target %v missing: %v", rel, err)
 		}
+	}
+}
+
+// shellGroups returns the PostToolUse groups matching Bash in a settings file.
+func shellGroups(t *testing.T, path string) []map[string]any {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		Hooks map[string][]map[string]any `json:"hooks"`
+	}
+	if err := json.Unmarshal(b, &doc); err != nil {
+		t.Fatal(err)
+	}
+	var out []map[string]any
+	for _, g := range doc.Hooks["PostToolUse"] {
+		if g["matcher"] == "Bash" {
+			out = append(out, g)
+		}
+	}
+	return out
+}
+
+// A Stage 1 install (no shell hooks) next to a foreign Bash hook upgrades in
+// place at both scopes: one recarto Bash group with a handler per shell
+// command, each filtered by its `if`, no duplicates on a re-run, and the
+// foreign hook kept.
+func TestInstallAddsPerCommandShellHooks(t *testing.T) {
+	for _, scope := range []agents.Scope{agents.ScopeRepo, agents.ScopeUser} {
+		p := agents.Paths{Scope: scope, Dir: t.TempDir(), Home: t.TempDir()}
+		settingsPath := filepath.Join(p.Dir, ".claude", "settings.json")
+		if scope == agents.ScopeUser {
+			settingsPath = filepath.Join(p.Home, ".claude", "settings.json")
+		}
+		if err := os.MkdirAll(filepath.Dir(settingsPath), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		stage1 := `{"hooks":{"PostToolUse":[` +
+			`{"matcher":"Bash","hooks":[{"type":"command","command":"./audit.sh"}]},` +
+			`{"matcher":"Grep|Glob","hooks":[{"type":"command","command":"/old/recarto hook augment --agent claude"}]}]}}`
+		if err := os.WriteFile(settingsPath, []byte(stage1), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		res, err := Install(p, "/bin/recarto")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.HasPrefix(res.Hooks, "installed") {
+			t.Errorf("%v: Hooks = %q, want installed", scope, res.Hooks)
+		}
+		first, _ := os.ReadFile(settingsPath)
+		if res, err := Install(p, "/bin/recarto"); err != nil || res.Hooks != "already present" {
+			t.Errorf("%v: re-run = %+v, %v; want already present", scope, res, err)
+		}
+		if again, _ := os.ReadFile(settingsPath); string(again) != string(first) {
+			t.Errorf("%v: re-run changed settings:\n%s", scope, again)
+		}
+
+		groups := shellGroups(t, settingsPath)
+		if len(groups) != 2 {
+			t.Fatalf("%v: %d Bash groups, want the foreign one and recarto's:\n%s", scope, len(groups), first)
+		}
+		if h := groups[0]["hooks"].([]any); len(h) != 1 || h[0].(map[string]any)["command"] != "./audit.sh" {
+			t.Errorf("%v: foreign Bash hook changed: %v", scope, h)
+		}
+		got := map[string]string{} // if -> command
+		for _, h := range groups[1]["hooks"].([]any) {
+			hm := h.(map[string]any)
+			got[hm["if"].(string)] = hm["command"].(string)
+		}
+		if len(got) != len(agents.ShellCommands) {
+			t.Errorf("%v: %d shell hooks, want %d: %v", scope, len(got), len(agents.ShellCommands), got)
+		}
+		for _, c := range agents.ShellCommands {
+			rule := "Bash(" + c + " *)"
+			if c == "git" {
+				rule = "Bash(git grep *)"
+			}
+			if want := "/bin/recarto hook shell --agent claude --cmd " + c; got[rule] != want {
+				t.Errorf("%v: if %q runs %q, want %q", scope, rule, got[rule], want)
+			}
+		}
+		if strings.Contains(string(first), "/old/recarto") || strings.Count(string(first), "hook augment") != 1 {
+			t.Errorf("%v: stale or duplicate hooks:\n%s", scope, first)
+		}
+	}
+}
+
+// An install whose shell hooks carry another `if` re-syncs rather than
+// reporting them present.
+func TestSyncHooksRefreshesChangedIf(t *testing.T) {
+	settings := map[string]any{}
+	for _, hs := range hookSpecs("recarto") {
+		if hs.ifRule != "" {
+			hs.ifRule = "Bash(*)"
+		}
+		appendHook(settings, hs)
+	}
+	if got := syncHooks(settings, "recarto"); got == "already present" {
+		t.Fatalf("syncHooks = %q with stale if filters", got)
+	}
+	if got := syncHooks(settings, "recarto"); got != "already present" {
+		t.Errorf("second syncHooks = %q, want already present", got)
 	}
 }

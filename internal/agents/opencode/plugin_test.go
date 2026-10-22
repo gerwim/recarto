@@ -66,7 +66,10 @@ const edit = after("edit", { path: "b.go" }, { content: [{ type: "text", text: "
 const patch = after("patch", { patchText: "*** Begin Patch" }, { content: "ok", output: { applied: [{ target: "/abs/c.go" }, { target: "/abs/d.go" }] } });
 const web = after("websearch", { query: "Foo" }, { content: "web" });
 const failed = { tool: "read", sessionID: "root", status: "error", input: { path: "a.go" }, error: {} };
-for (const e of [read, listing, grep, edit, patch, web, failed]) await hooks["tool.execute.after"](e);
+const bash = after("bash", { command: "rg Foo | head", workdir: "sub" }, { content: "matches" });
+const shell = after("shell", { command: "cat a.go" }, { content: [{ type: "text", text: "body" }] });
+const build = after("bash", { command: "go build ./..." }, { content: "built" });
+for (const e of [read, listing, grep, edit, patch, web, failed, bash, shell, build]) await hooks["tool.execute.after"](e);
 finishTurn();
 
 for (let i = 0; i < 250 && synthetic.length === 0; i++) await new Promise((r) => setTimeout(r, 20));
@@ -77,13 +80,18 @@ const sys = { system: [] };
 await v1["experimental.chat.system.transform"]({ sessionID: "v1s" }, sys);
 const v1read = { title: "", output: "body", metadata: {} };
 await v1["tool.execute.after"]({ tool: "read", sessionID: "v1s", callID: "c", args: { filePath: "e.go" } }, v1read);
+const v1bash = { title: "", output: "hits", metadata: {} };
+await v1["tool.execute.after"]({ tool: "bash", sessionID: "v1s", callID: "d", args: { command: "grep -rn Foo .", workdir: "/abs/w" } }, v1bash);
+const v1test = { title: "", output: "ok", metadata: {} };
+await v1["tool.execute.after"]({ tool: "bash", sessionID: "v1s", callID: "e", args: { command: "npm test" } }, v1test);
 await v1.event({ event: { type: "file.edited", properties: { file: "/abs/f.go" } } });
 
 console.log(JSON.stringify({
   id: plugin.id, r1: r1.system, r2: r2.system,
   read: read.result.content, listing: listing.result.content, grep: grep.result.content,
   edit: edit.result.content, patch: patch.result.content, web: web.result.content,
-  synthetic, v1sys: sys.system, v1read: v1read.output,
+  bash: bash.result.content, shell: shell.result.content, build: build.result.content,
+  synthetic, v1sys: sys.system, v1read: v1read.output, v1bash: v1bash.output, v1test: v1test.output,
 }));
 `
 
@@ -129,9 +137,14 @@ func TestPluginRunsUnderNode(t *testing.T) {
 		"edit":      text("Edited", "CTX-post-edit"),
 		"patch":     text("ok", "CTX-post-edit\nCTX-post-edit"),
 		"web":       "web", // websearch is not a code search
+		"bash":      text("matches", "CTX-shell"),
+		"shell":     text("body", "CTX-shell"),
+		"build":     "built", // no search or view: recarto never starts
 		"synthetic": []any{map[string]any{"sessionID": "root", "text": "NUDGE"}},
 		"v1sys":     []any{"CTX-START"},
 		"v1read":    "body\n\nCTX-post-read",
+		"v1bash":    "hits\n\nCTX-shell",
+		"v1test":    "ok",
 	}
 	for k, w := range want {
 		if !reflect.DeepEqual(got[k], w) {
@@ -163,9 +176,12 @@ func TestPluginRunsUnderNode(t *testing.T) {
 		"post-edit file_path=<dir>/b.go session_id=root",
 		"post-edit file_path=/abs/c.go session_id=root",
 		"post-edit file_path=/abs/d.go session_id=root",
+		"shell command=rg Foo | head cwd=<dir>/sub session_id=root",
+		"shell command=cat a.go cwd=<dir> session_id=root",
 		"stop session_id=root", // the subagent session is skipped
 		"session-start session_id=v1s",
 		"post-read file_path=<dir>/e.go session_id=v1s tool_result=body",
+		"shell command=grep -rn Foo . cwd=/abs/w session_id=v1s",
 		"post-edit file_path=/abs/f.go",
 	}
 	if !reflect.DeepEqual(calls, wantCalls) {

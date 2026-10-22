@@ -39,6 +39,12 @@ var idleEvents = []Event{
 	{Kind: KindAugment, SessionID: "s", Pattern: "*.cs"},
 	{Kind: KindAugment, SessionID: "s", Pattern: "src/**/*.go"},
 	{Kind: KindStop},
+	{Kind: KindShell, SessionID: "s", Command: "go test ./... | grep FAIL"},
+	{Kind: KindShell, SessionID: "s", Command: "ps aux | grep foo"},
+	{Kind: KindShell, SessionID: "s", Command: "git log --grep fix && go build ./..."},
+	{Kind: KindShell, SessionID: "s", Command: "cat > /tmp/f.go <<'EOF'\npackage f\nEOF"},
+	{Kind: KindShell, SessionID: "s", Command: "rg Foo | head", Trigger: "head"}, // the rg hook answers it
+	{Kind: KindShell, SessionID: "s", Command: "echo 'unterminated"},
 }
 
 func TestRunHookIdleEventNeverOpensApp(t *testing.T) {

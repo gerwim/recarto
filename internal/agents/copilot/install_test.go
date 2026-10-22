@@ -97,6 +97,7 @@ func TestHookFileRoutesEachToolOnBothShells(t *testing.T) {
 		"sessionStart/":    "session-start",
 		"agentStop/":       "stop",
 		"postToolUse/view": "post-read", "postToolUse/edit|create": "post-edit", "postToolUse/grep|glob": "augment",
+		"postToolUse/bash": "shell",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("hook routing = %v, want %v", got, want)

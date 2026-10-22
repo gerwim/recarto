@@ -15,15 +15,18 @@ type Adapter struct{}
 // Decode parses the subset of the Claude Code hook payload we use into a neutral
 // Event. The grep pattern falls back to the glob query field; the tool output
 // (sized for the read ledger) comes from tool_response, falling back to the
-// tool_result spelling older payloads used.
+// tool_result spelling older payloads used. A Bash call carries its command in
+// tool_input and the session's working directory in cwd.
 func (Adapter) Decode(kind agents.EventKind, in io.Reader) (agents.Event, error) {
 	var p struct {
 		SessionID string `json:"session_id"`
 		Source    string `json:"source"`
+		CWD       string `json:"cwd"`
 		ToolInput struct {
 			FilePath string `json:"file_path"`
 			Pattern  string `json:"pattern"`
 			Query    string `json:"query"`
+			Command  string `json:"command"`
 		} `json:"tool_input"`
 		ToolResult     json.RawMessage `json:"tool_result"`
 		ToolResponse   json.RawMessage `json:"tool_response"` // what Claude Code actually sends
@@ -49,6 +52,8 @@ func (Adapter) Decode(kind agents.EventKind, in io.Reader) (agents.Event, error)
 		Pattern:    pattern,
 		ToolResult: string(result),
 		StopActive: p.StopHookActive,
+		Command:    p.ToolInput.Command,
+		CWD:        p.CWD,
 	}, nil
 }
 
@@ -104,4 +109,8 @@ func Augment(ctx context.Context, a *app.App, in io.Reader, out io.Writer) error
 
 func Stop(ctx context.Context, a *app.App, in io.Reader, out io.Writer) error {
 	return agents.RunHook(ctx, agents.Opened(a), Adapter{}, agents.KindStop, in, out)
+}
+
+func Shell(ctx context.Context, a *app.App, in io.Reader, out io.Writer) error {
+	return agents.RunHook(ctx, agents.Opened(a), Adapter{}, agents.KindShell, in, out)
 }

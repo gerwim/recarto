@@ -10,22 +10,37 @@ import (
 // can exercise the Windows-specific hook shell without running on Windows.
 var goos = runtime.GOOS
 
-// hookSpec is one (event, matcher, command, shell) hook the installer registers.
-// shell is the Claude Code hook `shell` field; "" leaves Claude's default.
-type hookSpec struct{ event, matcher, command, shell string }
+// hookSpec is one (event, matcher, command, shell, if) hook the installer
+// registers. shell is the Claude Code hook `shell` field ("" leaves Claude's
+// default); ifRule its `if` permission-rule filter ("" runs it for every
+// matched tool call).
+type hookSpec struct{ event, matcher, command, shell, ifRule string }
 
 // hookSpecs are the advisory hooks. SessionStart and Stop run unconditionally
 // (no matcher); post-read, post-edit, and augment are scoped to their tools. Each
 // command carries `--agent claude` so the dispatcher selects the Claude adapter.
+//
+// Claude Code's native builds have no Grep/Glob tools: the agent searches and
+// views files with the Bash tool. One shell hook per agents.ShellCommands key
+// runs only when the command line runs that command (its `if`), so any other
+// Bash call starts no Recarto process; --cmd tells the hook which key started
+// it, so a line matching several keys is answered once.
 func hookSpecs(binary string) []hookSpec {
 	shell := hookShell()
-	return []hookSpec{
-		{"SessionStart", "", binary + " hook session-start --agent claude", shell},
-		{"PostToolUse", "Read", binary + " hook post-read --agent claude", shell},
-		{"PostToolUse", "Edit|Write", binary + " hook post-edit --agent claude", shell},
-		{"PostToolUse", "Grep|Glob", binary + " hook augment --agent claude", shell},
-		{"Stop", "", binary + " hook stop --agent claude", shell},
+	specs := []hookSpec{
+		{"SessionStart", "", binary + " hook session-start --agent claude", shell, ""},
+		{"PostToolUse", "Read", binary + " hook post-read --agent claude", shell, ""},
+		{"PostToolUse", "Edit|Write", binary + " hook post-edit --agent claude", shell, ""},
+		{"PostToolUse", "Grep|Glob", binary + " hook augment --agent claude", shell, ""},
 	}
+	for _, c := range agents.ShellCommands {
+		rule := c
+		if c == "git" {
+			rule = "git grep"
+		}
+		specs = append(specs, hookSpec{"PostToolUse", "Bash", binary + " hook shell --agent claude --cmd " + c, shell, "Bash(" + rule + " *)"})
+	}
+	return append(specs, hookSpec{"Stop", "", binary + " hook stop --agent claude", shell, ""})
 }
 
 // hookShell returns the Claude Code hook `shell` to pin. On Windows, Claude

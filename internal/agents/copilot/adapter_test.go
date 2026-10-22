@@ -90,6 +90,21 @@ func TestDecodeRoutesBuiltinToolsToTheirOwnHook(t *testing.T) {
 	}
 }
 
+// The shell hook reads the bash tool's command, run in the payload's cwd, and
+// no other tool's arguments — not even another tool's "command".
+func TestDecodeShellReadsOnlyBash(t *testing.T) {
+	for tool, want := range map[string]string{"bash": "rg Foo", "view": "", "powershell": "", "mcp_run": ""} {
+		in := `{"sessionId":"s","cwd":"/r","toolName":"` + tool + `","toolArgs":"{\"command\":\"rg Foo\",\"path\":\"/r/a.go\"}"}`
+		ev, err := Adapter{}.Decode(agents.KindShell, strings.NewReader(in))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ev.Command != want || (want != "" && ev.CWD != "/r") || ev.FilePath != "" {
+			t.Errorf("%s: command %q cwd %q path %q, want command %q", tool, ev.Command, ev.CWD, ev.FilePath, want)
+		}
+	}
+}
+
 func TestDecodeAcceptsStringToolArgs(t *testing.T) {
 	in := strings.NewReader(`{"sessionId":"s","toolName":"view","toolArgs":"{\"path\":\"/a/b.go\"}"}`)
 	ev, err := Adapter{}.Decode(agents.KindPostRead, in)

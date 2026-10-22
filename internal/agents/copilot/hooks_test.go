@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -12,6 +13,7 @@ import (
 
 	"git.gerwim.nl/gerwim/recarto/internal/app"
 	"git.gerwim.nl/gerwim/recarto/internal/clock"
+	"git.gerwim.nl/gerwim/recarto/internal/memory"
 )
 
 // fakeGit + newTestApp duplicated per test package (no shared testutil yet). The
@@ -60,7 +62,7 @@ func TestPostToolUseFanOutCountsOnlyTheRightHook(t *testing.T) {
 	file, _ := json.Marshal(filepath.Join(root, "a.go"))
 	call := func(session, tool string) {
 		in := `{"sessionId":"` + session + `","toolName":"` + tool + `","toolArgs":{"path":` + string(file) + `,"pattern":"Foo"}}`
-		for _, run := range []func(context.Context, *app.App, io.Reader, io.Writer) error{PostEdit, PostRead, Augment} {
+		for _, run := range []func(context.Context, *app.App, io.Reader, io.Writer) error{PostEdit, PostRead, Augment, Shell} {
 			if err := run(ctx, a, strings.NewReader(in), io.Discard); err != nil {
 				t.Fatal(err)
 			}
@@ -95,5 +97,31 @@ func TestPostToolUseFanOutCountsOnlyTheRightHook(t *testing.T) {
 	}
 	if n := count("lifetime", "reads"); n != 1 {
 		t.Errorf("lifetime reads = %d, want 1 (the view alone)", n)
+	}
+}
+
+// A bash view of a file surfaces its anchored todo through Copilot's payload.
+func TestShellViewThroughCopilotPayload(t *testing.T) {
+	root := t.TempDir()
+	a := newTestApp(t, root)
+	ctx := context.Background()
+	if err := os.WriteFile(filepath.Join(root, "a.go"), []byte("package a\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := a.Engine.Record(ctx, memory.NewMemory{
+		Kind: memory.KindTodo, Title: "split a.go", Body: "x", Source: "cli", Branch: a.Git.Branch,
+		Refs: []memory.Ref{{Type: memory.RefFile, Value: "a.go"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cwd, _ := json.Marshal(root)
+	var out strings.Builder
+	in := `{"sessionId":"s","cwd":` + string(cwd) + `,"toolName":"bash","toolArgs":{"command":"head -n 20 a.go | cat -n"}}`
+	if err := Shell(ctx, a, strings.NewReader(in), &out); err != nil {
+		t.Fatal(err)
+	}
+	var res struct{ AdditionalContext string }
+	if err := json.Unmarshal([]byte(out.String()), &res); err != nil || !strings.Contains(res.AdditionalContext, "split a.go") {
+		t.Errorf("output %q (%v), want the anchored todo", out.String(), err)
 	}
 }

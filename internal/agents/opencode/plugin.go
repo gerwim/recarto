@@ -19,6 +19,12 @@ import { resolve } from "node:path";
 
 const BIN = __BIN__;
 
+// SHELL_COMMANDS spots a shell line that may search or print files (grep,
+// egrep, fgrep, rg, ugrep, git grep, find, bfs, cat, head, tail, sed); recarto
+// reads it, and any other line never starts recarto.
+const SHELL_COMMANDS = /\b(grep|egrep|fgrep|rg|ugrep|find|bfs|cat|head|tail|sed)\b/;
+const isShell = (tool, command) => (tool === "bash" || tool === "shell") && SHELL_COMMANDS.test(command || "");
+
 // run pipes a neutral JSON payload to "recarto hook <event> --agent opencode" and
 // resolves its JSON result. Any failure (missing binary, bad output, a hook
 // wedged past a minute) resolves {} so recarto never breaks a session.
@@ -82,8 +88,8 @@ const setup = async (ctx) => {
     } catch {}
   });
 
-  // After a built-in read/search/edit tool, append recarto's advisory context to
-  // the result the model sees; edits also re-index the changed files.
+  // After a built-in read/search/edit/shell tool, append recarto's advisory
+  // context to the result the model sees; edits also re-index the changed files.
   await ctx.tool.hook("execute.after", async (event) => {
     try {
       if (event.status !== "completed") return;
@@ -95,6 +101,8 @@ const setup = async (ctx) => {
         append(event, (await run(dir, "post-read", { ...base, file_path: abs(input.path), tool_result: text })).additionalContext);
       } else if (event.tool === "grep" || event.tool === "glob") {
         append(event, (await run(dir, "augment", { ...base, pattern: input.pattern || "" })).additionalContext);
+      } else if (isShell(event.tool, input.command)) {
+        append(event, (await run(dir, "shell", { ...base, command: input.command, cwd: abs(input.workdir) || dir })).additionalContext);
       } else if (event.tool === "edit" || event.tool === "write" || event.tool === "patch") {
         const applied = (event.result.output && event.result.output.applied) || [];
         const files = event.tool === "patch" ? applied.map((a) => a.target) : [abs(input.path)];
@@ -150,7 +158,7 @@ const server = async ({ directory }) => {
       } catch {}
     },
 
-    // After a read/search tool, append recarto's advisory context to the result.
+    // After a read/search/shell tool, append recarto's advisory context to the result.
     "tool.execute.after": async (input, output) => {
       try {
         const args = (input && input.args) || (output && output.args) || {};
@@ -160,6 +168,8 @@ const server = async ({ directory }) => {
           r = await run(directory, "post-read", { ...base, file_path: abs(args.filePath), tool_result: (output && output.output) || "" });
         } else if (input.tool === "grep" || input.tool === "glob") {
           r = await run(directory, "augment", { ...base, pattern: args.pattern || "" });
+        } else if (isShell(input.tool, args.command)) {
+          r = await run(directory, "shell", { ...base, command: args.command, cwd: abs(args.workdir) || directory });
         }
         if (r.additionalContext && output) output.output = (output.output || "") + "\n\n" + r.additionalContext;
       } catch {}
