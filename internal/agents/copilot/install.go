@@ -1,34 +1,64 @@
 package copilot
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 
 	"git.gerwim.nl/gerwim/recarto/internal/agents"
 )
 
 // hookFile is the recarto-owned Copilot CLI hook config. Copilot merges hook files
 // from all sources, so a dedicated file needs no JSON merge and is idempotent by
-// construction (overwrite). postToolUse fans out to the post-edit/post-read/augment
-// handlers; the adapter pulls the file path / pattern from toolArgs regardless of
-// which tool fired.
+// construction (overwrite). Each postToolUse entry is matched to the built-in
+// tools its handler feeds, so a tool call starts at most that one Recarto
+// handler and any other tool starts none. Copilot before v1.0.63 ignored
+// postToolUse matchers and ran all three entries for every tool; the adapter
+// then lets only the tool's own handler act (see toolKinds). Every entry
+// carries both shell keys: Copilot runs `bash` on Linux/macOS and `powershell`
+// on Windows.
 func hookFile(binary string) []byte {
-	cmd := func(event string) map[string]any {
-		return map[string]any{"type": "command", "bash": binary + " hook " + event + " --agent copilot"}
+	cmd := func(event, matcher string) map[string]any {
+		args := " hook " + event + " --agent copilot"
+		h := map[string]any{
+			"type":       "command",
+			"bash":       shQuote(binary) + args,
+			"powershell": "& " + psQuote(binary) + args,
+		}
+		if matcher != "" {
+			h["matcher"] = matcher
+		}
+		return h
 	}
 	doc := map[string]any{
 		"version": 1,
 		"hooks": map[string]any{
-			"sessionStart": []any{cmd("session-start")},
-			"postToolUse":  []any{cmd("post-edit"), cmd("post-read"), cmd("augment")},
-			"agentStop":    []any{cmd("stop")},
+			"sessionStart": []any{cmd("session-start", "")},
+			"postToolUse": []any{
+				cmd("post-read", "view"),
+				cmd("post-edit", "edit|create"),
+				cmd("augment", "grep|glob"),
+			},
+			"agentStop": []any{cmd("stop", "")},
 		},
 	}
-	b, _ := json.MarshalIndent(doc, "", "  ")
-	return append(b, '\n')
+	var b bytes.Buffer
+	enc := json.NewEncoder(&b)
+	enc.SetEscapeHTML(false) // keep PowerShell's `&` readable
+	enc.SetIndent("", "  ")
+	_ = enc.Encode(doc)
+	return b.Bytes()
 }
+
+// shQuote single-quotes s for a POSIX shell.
+func shQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
+
+// psQuote single-quotes s for PowerShell (a quote inside doubles); the caller
+// prefixes the call operator `&` so the quoted path runs as a command.
+func psQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", "''") + "'" }
 
 // ensureMCPServer keeps the recarto entry in a Copilot mcpServers doc current:
 // it creates the entry when absent and refreshes the command/args in place when

@@ -116,3 +116,38 @@ func TestOpenReposSharesStoreWithCdSession(t *testing.T) {
 		t.Fatalf("served repo id = %+v, want the cd'd session's %s", a.Repos, cdID)
 	}
 }
+
+func TestWorktreesListsServedRootsWithoutOpeningStores(t *testing.T) {
+	cache := t.TempDir()
+	t.Setenv("RECARTO_CACHE_DIR", cache)
+	base := t.TempDir()
+	repo, scratch, plain := filepath.Join(base, "repo"), filepath.Join(base, "_scratch"), filepath.Join(base, "plain")
+	for _, d := range []string{repo, scratch, plain} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	initGitRepo(t, repo)
+	t.Setenv("RECARTO_REPOS", strings.Join([]string{repo, plain, filepath.Join(base, "missing")}, string(os.PathListSeparator)))
+
+	wts, err := Worktrees(Config{CWD: scratch})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(wts) != 2 || wts[0] != scratch || !sameDir(t, wts[1], repo) {
+		t.Fatalf("Worktrees = %v, want [%s %s] (non-git and missing extras skipped)", wts, scratch, repo)
+	}
+	entries, _ := os.ReadDir(cache)
+	for _, e := range entries {
+		if e.Name() != "gitctx" {
+			t.Errorf("Worktrees opened a store: %s", e.Name())
+		}
+	}
+}
+
+func sameDir(t *testing.T, a, b string) bool {
+	t.Helper()
+	fa, err1 := os.Stat(a)
+	fb, err2 := os.Stat(b)
+	return err1 == nil && err2 == nil && os.SameFile(fa, fb)
+}

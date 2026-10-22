@@ -87,21 +87,21 @@ func (Adapter) Encode(kind agents.EventKind, out io.Writer, res agents.Result) e
 // Public hook entrypoints (stable API for cli + tests): decode → Handle → encode.
 
 func SessionStart(ctx context.Context, a *app.App, in io.Reader, out io.Writer) error {
-	return agents.RunHook(ctx, a, Adapter{}, agents.KindSessionStart, in, out)
+	return agents.RunHook(ctx, agents.Opened(a), Adapter{}, agents.KindSessionStart, in, out)
 }
 
 func PostRead(ctx context.Context, a *app.App, in io.Reader, out io.Writer) error {
-	return agents.RunHook(ctx, a, Adapter{}, agents.KindPostRead, in, out)
+	return agents.RunHook(ctx, agents.Opened(a), Adapter{}, agents.KindPostRead, in, out)
 }
 
 func PostEdit(ctx context.Context, a *app.App, in io.Reader, out io.Writer) error {
-	return agents.RunHook(ctx, a, Adapter{}, agents.KindPostEdit, in, out)
+	return agents.RunHook(ctx, agents.Opened(a), Adapter{}, agents.KindPostEdit, in, out)
 }
 
 func Augment(ctx context.Context, a *app.App, in io.Reader, out io.Writer) error {
-	return agents.RunHook(ctx, a, Adapter{}, agents.KindAugment, in, out)
+	return agents.RunHook(ctx, agents.Opened(a), Adapter{}, agents.KindAugment, in, out)
 }
 
 func Stop(ctx context.Context, a *app.App, in io.Reader, out io.Writer) error {
-	return agents.RunHook(ctx, a, Adapter{}, agents.KindStop, in, out)
+	return agents.RunHook(ctx, agents.Opened(a), Adapter{}, agents.KindStop, in, out)
 }

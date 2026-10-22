@@ -2,6 +2,7 @@ package agents
 
 import (
 	"fmt"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -10,9 +11,14 @@ import (
 )
 
 // fakeGit + newTestApp duplicated per test package (no shared testutil yet).
-type fakeGit struct{ branch string }
+// root is the worktree it reports, "/repo" when empty.
+type fakeGit struct{ branch, root string }
 
 func (f fakeGit) Run(args ...string) (string, error) {
+	root := f.root
+	if root == "" {
+		root = "/repo"
+	}
 	has := func(s string) bool {
 		for _, a := range args {
 			if a == s {
@@ -23,9 +29,9 @@ func (f fakeGit) Run(args ...string) (string, error) {
 	}
 	switch {
 	case args[0] == "rev-parse" && has("--git-common-dir"):
-		return "/repo/.git", nil
+		return filepath.Join(root, ".git"), nil
 	case args[0] == "rev-parse" && has("--show-toplevel"):
-		return "/repo", nil
+		return root, nil
 	case args[0] == "symbolic-ref":
 		return f.branch, nil
 	case args[0] == "rev-list":

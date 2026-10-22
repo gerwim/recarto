@@ -16,9 +16,31 @@ import (
 // Adapter translates Copilot CLI hook payloads to and from agents.Event/Result.
 type Adapter struct{}
 
+// toolKinds routes Copilot's built-in tools: each one Recarto handles to the one
+// hook kind it feeds, the others to none. The hook file's matchers already do
+// this, but Copilot before v1.0.63 ignored postToolUse matchers and ran every
+// postToolUse hook for every tool (as does a hook file from before matchers).
+var toolKinds = map[string]agents.EventKind{
+	"view":       agents.KindPostRead,
+	"edit":       agents.KindPostEdit,
+	"create":     agents.KindPostEdit,
+	"grep":       agents.KindAugment,
+	"glob":       agents.KindAugment,
+	"bash":       noKind,
+	"powershell": noKind,
+	"task":       noKind,
+	"web_fetch":  noKind,
+	"ask_user":   noKind,
+}
+
+// noKind marks a built-in tool no Recarto hook handles.
+const noKind agents.EventKind = -1
+
 // Decode parses Copilot's camelCase payload. A single postToolUse invocation is
 // routed to its EventKind by the caller; the file path and grep pattern are pulled
 // generically from toolArgs so the adapter is resilient to Copilot's tool names.
+// A built-in tool reaching a hook kind it does not feed (a view at post-edit, an
+// edit at post-read) decodes without path or pattern, i.e. as an idle event.
 func (Adapter) Decode(kind agents.EventKind, in io.Reader) (agents.Event, error) {
 	var p struct {
 		SessionID  string          `json:"sessionId"`
@@ -30,15 +52,19 @@ func (Adapter) Decode(kind agents.EventKind, in io.Reader) (agents.Event, error)
 	if err := json.NewDecoder(in).Decode(&p); err != nil && err != io.EOF {
 		return agents.Event{}, err
 	}
-	return agents.Event{
+	ev := agents.Event{
 		Kind:       kind,
 		Agent:      "copilot",
 		SessionID:  p.SessionID,
 		Source:     p.Source,
-		FilePath:   pickString(p.ToolArgs, "path", "filePath", "file_path", "file"),
-		Pattern:    pickString(p.ToolArgs, "pattern", "query", "regex"),
 		ToolResult: string(p.ToolResult),
-	}, nil
+	}
+	if want, builtin := toolKinds[p.ToolName]; builtin && want != kind {
+		return ev, nil
+	}
+	ev.FilePath = pickString(p.ToolArgs, "path", "filePath", "file_path", "file")
+	ev.Pattern = pickString(p.ToolArgs, "pattern", "query", "regex")
+	return ev, nil
 }
 
 // Encode emits Copilot's hook output. sessionStart/postToolUse accept an
@@ -51,10 +77,15 @@ func (Adapter) Encode(kind agents.EventKind, out io.Writer, res agents.Result) e
 	return json.NewEncoder(out).Encode(map[string]any{"additionalContext": res.Context})
 }
 
-// pickString returns the first non-empty string value among keys in a JSON object.
+// pickString returns the first non-empty string value among keys in a JSON object,
+// given as an object or as a JSON-encoded string of one (Copilot has sent both).
 func pickString(raw json.RawMessage, keys ...string) string {
 	if len(raw) == 0 {
 		return ""
+	}
+	var enc string
+	if json.Unmarshal(raw, &enc) == nil {
+		raw = json.RawMessage(enc)
 	}
 	var m map[string]any
 	if json.Unmarshal(raw, &m) != nil {
@@ -71,21 +102,21 @@ func pickString(raw json.RawMessage, keys ...string) string {
 // Public hook entrypoints (used by `recarto hook <event> --agent copilot`).
 
 func SessionStart(ctx context.Context, a *app.App, in io.Reader, out io.Writer) error {
-	return agents.RunHook(ctx, a, Adapter{}, agents.KindSessionStart, in, out)
+	return agents.RunHook(ctx, agents.Opened(a), Adapter{}, agents.KindSessionStart, in, out)
 }
 
 func PostRead(ctx context.Context, a *app.App, in io.Reader, out io.Writer) error {
-	return agents.RunHook(ctx, a, Adapter{}, agents.KindPostRead, in, out)
+	return agents.RunHook(ctx, agents.Opened(a), Adapter{}, agents.KindPostRead, in, out)
 }
 
 func PostEdit(ctx context.Context, a *app.App, in io.Reader, out io.Writer) error {
-	return agents.RunHook(ctx, a, Adapter{}, agents.KindPostEdit, in, out)
+	return agents.RunHook(ctx, agents.Opened(a), Adapter{}, agents.KindPostEdit, in, out)
 }
 
 func Augment(ctx context.Context, a *app.App, in io.Reader, out io.Writer) error {
-	return agents.RunHook(ctx, a, Adapter{}, agents.KindAugment, in, out)
+	return agents.RunHook(ctx, agents.Opened(a), Adapter{}, agents.KindAugment, in, out)
 }
 
 func Stop(ctx context.Context, a *app.App, in io.Reader, out io.Writer) error {
-	return agents.RunHook(ctx, a, Adapter{}, agents.KindStop, in, out)
+	return agents.RunHook(ctx, agents.Opened(a), Adapter{}, agents.KindStop, in, out)
 }

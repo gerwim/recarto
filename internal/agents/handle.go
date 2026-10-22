@@ -58,14 +58,20 @@ func boundedSync(ctx context.Context, budget time.Duration, fn func(context.Cont
 	defer cancel()
 	done := make(chan struct{})
 	go func() {
+		defer close(done)
+		defer recoverHook()
 		_ = fn(sctx)
-		close(done)
 	}()
 	select {
 	case <-done:
 	case <-sctx.Done():
 	}
 }
+
+// recoverHook swallows a panic in a hook's background goroutine: an unrecovered
+// one kills the process with exit 2, which Claude Code reads as "block". Like
+// any other best-effort failure, it just ends that goroutine's work.
+func recoverHook() { _ = recover() }
 
 // newGraphSource builds the file source for the session-start warm-up; a var so
 // tests can substitute a controllable source.
@@ -86,24 +92,38 @@ func agentOrDefault(s string) string {
 // belongs to the inner repo). ok=false when no served worktree contains the
 // file, or the path is not absolute.
 func owningRepo(a *app.App, abs string) (rc *app.RepoContext, rel string, ok bool) {
-	if !filepath.IsAbs(abs) {
-		return nil, "", false
-	}
 	bestLen := -1
 	for _, cand := range a.AllRepos() {
 		wt := cand.Git.Worktree
-		if wt == "" {
-			continue
-		}
-		r, err := filepath.Rel(wt, abs)
-		if err != nil || r == ".." || strings.HasPrefix(r, ".."+string(filepath.Separator)) {
-			continue
-		}
-		if len(wt) > bestLen {
-			rc, rel, ok, bestLen = cand, filepath.ToSlash(r), true, len(wt)
+		if r, in := within(wt, abs); in && len(wt) > bestLen {
+			rc, rel, ok, bestLen = cand, r, true, len(wt)
 		}
 	}
 	return
+}
+
+// Owned reports whether an absolute path lies in one of the worktrees — the
+// store-free form of owningRepo, against app.Worktrees.
+func Owned(worktrees []string, abs string) bool {
+	for _, wt := range worktrees {
+		if _, in := within(wt, abs); in {
+			return true
+		}
+	}
+	return false
+}
+
+// within returns abs relative to worktree wt (slash-separated), ok=false when
+// abs is not absolute or lies outside wt.
+func within(wt, abs string) (string, bool) {
+	if wt == "" || !filepath.IsAbs(abs) {
+		return "", false
+	}
+	r, err := filepath.Rel(wt, abs)
+	if err != nil || r == ".." || strings.HasPrefix(r, ".."+string(filepath.Separator)) {
+		return "", false
+	}
+	return filepath.ToSlash(r), true
 }
 
 // handleSessionStart opens/creates the session row, warms the code graph, runs
@@ -138,6 +158,8 @@ func handleSessionStart(ctx context.Context, a *app.App, ev Event) (Result, erro
 	defer cancel()
 	warmed := make(chan struct{})
 	go func() {
+		defer close(warmed)
+		defer recoverHook()
 		_ = a.Graph.ReconcileIfStale(sctx, a.Git.Worktree, newGraphSource(a.Git.Worktree), graph.WorktreeToken(a.Git.Worktree))
 		// Extra served repos (RECARTO_REPOS) reconcile inside the same hard
 		// budget — usually a no-op, since sessions cd'd into those repos keep
@@ -154,7 +176,6 @@ func handleSessionStart(ctx context.Context, a *app.App, ev Event) (Result, erro
 			}
 			_ = a.Store.Checkpoint(sctx)
 		}
-		close(warmed)
 	}()
 	select {
 	case <-warmed:
