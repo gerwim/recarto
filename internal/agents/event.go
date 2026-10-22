@@ -22,6 +22,7 @@ const (
 	KindPostEdit
 	KindAugment
 	KindStop
+	KindShell
 )
 
 // Event is the agent-neutral hook input. Adapters populate the fields relevant to
@@ -35,6 +36,17 @@ type Event struct {
 	Pattern    string // grep/glob query (Augment)
 	ToolResult string // raw tool result text (PostRead token estimate)
 	StopActive bool
+	Command    string // shell command line (Shell)
+	CWD        string // the shell's working directory (Shell)
+	// Trigger is the ShellCommands key a per-command host hook was started for
+	// ("" when the host starts one hook for every shell call). Only the hook of
+	// the line's first such command acts, so a line matching several starts
+	// one hint, not one per match.
+	Trigger string
+	// Patterns and Files are Command as RunHook read it: the searches it runs
+	// and the absolute paths of the files it prints (Shell).
+	Patterns []string
+	Files    []string
 }
 
 // Result is the agent-neutral hook output. Context is injected as the host's
@@ -68,8 +80,10 @@ func KindFromString(s string) (EventKind, error) {
 		return KindAugment, nil
 	case "stop":
 		return KindStop, nil
+	case "shell":
+		return KindShell, nil
 	}
-	return 0, fmt.Errorf("unknown event %q (session-start|post-read|post-edit|augment|stop)", s)
+	return 0, fmt.Errorf("unknown event %q (session-start|post-read|post-edit|augment|stop|shell)", s)
 }
 
 // RunHook decodes the event with ad, runs the shared Handle against the App
@@ -84,6 +98,11 @@ func RunHook(ctx context.Context, open func(Event) (*app.App, error), ad Adapter
 	ev, err := ad.Decode(kind, in)
 	if err != nil {
 		return err
+	}
+	if ev.Kind == KindShell {
+		if p := parseShell(ev.Command, ev.CWD); ev.Trigger == "" || ev.Trigger == p.owner {
+			ev.Patterns, ev.Files = p.patterns, p.files
+		}
 	}
 	if idle(ev) {
 		return ad.Encode(kind, out, Result{})
@@ -111,7 +130,8 @@ func Opened(a *app.App) func(Event) (*app.App, error) {
 // It mirrors the handlers' own early returns, so skipping Handle for it changes
 // neither output nor ledger. A stemless file glob ("*.cs") is idle too:
 // handleAugment injects nothing for it and so never marks it for the
-// repeated-search dedup.
+// repeated-search dedup. A shell line is idle unless it searches or prints a
+// file: builds, tests, git and writes never reach the store.
 func idle(ev Event) bool {
 	switch ev.Kind {
 	case KindPostRead:
@@ -123,6 +143,8 @@ func idle(ev Event) bool {
 		return ev.Pattern == "" || !ok
 	case KindStop:
 		return ev.SessionID == ""
+	case KindShell:
+		return len(ev.Patterns) == 0 && len(ev.Files) == 0
 	}
 	return false
 }
