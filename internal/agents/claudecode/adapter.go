@@ -15,15 +15,18 @@ type Adapter struct{}
 // Decode parses the subset of the Claude Code hook payload we use into a neutral
 // Event. The grep pattern falls back to the glob query field; the tool output
 // (sized for the read ledger) comes from tool_response, falling back to the
-// tool_result spelling older payloads used.
+// tool_result spelling older payloads used. A Bash call carries its command in
+// tool_input and the session's working directory in cwd.
 func (Adapter) Decode(kind agents.EventKind, in io.Reader) (agents.Event, error) {
 	var p struct {
 		SessionID string `json:"session_id"`
 		Source    string `json:"source"`
+		CWD       string `json:"cwd"`
 		ToolInput struct {
 			FilePath string `json:"file_path"`
 			Pattern  string `json:"pattern"`
 			Query    string `json:"query"`
+			Command  string `json:"command"`
 		} `json:"tool_input"`
 		ToolResult     json.RawMessage `json:"tool_result"`
 		ToolResponse   json.RawMessage `json:"tool_response"` // what Claude Code actually sends
@@ -49,6 +52,8 @@ func (Adapter) Decode(kind agents.EventKind, in io.Reader) (agents.Event, error)
 		Pattern:    pattern,
 		ToolResult: string(result),
 		StopActive: p.StopHookActive,
+		Command:    p.ToolInput.Command,
+		CWD:        p.CWD,
 	}, nil
 }
 
@@ -87,21 +92,25 @@ func (Adapter) Encode(kind agents.EventKind, out io.Writer, res agents.Result) e
 // Public hook entrypoints (stable API for cli + tests): decode → Handle → encode.
 
 func SessionStart(ctx context.Context, a *app.App, in io.Reader, out io.Writer) error {
-	return agents.RunHook(ctx, a, Adapter{}, agents.KindSessionStart, in, out)
+	return agents.RunHook(ctx, agents.Opened(a), Adapter{}, agents.KindSessionStart, in, out)
 }
 
 func PostRead(ctx context.Context, a *app.App, in io.Reader, out io.Writer) error {
-	return agents.RunHook(ctx, a, Adapter{}, agents.KindPostRead, in, out)
+	return agents.RunHook(ctx, agents.Opened(a), Adapter{}, agents.KindPostRead, in, out)
 }
 
 func PostEdit(ctx context.Context, a *app.App, in io.Reader, out io.Writer) error {
-	return agents.RunHook(ctx, a, Adapter{}, agents.KindPostEdit, in, out)
+	return agents.RunHook(ctx, agents.Opened(a), Adapter{}, agents.KindPostEdit, in, out)
 }
 
 func Augment(ctx context.Context, a *app.App, in io.Reader, out io.Writer) error {
-	return agents.RunHook(ctx, a, Adapter{}, agents.KindAugment, in, out)
+	return agents.RunHook(ctx, agents.Opened(a), Adapter{}, agents.KindAugment, in, out)
 }
 
 func Stop(ctx context.Context, a *app.App, in io.Reader, out io.Writer) error {
-	return agents.RunHook(ctx, a, Adapter{}, agents.KindStop, in, out)
+	return agents.RunHook(ctx, agents.Opened(a), Adapter{}, agents.KindStop, in, out)
+}
+
+func Shell(ctx context.Context, a *app.App, in io.Reader, out io.Writer) error {
+	return agents.RunHook(ctx, agents.Opened(a), Adapter{}, agents.KindShell, in, out)
 }

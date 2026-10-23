@@ -12,7 +12,7 @@ import (
 // known reports whether cmd is a CLI command that needs an open App.
 func known(cmd string) bool {
 	switch cmd {
-	case "status", "doctor", "remember", "forget", "recall", "bug", "memory", "serve", "hook", "index", "graph", "compact", "snapshot", "todo", "sync":
+	case "status", "doctor", "remember", "forget", "recall", "bug", "memory", "serve", "index", "graph", "compact", "snapshot", "todo", "sync":
 		return true
 	}
 	return false
@@ -21,8 +21,9 @@ func known(cmd string) bool {
 // Run dispatches a CLI invocation (args excludes the program name) and writes
 // command output to out. It validates the command before opening the per-repo
 // App, so unknown commands and `help` never touch the store. `init` configures
-// the repo's files and needs no store. Hooks are non-blocking: a hook error is
-// reported to stderr but Run still returns nil so the agent is never blocked.
+// the repo's files and needs no store. Hooks are non-blocking: they open the App
+// themselves (only when the event has something to act on), report any error to
+// stderr, and Run still returns nil so the agent is never blocked.
 func Run(args []string, out io.Writer) error {
 	if len(args) == 0 {
 		return usage(out)
@@ -71,6 +72,13 @@ func Run(args []string, out io.Writer) error {
 		return Repair(out, rest)
 	}
 
+	// A hook opens the App itself, and only when its event has something to act
+	// on: most tool calls a hook fires for need no git or store at all.
+	if cmd == "hook" {
+		runHook(context.Background(), os.Stdin, out, rest)
+		return nil // hooks never block
+	}
+
 	if !known(cmd) {
 		return fmt.Errorf("unknown command %q (try: init serve hook status doctor remember forget recall bug feedback memory index graph compact snapshot todo sync server export import repair)", cmd)
 	}
@@ -83,11 +91,6 @@ func Run(args []string, out io.Writer) error {
 
 	a, err := app.Open(cfg)
 	if err != nil {
-		if cmd == "hook" {
-			// Hooks must never block the agent, even if the store cannot open.
-			fmt.Fprintln(os.Stderr, "recarto hook:", err)
-			return nil
-		}
 		return err
 	}
 	defer a.Close()
@@ -110,11 +113,6 @@ func Run(args []string, out io.Writer) error {
 		return Memory(ctx, a, out, rest)
 	case "serve":
 		return Serve(ctx, a)
-	case "hook":
-		if err := Hook(ctx, a, os.Stdin, out, rest); err != nil {
-			fmt.Fprintln(os.Stderr, "recarto hook:", err)
-		}
-		return nil // hooks never block
 	case "index":
 		return Index(ctx, a, out, rest)
 	case "graph":
@@ -144,7 +142,7 @@ func usage(w io.Writer) error {
 	fmt.Fprintln(w, "recarto <command>")
 	fmt.Fprintln(w, "  init              configure agents (--agent claude,opencode,copilot  --scope user|repo)")
 	fmt.Fprintln(w, "  serve             run the MCP server over stdio")
-	fmt.Fprintln(w, "  hook <event>      run an agent hook (session-start|post-read|post-edit|augment|stop) [--agent]")
+	fmt.Fprintln(w, "  hook <event>      run an agent hook (session-start|post-read|post-edit|augment|stop|shell) [--agent] [--cmd]")
 	fmt.Fprintln(w, "  status            repo id, branch, memory counts, ledger")
 	fmt.Fprintln(w, "  doctor            health checks (db, WAL, integrity, git)")
 	fmt.Fprintln(w, "  repair            rebuild a corrupt store, salvaging memories (--path <store.db>)")

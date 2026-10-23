@@ -36,6 +36,10 @@ type Config struct {
 	// has been proven readable rather than discovering damage on its first write.
 	// One-shot commands and hooks leave it off and stay as cheap as before.
 	QuickCheck bool
+	// SkipWorkspace leaves App.Workspace nil, so its store is never opened —
+	// for the per-tool hooks (post-read, post-edit, augment), which never touch
+	// it and run on nearly every tool call.
+	SkipWorkspace bool
 }
 
 // RepoContext is one served repo root with its own store, engine and graph.
@@ -104,26 +108,13 @@ func (a *App) SignalSync() {
 // The git identity is resolved exactly once here and cached on App, so a
 // long-lived `serve` process resolves git a single time (spec §6).
 func Open(cfg Config) (*App, error) {
-	cwd := cfg.CWD
-	if cwd == "" {
-		wd, err := os.Getwd()
-		if err != nil {
-			return nil, err
-		}
-		cwd = wd
-	}
-	runner := cfg.Runner
-	if runner == nil {
-		runner = gitctx.Real{Dir: cwd}
+	runner, gc, err := resolvePrimary(cfg)
+	if err != nil {
+		return nil, err
 	}
 	clk := cfg.Clock
 	if clk == nil {
 		clk = clock.Real{}
-	}
-
-	gc, err := gitctx.Resolve(runner, cwd)
-	if err != nil {
-		return nil, err
 	}
 	path, err := cache.StorePath(gc.RepoID)
 	if err != nil {
@@ -143,11 +134,13 @@ func Open(cfg Config) (*App, error) {
 	}
 	eng.SetRefResolver(graphRefResolver{st: st})
 	syncer, _ := remotesync.New(remotesync.ConfigFromEnv(), gc, eng, st)
-	ws, err := workspace.Open(clk, storeOpts...)
-	if err != nil {
-		gr.Close()
-		_ = st.Close()
-		return nil, err
+	var ws *workspace.Bundle
+	if !cfg.SkipWorkspace {
+		if ws, err = workspace.Open(clk, storeOpts...); err != nil {
+			gr.Close()
+			_ = st.Close()
+			return nil, err
+		}
 	}
 
 	a := &App{
@@ -159,6 +152,55 @@ func Open(cfg Config) (*App, error) {
 		return nil, err
 	}
 	return a, nil
+}
+
+// resolvePrimary resolves the identity of cfg's working directory, returning the
+// git runner it used.
+func resolvePrimary(cfg Config) (gitctx.Runner, gitctx.Context, error) {
+	cwd := cfg.CWD
+	if cwd == "" {
+		wd, err := os.Getwd()
+		if err != nil {
+			return nil, gitctx.Context{}, err
+		}
+		cwd = wd
+	}
+	if cfg.Runner != nil {
+		gc, err := gitctx.Resolve(cfg.Runner, cwd)
+		return cfg.Runner, gc, err
+	}
+	gc, err := resolveReal(cwd)
+	return gitctx.Real{Dir: cwd}, gc, err
+}
+
+// Worktrees returns the worktree roots an App opened with cfg would serve —
+// the primary's, then the RECARTO_REPOS repos' — resolving identity as Open
+// does but opening no store, so a hook can tell a file outside every served
+// repo before paying for one. It may list a repo Open then fails to open,
+// never miss one.
+func Worktrees(cfg Config) ([]string, error) {
+	_, gc, err := resolvePrimary(cfg)
+	if err != nil {
+		return nil, err
+	}
+	out := []string{gc.Worktree}
+	for _, p := range filepath.SplitList(os.Getenv("RECARTO_REPOS")) {
+		if p == "" {
+			continue
+		}
+		if gc, err := resolveReal(p); err == nil && !gc.NonGit {
+			out = append(out, gc.Worktree)
+		}
+	}
+	return out, nil
+}
+
+// resolveReal resolves dir's identity with real git, through the cross-process
+// identity cache, so a hook skips the git spawns while the checkout is
+// unchanged. An injected test Runner bypasses it (Open calls Resolve).
+func resolveReal(dir string) (gitctx.Context, error) {
+	cacheDir, _ := cache.Dir() // "" disables the cache
+	return gitctx.ResolveCached(cacheDir, gitctx.Real{Dir: dir}, dir)
 }
 
 // storeOptions maps the App config onto the store-level options every store
@@ -261,7 +303,7 @@ func openRepos(primaryID string, clk clock.Clock, storeOpts ...store.Option) []*
 		if p == "" {
 			continue
 		}
-		gc, err := gitctx.Resolve(gitctx.Real{Dir: p}, p)
+		gc, err := resolveReal(p)
 		if err != nil || gc.NonGit || seen[gc.RepoID] {
 			continue
 		}
@@ -289,19 +331,36 @@ func openRepos(primaryID string, clk clock.Clock, storeOpts ...store.Option) []*
 }
 
 // writeMeta upserts repo identity metadata. It is idempotent and safe under
-// concurrency (the store serializes writers; the UPSERT is atomic).
+// concurrency (the store serializes writers; the UPSERT is atomic). Every open
+// runs it, so it first reads the rows and writes only on drift: an unchanged
+// store is then opened without taking the write lock — and a hook that only
+// reads never makes SQLite fsync and checkpoint the WAL on close.
 func (a *App) writeMeta(ctx context.Context) error {
+	want := map[string]string{
+		"repo_name":       a.Git.RepoName,
+		"repo_id":         a.Git.RepoID,
+		"root_commit":     a.Git.RootCommit,
+		"recarto_version": version.Version,
+	}
+	if rows, err := a.Store.DB.QueryContext(ctx,
+		`SELECT key, value FROM meta WHERE key IN ('repo_name', 'repo_id', 'root_commit', 'recarto_version')`); err == nil {
+		same := 0
+		for rows.Next() {
+			var k, v string
+			if rows.Scan(&k, &v) == nil && want[k] == v {
+				same++
+			}
+		}
+		if rows.Close() == nil && rows.Err() == nil && same == len(want) {
+			return nil
+		}
+	}
 	return a.Store.WriteTx(ctx, func(c store.Conn) error {
-		for _, kv := range [][2]string{
-			{"repo_name", a.Git.RepoName},
-			{"repo_id", a.Git.RepoID},
-			{"root_commit", a.Git.RootCommit},
-			{"recarto_version", version.Version},
-		} {
+		for k, v := range want {
 			if _, err := c.ExecContext(ctx,
 				`INSERT INTO meta(key, value) VALUES (?, ?)
 				 ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
-				kv[0], kv[1]); err != nil {
+				k, v); err != nil {
 				return err
 			}
 		}

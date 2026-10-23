@@ -31,6 +31,8 @@ func Handle(ctx context.Context, a *app.App, ev Event) (Result, error) {
 		return handleAugment(ctx, a, ev)
 	case KindStop:
 		return handleStop(ctx, a, ev)
+	case KindShell:
+		return handleShell(ctx, a, ev)
 	}
 	return Result{}, nil
 }
@@ -58,14 +60,20 @@ func boundedSync(ctx context.Context, budget time.Duration, fn func(context.Cont
 	defer cancel()
 	done := make(chan struct{})
 	go func() {
+		defer close(done)
+		defer recoverHook()
 		_ = fn(sctx)
-		close(done)
 	}()
 	select {
 	case <-done:
 	case <-sctx.Done():
 	}
 }
+
+// recoverHook swallows a panic in a hook's background goroutine: an unrecovered
+// one kills the process with exit 2, which Claude Code reads as "block". Like
+// any other best-effort failure, it just ends that goroutine's work.
+func recoverHook() { _ = recover() }
 
 // newGraphSource builds the file source for the session-start warm-up; a var so
 // tests can substitute a controllable source.
@@ -86,24 +94,38 @@ func agentOrDefault(s string) string {
 // belongs to the inner repo). ok=false when no served worktree contains the
 // file, or the path is not absolute.
 func owningRepo(a *app.App, abs string) (rc *app.RepoContext, rel string, ok bool) {
-	if !filepath.IsAbs(abs) {
-		return nil, "", false
-	}
 	bestLen := -1
 	for _, cand := range a.AllRepos() {
 		wt := cand.Git.Worktree
-		if wt == "" {
-			continue
-		}
-		r, err := filepath.Rel(wt, abs)
-		if err != nil || r == ".." || strings.HasPrefix(r, ".."+string(filepath.Separator)) {
-			continue
-		}
-		if len(wt) > bestLen {
-			rc, rel, ok, bestLen = cand, filepath.ToSlash(r), true, len(wt)
+		if r, in := within(wt, abs); in && len(wt) > bestLen {
+			rc, rel, ok, bestLen = cand, r, true, len(wt)
 		}
 	}
 	return
+}
+
+// Owned reports whether an absolute path lies in one of the worktrees — the
+// store-free form of owningRepo, against app.Worktrees.
+func Owned(worktrees []string, abs string) bool {
+	for _, wt := range worktrees {
+		if _, in := within(wt, abs); in {
+			return true
+		}
+	}
+	return false
+}
+
+// within returns abs relative to worktree wt (slash-separated), ok=false when
+// abs is not absolute or lies outside wt.
+func within(wt, abs string) (string, bool) {
+	if wt == "" || !filepath.IsAbs(abs) {
+		return "", false
+	}
+	r, err := filepath.Rel(wt, abs)
+	if err != nil || r == ".." || strings.HasPrefix(r, ".."+string(filepath.Separator)) {
+		return "", false
+	}
+	return filepath.ToSlash(r), true
 }
 
 // handleSessionStart opens/creates the session row, warms the code graph, runs
@@ -138,6 +160,8 @@ func handleSessionStart(ctx context.Context, a *app.App, ev Event) (Result, erro
 	defer cancel()
 	warmed := make(chan struct{})
 	go func() {
+		defer close(warmed)
+		defer recoverHook()
 		_ = a.Graph.ReconcileIfStale(sctx, a.Git.Worktree, newGraphSource(a.Git.Worktree), graph.WorktreeToken(a.Git.Worktree))
 		// Extra served repos (RECARTO_REPOS) reconcile inside the same hard
 		// budget — usually a no-op, since sessions cd'd into those repos keep
@@ -154,7 +178,6 @@ func handleSessionStart(ctx context.Context, a *app.App, ev Event) (Result, erro
 			}
 			_ = a.Store.Checkpoint(sctx)
 		}
-		close(warmed)
 	}()
 	select {
 	case <-warmed:
@@ -357,25 +380,34 @@ func handlePostRead(ctx context.Context, a *app.App, ev Event) (Result, error) {
 				"instead of reading the whole file.", rel, tokens, len(syms)))
 		}
 	}
-	if found, err := target.Engine.BugsForCode(ctx, target.Git.Branch, []string{rel}, nil); err == nil {
-		if found = dedupSurfaced(ctx, a, ev.SessionID, found); len(found) > 0 {
-			msgs = append(msgs, formatBugWarnings(rel, found))
-		}
-	}
-	if found, err := target.Engine.GuidanceForCode(ctx, target.Git.Branch, []string{rel}, nil); err == nil {
-		if found = dedupSurfaced(ctx, a, ev.SessionID, found); len(found) > 0 {
-			msgs = append(msgs, formatGuidance(rel, found))
-		}
-	}
-	if found, err := target.Engine.TodosForCode(ctx, target.Git.Branch, []string{rel}, nil); err == nil {
-		if found = dedupSurfaced(ctx, a, ev.SessionID, found); len(found) > 0 {
-			msgs = append(msgs, formatTodoReminders(rel, found))
-		}
-	}
+	msgs = append(msgs, anchoredNotes(ctx, a, ev.SessionID, target, rel)...)
 	if len(msgs) == 0 {
 		return Result{}, nil
 	}
 	return Result{Context: strings.Join(msgs, "\n")}, nil
+}
+
+// anchoredNotes returns the bug, guidance and todo blocks anchored to rel in
+// target that this session has not seen yet, marking them seen. It matches
+// stored refs by path, so the file need not exist on disk.
+func anchoredNotes(ctx context.Context, a *app.App, sessionID string, target *app.RepoContext, rel string) []string {
+	var msgs []string
+	if found, err := target.Engine.BugsForCode(ctx, target.Git.Branch, []string{rel}, nil); err == nil {
+		if found = dedupSurfaced(ctx, a, sessionID, found); len(found) > 0 {
+			msgs = append(msgs, formatBugWarnings(rel, found))
+		}
+	}
+	if found, err := target.Engine.GuidanceForCode(ctx, target.Git.Branch, []string{rel}, nil); err == nil {
+		if found = dedupSurfaced(ctx, a, sessionID, found); len(found) > 0 {
+			msgs = append(msgs, formatGuidance(rel, found))
+		}
+	}
+	if found, err := target.Engine.TodosForCode(ctx, target.Git.Branch, []string{rel}, nil); err == nil {
+		if found = dedupSurfaced(ctx, a, sessionID, found); len(found) > 0 {
+			msgs = append(msgs, formatTodoReminders(rel, found))
+		}
+	}
+	return msgs
 }
 
 // handlePostEdit surfaces any prior bug tied to the edited file, then incrementally
@@ -400,27 +432,9 @@ func handlePostEdit(ctx context.Context, a *app.App, ev Event) (Result, error) {
 		_ = a.Ledger.Incr(ctx, ev.SessionID, "edits", 1)
 	}
 
-	var res Result
 	// Surface any prior bug/guidance/todo tied to this file before re-indexing
-	// (best-effort). This matches stored refs by path and does not require the file
-	// on disk. Each is deduped per session so repeated edits don't re-inject.
-	var msgs []string
-	if found, berr := target.Engine.BugsForCode(ctx, target.Git.Branch, []string{rel}, nil); berr == nil {
-		if found = dedupSurfaced(ctx, a, ev.SessionID, found); len(found) > 0 {
-			msgs = append(msgs, formatBugWarnings(rel, found))
-		}
-	}
-	if found, berr := target.Engine.GuidanceForCode(ctx, target.Git.Branch, []string{rel}, nil); berr == nil {
-		if found = dedupSurfaced(ctx, a, ev.SessionID, found); len(found) > 0 {
-			msgs = append(msgs, formatGuidance(rel, found))
-		}
-	}
-	if found, berr := target.Engine.TodosForCode(ctx, target.Git.Branch, []string{rel}, nil); berr == nil {
-		if found = dedupSurfaced(ctx, a, ev.SessionID, found); len(found) > 0 {
-			msgs = append(msgs, formatTodoReminders(rel, found))
-		}
-	}
-	res.Context = strings.Join(msgs, "\n")
+	// (best-effort), each deduped per session so repeated edits don't re-inject.
+	res := Result{Context: strings.Join(anchoredNotes(ctx, a, ev.SessionID, target, rel), "\n")}
 	content, err := os.ReadFile(abs)
 	if err != nil {
 		return res, nil // file vanished between edit and hook; ignore
@@ -557,6 +571,44 @@ func handleAugment(ctx context.Context, a *app.App, ev Event) (Result, error) {
 		_ = a.Ledger.Incr(ctx, scope, metric, 1)
 	}
 	return Result{Context: out}, nil
+}
+
+// shellSearchNudge points the agent at the MCP tools that beat a shell search.
+// It rides along with a session's first shell search only.
+const shellSearchNudge = "Recarto: next time, search with its MCP tools instead of the shell — search_content " +
+	"(regex/text search of the worktree that honours .gitignore and names each hit's enclosing symbol) " +
+	"and search_graph (symbol and concept search)."
+
+// handleShell answers a shell tool call RunHook read as searches and file
+// views. Each search gets the hint a Grep/Glob tool call with that pattern
+// gets (caps, glob stems and the per-session repeat reminder included), and
+// the session's first shell search adds shellSearchNudge. Each printed file in
+// a served repo surfaces its anchored memories, deduped exactly like a Read —
+// without a Read's counters, repeat warning or large-file nudge.
+func handleShell(ctx context.Context, a *app.App, ev Event) (Result, error) {
+	var msgs []string
+	for _, p := range ev.Patterns {
+		res, err := handleAugment(ctx, a, Event{Kind: KindAugment, SessionID: ev.SessionID, Pattern: p})
+		if err != nil {
+			return Result{}, err
+		}
+		if res.Context != "" {
+			msgs = append(msgs, res.Context)
+		}
+	}
+	if len(ev.Patterns) > 0 && ev.SessionID != "" {
+		scope := "session:" + ev.SessionID
+		if n, err := a.Ledger.Get(ctx, scope, "shell_search_nudged"); err == nil && n == 0 {
+			_ = a.Ledger.Incr(ctx, scope, "shell_search_nudged", 1)
+			msgs = append(msgs, shellSearchNudge)
+		}
+	}
+	for _, f := range ev.Files {
+		if target, rel, ok := owningRepo(a, f); ok {
+			msgs = append(msgs, anchoredNotes(ctx, a, ev.SessionID, target, rel)...)
+		}
+	}
+	return Result{Context: strings.Join(msgs, "\n")}, nil
 }
 
 // tenthSessionStart returns the started_at of the worktree's 10th-most-recent

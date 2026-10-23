@@ -26,8 +26,11 @@ func TestNewRegistryCompilesAllQueries(t *testing.T) {
 	}
 	defer r.Close()
 	for _, lang := range []string{"go", "csharp", "typescript", "tsx", "javascript", "rust"} {
-		if r.queries[lang] == nil || r.langs[lang] == nil {
-			t.Errorf("%s language/query not registered", lang)
+		if r.langs[lang] == nil {
+			t.Errorf("%s language not registered", lang)
+		}
+		if _, err := r.query(lang); err != nil {
+			t.Error(err)
 		}
 	}
 }

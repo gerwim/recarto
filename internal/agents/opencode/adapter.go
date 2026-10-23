@@ -26,6 +26,8 @@ func (Adapter) Decode(kind agents.EventKind, in io.Reader) (agents.Event, error)
 		FilePath   string `json:"file_path"`
 		Pattern    string `json:"pattern"`
 		ToolResult string `json:"tool_result"`
+		Command    string `json:"command"`
+		CWD        string `json:"cwd"`
 	}
 	if err := json.NewDecoder(in).Decode(&p); err != nil && err != io.EOF {
 		return agents.Event{}, err
@@ -38,6 +40,8 @@ func (Adapter) Decode(kind agents.EventKind, in io.Reader) (agents.Event, error)
 		FilePath:   p.FilePath,
 		Pattern:    p.Pattern,
 		ToolResult: p.ToolResult,
+		Command:    p.Command,
+		CWD:        p.CWD,
 	}, nil
 }
 
@@ -59,21 +63,25 @@ func (Adapter) Encode(_ agents.EventKind, out io.Writer, res agents.Result) erro
 // Public hook entrypoints (used by `recarto hook <event> --agent opencode`).
 
 func SessionStart(ctx context.Context, a *app.App, in io.Reader, out io.Writer) error {
-	return agents.RunHook(ctx, a, Adapter{}, agents.KindSessionStart, in, out)
+	return agents.RunHook(ctx, agents.Opened(a), Adapter{}, agents.KindSessionStart, in, out)
 }
 
 func PostRead(ctx context.Context, a *app.App, in io.Reader, out io.Writer) error {
-	return agents.RunHook(ctx, a, Adapter{}, agents.KindPostRead, in, out)
+	return agents.RunHook(ctx, agents.Opened(a), Adapter{}, agents.KindPostRead, in, out)
 }
 
 func PostEdit(ctx context.Context, a *app.App, in io.Reader, out io.Writer) error {
-	return agents.RunHook(ctx, a, Adapter{}, agents.KindPostEdit, in, out)
+	return agents.RunHook(ctx, agents.Opened(a), Adapter{}, agents.KindPostEdit, in, out)
 }
 
 func Augment(ctx context.Context, a *app.App, in io.Reader, out io.Writer) error {
-	return agents.RunHook(ctx, a, Adapter{}, agents.KindAugment, in, out)
+	return agents.RunHook(ctx, agents.Opened(a), Adapter{}, agents.KindAugment, in, out)
 }
 
 func Stop(ctx context.Context, a *app.App, in io.Reader, out io.Writer) error {
-	return agents.RunHook(ctx, a, Adapter{}, agents.KindStop, in, out)
+	return agents.RunHook(ctx, agents.Opened(a), Adapter{}, agents.KindStop, in, out)
+}
+
+func Shell(ctx context.Context, a *app.App, in io.Reader, out io.Writer) error {
+	return agents.RunHook(ctx, agents.Opened(a), Adapter{}, agents.KindShell, in, out)
 }

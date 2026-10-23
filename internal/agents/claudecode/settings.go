@@ -51,9 +51,10 @@ func isOwnedCommand(c string) bool {
 }
 
 // ownedCommands returns the recarto-owned hook commands currently in settings,
-// mapped to their `shell` field ("" when absent). Tracking the shell lets a
-// re-install detect installs whose hooks predate the per-OS shell and re-sync
-// them, rather than treating a matching command set alone as up to date.
+// mapped to their `shell` and `if` fields (hookFields). Tracking them lets a
+// re-install detect installs whose hooks predate the per-OS shell or a changed
+// filter and re-sync them, rather than treating a matching command set alone
+// as up to date.
 func ownedCommands(settings map[string]any) map[string]string {
 	out := map[string]string{}
 	hooks, _ := settings["hooks"].(map[string]any)
@@ -66,7 +67,8 @@ func ownedCommands(settings map[string]any) map[string]string {
 				hm, _ := h.(map[string]any)
 				if c, _ := hm["command"].(string); isOwnedCommand(c) {
 					shell, _ := hm["shell"].(string)
-					out[c] = shell
+					ifRule, _ := hm["if"].(string)
+					out[c] = hookFields(shell, ifRule)
 				}
 			}
 		}
@@ -117,17 +119,28 @@ func syncHooks(settings map[string]any, binary string) string {
 	desired := hookSpecs(binary)
 	want := make(map[string]string, len(desired))
 	for _, hs := range desired {
-		want[hs.command] = hs.shell
+		want[hs.command] = hookFields(hs.shell, hs.ifRule)
 	}
 	if reflect.DeepEqual(ownedCommands(settings), want) {
 		return "already present"
 	}
 	removeOwnedHooks(settings)
+	// Hooks sharing an event and matcher (the per-command Bash hooks) go into
+	// one group.
+	groups := map[string]map[string]any{}
 	for _, hs := range desired {
-		appendHook(settings, hs.event, hs.matcher, hs.command, hs.shell)
+		k := hs.event + "\x00" + hs.matcher
+		if g, ok := groups[k]; ok {
+			g["hooks"] = append(g["hooks"].([]any), hookEntry(hs))
+			continue
+		}
+		groups[k] = appendHook(settings, hs)
 	}
 	return fmt.Sprintf("installed %d", len(desired))
 }
+
+// hookFields is the comparable form of a hook's shell and if fields.
+func hookFields(shell, ifRule string) string { return shell + "\x00" + ifRule }
 
 // hasCommand reports whether settings already contains a command hook with the
 // exact command string under the given event (used for idempotency).
@@ -147,23 +160,33 @@ func hasCommand(settings map[string]any, event, command string) bool {
 	return false
 }
 
-// appendHook appends a command hook group for event. matcher is omitted when
-// empty (events like SessionStart/Stop run unconditionally); shell is omitted
-// when empty (Claude uses its default shell for the platform).
-func appendHook(settings map[string]any, event, matcher, command, shell string) {
+// appendHook appends a command hook group for hs.event holding hs, and returns
+// the group. The matcher is omitted when empty (events like SessionStart/Stop
+// run unconditionally).
+func appendHook(settings map[string]any, hs hookSpec) map[string]any {
 	hooks, ok := settings["hooks"].(map[string]any)
 	if !ok {
 		hooks = map[string]any{}
 		settings["hooks"] = hooks
 	}
-	groups, _ := hooks[event].([]any)
-	entry := map[string]any{"type": "command", "command": command}
-	if shell != "" {
-		entry["shell"] = shell
+	groups, _ := hooks[hs.event].([]any)
+	group := map[string]any{"hooks": []any{hookEntry(hs)}}
+	if hs.matcher != "" {
+		group["matcher"] = hs.matcher
 	}
-	group := map[string]any{"hooks": []any{entry}}
-	if matcher != "" {
-		group["matcher"] = matcher
+	hooks[hs.event] = append(groups, group)
+	return group
+}
+
+// hookEntry is hs's command hook handler. shell is omitted when empty (Claude
+// uses its default shell for the platform), as is an empty if.
+func hookEntry(hs hookSpec) map[string]any {
+	entry := map[string]any{"type": "command", "command": hs.command}
+	if hs.shell != "" {
+		entry["shell"] = hs.shell
 	}
-	hooks[event] = append(groups, group)
+	if hs.ifRule != "" {
+		entry["if"] = hs.ifRule
+	}
+	return entry
 }

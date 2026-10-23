@@ -19,6 +19,17 @@ func TestDecodeNeutral(t *testing.T) {
 	}
 }
 
+func TestDecodeShell(t *testing.T) {
+	in := strings.NewReader(`{"session_id":"s","command":"rg Foo","cwd":"/w"}`)
+	ev, err := Adapter{}.Decode(agents.KindShell, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ev.Command != "rg Foo" || ev.CWD != "/w" {
+		t.Errorf("ev = %+v", ev)
+	}
+}
+
 func TestEncodeNeutral(t *testing.T) {
 	var sb strings.Builder
 	if err := (Adapter{}).Encode(agents.KindSessionStart, &sb, agents.Result{Context: "ctx"}); err != nil {

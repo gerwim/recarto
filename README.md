@@ -13,7 +13,8 @@ Everything lives in a shared per-repo SQLite cache **outside** your working tree
 worktree. Nothing is committed, so there are no file-merge conflicts.
 
 Supported agents: **Claude Code**, **OpenCode** (1.x and 2.x), and **GitHub Copilot
-CLI** — with feature parity across all three.
+CLI**. Each host exposes different tools and hooks, so what Recarto can see differs
+per host; see [Shell searches and file views](#shell-searches-and-file-views).
 
 ---
 
@@ -209,6 +210,64 @@ MCP tools exposed by `recarto serve`: `record_memory`, `recall_memory`, `get_mem
 `get_code_snippet`, `get_file_outline`, `trace_call_path`, `find_implementations`,
 `find_annotated`, `get_architecture`, `query_graph`.
 
+## Shell searches and file views
+
+Claude Code's native macOS, Linux and WSL builds (2.1.117 and later) have **no Grep or
+Glob tools**. Claude searches with `grep`, `rg` and `find` in its Bash tool, and views
+files with `cat`, `head`, `tail` or `sed -n`. Those calls never reach a Grep/Glob or Read
+hook, so Recarto reads the shell command instead. OpenCode's and Copilot's agents shell
+out too, although those hosts keep their dedicated tools. Recarto reads the commands of
+Claude Code's `Bash` tool, OpenCode's shell tool (`bash`, or `shell` in 2.x) and
+Copilot's `bash` tool. These run in a POSIX shell: bash, sh, zsh, or Git Bash on Windows.
+
+| Command | What Recarto adds |
+|---|---|
+| `grep`/`egrep`/`fgrep`, `rg`, `ugrep` or `git grep`, searching a directory or the repo | The hint the Grep tool gives for the same pattern: matching symbols and related bugs. |
+| `find`/`bfs` with `-name`, `-iname` or `-path` | The hint the Glob tool gives. The glob is reduced to its identifier stem; a stemless glob like `*.go` gives nothing. |
+| `cat`, `head`, `tail` or `sed -n` printing files, or a grep over named files | The files' anchored bugs, do-not-repeats, guidance and todos. |
+
+How it reads them:
+
+- **Chains and flags.** Commands are found anywhere in `&&`, `;` and `|` chains. Flag
+  values (`-A 3`, `-t go`, `--include=*.go`) are never taken for patterns, and every
+  `-e` pattern is searched.
+- **Paths.** Paths resolve against the shell's working directory, including after a
+  leading `cd` and OpenCode's `workdir`. Absolute, `~`-based and Git Bash `/c/…` paths
+  work too.
+  - A file in a `RECARTO_REPOS` repo surfaces that repo's memories.
+  - A file outside every served repo surfaces nothing.
+- **Nudge.** A session's first shell search also points the agent at `search_content`
+  and `search_graph`, once per session.
+- **Dedup** works as for the tools. A pattern searched again, by the shell or by
+  Grep/Glob, gets the short reminder instead of the hint. A memory already shown at
+  session start, by a Read or by an earlier view is not shown again.
+
+Recarto adds nothing to:
+
+- commands that filter another command's output, like `ps aux | grep foo` and
+  `go test ./... | grep FAIL`, or that aren't `git grep`, like `git log --grep fix`;
+- builds, tests, git, and anything else that neither searches nor prints a file;
+- writes and edits: searches and views whose output goes to a file (`cat > f <<EOF`,
+  `rg Foo > out.txt`, `cat f | head > g`, `{ cat f; } > g`), `sed -i` and scripts.
+  The code graph catches up with shell edits through its freshness check on the next
+  graph query. Claude Code's `tool_response.bashEditDiff` is not read;
+- PowerShell and cmd: Claude Code's `PowerShell` tool, Copilot's `powershell` tool, and
+  OpenCode's shell when it runs PowerShell or cmd. On Windows these hosts keep their own
+  grep/glob/read tools, which Recarto hooks;
+- a command it cannot parse.
+
+Shell views are not counted as reads, so they get no repeated-read warning, large-file
+nudge or read count. Recarto never blocks or rewrites a command and never changes its
+output; it only adds the hint.
+
+Each host starts Recarto only as often as it has to:
+
+- **Claude Code** runs the shell hook only when a command runs one of the commands above
+  (one hook per command, each with an `if` filter).
+- **OpenCode**'s plugin checks the command before it starts Recarto.
+- **Copilot** filters by tool name only, so every `bash` call starts Recarto. Any other
+  command returns as fast as a hook with nothing to do.
+
 ## Verify it's working
 
 After `recarto init` and restarting your agent, sanity-check the install.
@@ -268,6 +327,10 @@ Measure-Command { recarto recall "auth flow" }
   markdown is on-demand export only.
 - **No daemon.** Hooks are pure exit-0 CLI invocations; the code graph reconciles
   lazily at session start and incrementally on each edit.
+- **Hooks start fast.** A hook decodes its payload first and opens only what that
+  event needs; one with nothing to act on exits at about the cost of a bare process
+  start. The git identity is remembered in `<cache>/gitctx/` and re-resolved when the
+  checkout's HEAD changes. Measurements: `docs/validation/2026-10-22-hook-startup.md`.
 - **Languages:** Go, C#, TypeScript (+TSX), JavaScript (+JSX), Rust via tree-sitter.
 
 ## If the store gets corrupted
