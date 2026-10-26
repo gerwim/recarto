@@ -21,7 +21,8 @@ import (
 // file in exactly one of three ways:
 //
 //	(a) a candidate target node m, always matched by m.name = edge.dst_name;
-//	(b) interface dispatch (stratInterface), which expands an `extends` edge; or
+//	(b) an `extends` edge: interface dispatch (stratInterface) expands it, and
+//	    Python's inherited lookup (stratInherited) climbs it;
 //	(c) a Python import's re-export (resolvePythonModules): another file's
 //	    import edge of the same dst_name, so every module-naming import of a
 //	    name a dirty file imports so, before or after the edit, is re-resolved.
@@ -33,9 +34,12 @@ import (
 // stale). Case (b) cannot be bounded by names alone (a partial class can declare
 // `: IFoo` and the method in different files), so the caller falls back to a full
 // Resolve whenever a dirty file's `extends` edge set changed (see
-// extendsSigForPaths); when it has NOT changed, the interface→implementer
-// structure is identical and (a) is sufficient. Nor can which Python modules
-// exist, which a base elsewhere resolves by (resolvePythonModules' unique-class
+// extendsSigForPaths). When it has NOT changed, only a base's target can move,
+// as a dirty file adds or drops a class of its name: a second class Base fails
+// Python's unique-class fallback, a nearer one takes a plain base over. Such an
+// edge is in scope by (a), and the calls that may resolve through it re-resolve
+// with it (moveBases). Nor can which Python modules exist be bounded by names,
+// which a base elsewhere resolves by (resolvePythonModules' unique-class
 // fallback), or an import as pkg.X (its submodule rule): creating or deleting a
 // Python file whose module something names so resolves fully too (see
 // structureChanged). Over-inclusion is always safe (re-resolving an unaffected
@@ -43,10 +47,9 @@ import (
 // the construction above admits none.
 //
 // dirtyPaths is the worktree-relative paths re-indexed or deleted this reconcile;
-// oldNames is the node names+qualified_names those paths held BEFORE the edit,
-// oldImports the names they imported by module (both captured by the caller
-// pre-reindex, see namesForPaths). The post-edit ones are read here.
-func (e *Engine) ResolveIncremental(ctx context.Context, worktree string, dirtyPaths, oldNames, oldImports []string) error {
+// old is what they held BEFORE the edit (captured by the caller pre-reindex, see
+// captureDirty). The post-edit state is read here.
+func (e *Engine) ResolveIncremental(ctx context.Context, worktree string, dirtyPaths []string, old dirtyState) error {
 	if len(dirtyPaths) == 0 {
 		return nil
 	}
@@ -71,10 +74,10 @@ func (e *Engine) ResolveIncremental(ctx context.Context, worktree string, dirtyP
 		if err := insertValues(ctx, c, `INSERT OR IGNORE INTO _dirty_paths(path) VALUES (?)`, dirtyPaths); err != nil {
 			return err
 		}
-		if err := insertValues(ctx, c, `INSERT OR IGNORE INTO _affected_names(name) VALUES (?)`, oldNames); err != nil {
+		if err := insertValues(ctx, c, `INSERT OR IGNORE INTO _affected_names(name) VALUES (?)`, old.names); err != nil {
 			return err
 		}
-		if err := insertValues(ctx, c, `INSERT OR IGNORE INTO _affected_imports(name) VALUES (?)`, oldImports); err != nil {
+		if err := insertValues(ctx, c, `INSERT OR IGNORE INTO _affected_imports(name) VALUES (?)`, old.imports); err != nil {
 			return err
 		}
 		// Post-edit names (and qualified names) of nodes now in the dirty files.
@@ -125,6 +128,10 @@ INSERT OR IGNORE INTO _resolve_scope(edge_id)
 			return err
 		}
 
+		if err := noteBases(ctx, c, old.bases); err != nil {
+			return err
+		}
+
 		// Reset only the affected edges, then re-resolve exactly them — the same
 		// passes as full Resolve, scoped to _resolve_scope.
 		if _, err := c.ExecContext(ctx,
@@ -156,6 +163,9 @@ WHERE dst_node_id IS NULL
 			return err
 		}
 		if err := resolvePythonModules(ctx, c, worktree, `id IN (SELECT edge_id FROM _resolve_scope)`); err != nil {
+			return err
+		}
+		if err := moveBases(ctx, c, worktree); err != nil {
 			return err
 		}
 
@@ -192,6 +202,8 @@ UPDATE edges SET dst_node_id = (
 			`DROP TABLE IF EXISTS _affected_names`,
 			`DROP TABLE IF EXISTS _affected_imports`,
 			`DROP TABLE IF EXISTS _dirty_paths`,
+			`DROP TABLE IF EXISTS _old_bases`,
+			`DROP TABLE IF EXISTS _base_before`,
 		} {
 			if _, err := c.ExecContext(ctx, ddl); err != nil {
 				return err
@@ -199,6 +211,201 @@ UPDATE edges SET dst_node_id = (
 		}
 		return nil
 	})
+}
+
+// dirtyState is what the dirty files held before a reconcile rewrote them, which
+// ResolveIncremental scopes by: their node names and qualified names, the names
+// they imported by module (namesForPaths), and the extends edges the rewrite
+// re-creates or unlinks, with their targets (baseTargets).
+type dirtyState struct {
+	names, imports []string
+	bases          map[baseKey]baseTarget
+}
+
+// baseKey identifies an extends edge across a reindex: its file, its class's
+// qualified name, and the base it names (name and module).
+type baseKey struct{ path, class, name, module string }
+
+// baseTarget identifies an extends edge's target across a reindex, by its file
+// and qualified name; the zero value is no target.
+type baseTarget struct{ path, name string }
+
+// captureDirty reads paths' dirtyState from the current index; call it before
+// reindexing them.
+func (e *Engine) captureDirty(ctx context.Context, worktree string, paths []string) (dirtyState, error) {
+	var d dirtyState
+	var err error
+	if d.names, d.imports, err = e.namesForPaths(ctx, worktree, paths); err != nil {
+		return d, err
+	}
+	d.bases, err = e.baseTargets(ctx, worktree, paths)
+	return d, err
+}
+
+// baseTargets returns the target of every extends edge in the given paths, which
+// their reindex re-creates unresolved, or pointing into them, which it unlinks
+// by deleting the target.
+func (e *Engine) baseTargets(ctx context.Context, worktree string, paths []string) (map[baseKey]baseTarget, error) {
+	out := map[baseKey]baseTarget{}
+	if len(paths) == 0 {
+		return out, nil
+	}
+	args := make([]any, 0, len(paths)+1)
+	args = append(args, worktree)
+	for _, p := range paths {
+		args = append(args, p)
+	}
+	rows, err := e.st.DB.QueryContext(ctx, `
+SELECT sf.path, COALESCE(src.qualified_name, ''), e.dst_name, e.dst_recv,
+       COALESCE(tf.path, ''), COALESCE(t.qualified_name, '')
+  FROM files sf
+  CROSS JOIN edges e ON e.file_id = sf.id AND e.kind = 'extends'
+  LEFT JOIN nodes src ON src.id = e.src_node_id
+  LEFT JOIN nodes t ON t.id = e.dst_node_id
+  LEFT JOIN files tf ON tf.id = t.file_id
+ WHERE sf.worktree = ? AND sf.path IN (`+placeholders(len(paths))+`)
+UNION
+SELECT sf.path, COALESCE(src.qualified_name, ''), e.dst_name, e.dst_recv, tf.path, t.qualified_name
+  FROM files tf
+  CROSS JOIN nodes t ON t.file_id = tf.id
+  CROSS JOIN edges e ON e.dst_node_id = t.id AND e.kind = 'extends'
+  JOIN files sf ON sf.id = e.file_id
+  LEFT JOIN nodes src ON src.id = e.src_node_id
+ WHERE tf.worktree = ? AND tf.path IN (`+placeholders(len(paths))+`)`, append(args, args...)...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var k baseKey
+		var t baseTarget
+		if err := rows.Scan(&k.path, &k.class, &k.name, &k.module, &t.path, &t.name); err != nil {
+			return nil, err
+		}
+		out[k] = t
+	}
+	return out, rows.Err()
+}
+
+// noteBases records in _base_before the target each extends edge in
+// _resolve_scope had before this resolve: old's, for one the reindex re-created
+// or unlinked, else its own.
+func noteBases(ctx context.Context, c store.Conn, old map[baseKey]baseTarget) error {
+	for _, ddl := range []string{
+		`DROP TABLE IF EXISTS _old_bases`,
+		`CREATE TEMP TABLE _old_bases(path TEXT, class TEXT, name TEXT, module TEXT, tpath TEXT, tname TEXT,
+		   PRIMARY KEY (path, class, name, module)) WITHOUT ROWID`,
+		`DROP TABLE IF EXISTS _base_before`,
+		`CREATE TEMP TABLE _base_before(edge_id TEXT PRIMARY KEY, tpath TEXT, tname TEXT)`,
+	} {
+		if _, err := c.ExecContext(ctx, ddl); err != nil {
+			return err
+		}
+	}
+	if len(old) > 0 {
+		stmt, err := c.PrepareContext(ctx, `INSERT OR REPLACE INTO _old_bases VALUES (?,?,?,?,?,?)`)
+		if err != nil {
+			return err
+		}
+		defer stmt.Close()
+		for k, t := range old {
+			if _, err := stmt.ExecContext(ctx, k.path, k.class, k.name, k.module, t.path, t.name); err != nil {
+				return err
+			}
+		}
+	}
+	_, err := c.ExecContext(ctx, `
+INSERT INTO _base_before(edge_id, tpath, tname)
+SELECT e.id, COALESCE(ob.tpath, tf.path, ''), COALESCE(ob.tname, t.qualified_name, '')
+  FROM _resolve_scope rs
+  CROSS JOIN edges e ON e.id = rs.edge_id AND e.kind = 'extends'
+  JOIN files sf ON sf.id = e.file_id
+  LEFT JOIN nodes src ON src.id = e.src_node_id
+  LEFT JOIN nodes t ON t.id = e.dst_node_id
+  LEFT JOIN files tf ON tf.id = t.file_id
+  LEFT JOIN _old_bases ob ON ob.path = sf.path AND ob.class = COALESCE(src.qualified_name, '')
+       AND ob.name = e.dst_name AND ob.module = e.dst_recv`)
+	return err
+}
+
+// moveBases re-resolves the calls an extends edge whose target moved may resolve
+// through: one on a receiver typed as its class or a subclass, or written in one
+// with super(), which climbs the base (stratInherited), and one on a receiver
+// typed as the base's name, which may dispatch to the class's override
+// (stratInterface). A receiver's type is any binding of its name in the call's
+// file, wherever in scope. Their call edges join _resolve_scope, candidates
+// dropped, before the call passes run (which set every scoped call's target
+// afresh).
+func moveBases(ctx context.Context, c store.Conn, worktree string) error {
+	for _, ddl := range []string{`DROP TABLE IF EXISTS _moved`, `DROP TABLE IF EXISTS _moved_calls`} {
+		if _, err := c.ExecContext(ctx, ddl); err != nil {
+			return err
+		}
+	}
+	if _, err := c.ExecContext(ctx, `
+CREATE TEMP TABLE _moved AS
+SELECT e.src_node_id AS class_id, e.dst_name AS base
+  FROM _base_before b
+  CROSS JOIN edges e ON e.id = b.edge_id
+  LEFT JOIN nodes t ON t.id = e.dst_node_id
+  LEFT JOIN files tf ON tf.id = t.file_id
+ WHERE e.src_node_id IS NOT NULL
+   AND (b.tpath <> COALESCE(tf.path, '') OR b.tname <> COALESCE(t.qualified_name, ''))`); err != nil {
+		return err
+	}
+	var moved bool
+	if err := c.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM _moved)`).Scan(&moved); err != nil || !moved {
+		if err == nil {
+			_, err = c.ExecContext(ctx, `DROP TABLE _moved`)
+		}
+		return err
+	}
+	if _, err := c.ExecContext(ctx, `
+CREATE TEMP TABLE _moved_calls AS
+WITH RECURSIVE down(id) AS (
+  SELECT class_id FROM _moved
+  UNION
+  SELECT ext.src_node_id FROM down CROSS JOIN edges ext ON ext.dst_node_id = down.id AND ext.kind = 'extends'
+   WHERE ext.src_node_id IS NOT NULL
+), types(name) AS (
+  SELECT DISTINCT n.name FROM down CROSS JOIN nodes n ON n.id = down.id
+), overrides(base, name) AS (
+  SELECT DISTINCT mv.base, m.name
+    FROM _moved mv CROSS JOIN edges cm ON cm.src_node_id = mv.class_id AND cm.kind = 'contains'
+    JOIN nodes m ON m.id = cm.dst_node_id AND m.kind = 'method'
+)
+SELECT ed.id AS edge_id
+  FROM types CROSS JOIN type_bindings tb ON tb.type_name = types.name
+  JOIN files f ON f.id = tb.file_id AND f.worktree = ?
+  CROSS JOIN edges ed ON ed.file_id = tb.file_id AND ed.dst_recv = tb.name AND ed.kind = 'calls'
+UNION
+SELECT ed.id FROM files f CROSS JOIN edges ed ON ed.file_id = f.id AND ed.kind = 'calls'
+ WHERE f.worktree = ? AND ed.dst_recv IN (SELECT name FROM types)
+UNION
+SELECT ed.id
+  FROM down CROSS JOIN nodes k ON k.id = down.id
+  CROSS JOIN edges ed ON ed.file_id = k.file_id AND ed.kind = 'calls' AND ed.dst_recv = 'super()'
+  JOIN nodes src ON src.id = ed.src_node_id
+ WHERE k.start_byte <= src.start_byte AND src.end_byte <= k.end_byte
+UNION
+SELECT ed.id
+  FROM overrides o CROSS JOIN type_bindings tb ON tb.type_name = o.base
+  JOIN files f ON f.id = tb.file_id AND f.worktree = ?
+  CROSS JOIN edges ed ON ed.file_id = tb.file_id AND ed.dst_recv = tb.name AND ed.kind = 'calls' AND ed.dst_name = o.name`,
+		worktree, worktree, worktree); err != nil {
+		return err
+	}
+	for _, stmt := range []string{
+		`DELETE FROM _moved_calls WHERE edge_id IN (SELECT edge_id FROM _resolve_scope)`,
+		`INSERT OR IGNORE INTO _resolve_scope(edge_id) SELECT edge_id FROM _moved_calls`,
+		`DELETE FROM edge_candidates WHERE edge_id IN (SELECT edge_id FROM _moved_calls)`,
+		`DROP TABLE _moved`, `DROP TABLE _moved_calls`,
+	} {
+		if _, err := c.ExecContext(ctx, stmt); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // incrementalCallStrategies are the full callStrategies (resolve.go), each

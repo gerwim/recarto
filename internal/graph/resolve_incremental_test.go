@@ -213,7 +213,7 @@ func TestResolveIncrementalDirectVsFull(t *testing.T) {
 	// A.Help needing rebind — the textbook incremental case.
 	writeBumped(t, wt, "A.cs",
 		"namespace P;\npublic class A {\n  public void Go(){ Help(); }\n  public void Help(){ /* edited */ }\n}")
-	oldNames, oldImports, err := e.namesForPaths(ctx, wt, []string{"A.cs"})
+	old, err := e.captureDirty(ctx, wt, []string{"A.cs"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -222,7 +222,7 @@ func TestResolveIncrementalDirectVsFull(t *testing.T) {
 	if err := e.IndexFile(ctx, wt, "A.cs", content, int64(len(content)+1), int64(len(content))); err != nil {
 		t.Fatal(err)
 	}
-	if err := e.ResolveIncremental(ctx, wt, []string{"A.cs"}, oldNames, oldImports); err != nil {
+	if err := e.ResolveIncremental(ctx, wt, []string{"A.cs"}, old); err != nil {
 		t.Fatal(err)
 	}
 	gotInc := resolveSignature(t, e, wt)

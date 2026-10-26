@@ -2,6 +2,7 @@ package graph
 
 import (
 	"context"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -606,6 +607,93 @@ type phaseLog struct {
 
 func (p *phaseLog) Phase(label string) { p.phases = append(p.phases, label) }
 
+// TestPythonBaseMoves: when an edit moves a base to another class, or unbinds it,
+// without naming any method — a second class Base fails the unique-class
+// fallback, a nearer Base takes a plain base over — the calls inherited or
+// dispatched through it re-resolve incrementally, to what a cold index finds,
+// and those of another worktree in the same store stay as they were.
+func TestPythonBaseMoves(t *testing.T) {
+	ctx := context.Background()
+	reexport := map[string]string{
+		"lib/impl.py": "class Root:\n    def ping(self): pass\n\n\nclass Base(Root): pass\n",
+		"lib/api.py":  "from lib.impl import Base\n",
+		"app.py": "import lib.api\n\n\nclass App(lib.api.Base):\n    def run(self):\n        self.ping()\n        super().ping()\n\n\n" +
+			"def go():\n    App.ping(None)\n",
+		"deep.py": "from app import App\n\n\nclass Deep(App):\n    pass\n\n\ndef use(d: Deep):\n    d.ping()\n",
+		"util.py": "def helper(): pass\n",
+	}
+	for _, tc := range []struct {
+		name  string
+		files map[string]string
+		steps []map[string]string // path -> new source, "" to delete
+	}{
+		{"a second class Base in a new module, then gone", reexport,
+			[]map[string]string{{"unrelated.py": "class Base: pass\n"}, {"unrelated.py": ""}}},
+		{"a second class Base in an existing file, then gone", reexport,
+			[]map[string]string{{"util.py": "def helper(): pass\n\n\nclass Base: pass\n"}, {"util.py": "def helper(): pass\n"}}},
+		{"an edit of the base's own file", reexport,
+			[]map[string]string{{"lib/impl.py": "class Root:\n    def ping(self): pass\n\n\nclass Base(Root):\n    def pong(self): pass\n"}}},
+		{"a class added next to its subclass takes the base over", map[string]string{
+			"a/base.py": "class Base:\n    def ping(self): pass\n",
+			"b/app.py":  "from a.base import *\n\n\nclass App(Base):\n    pass\n",
+			"c/use.py":  "from b.app import App\n\n\ndef use(x: App):\n    x.ping()\n",
+		}, []map[string]string{{"b/app.py": "from a.base import *\n\n\nclass Base: pass\n\n\nclass App(Base):\n    pass\n"}}},
+		{"a plain base taken over by a nearer class", map[string]string{
+			"a/base.py": "class Base:\n    def ping(self): pass\n",
+			"b/app.py":  "from a.base import *\n\n\nclass App(Base):\n    def run(self):\n        self.ping()\n        self.pong()\n",
+		}, []map[string]string{{"b/base.py": "class Base:\n    def pong(self): pass\n"}, {"b/base.py": ""}}},
+		{"an override no longer dispatched to", map[string]string{
+			"lib/impl.py": "class Base:\n    def ping(self): pass\n",
+			"lib/api.py":  "from lib.impl import Base\n",
+			"sub.py":      "import lib.api\n\n\nclass Sub(lib.api.Base):\n    def ping(self): pass\n    def extra(self): pass\n",
+			"use.py":      "from lib.impl import Base\n\n\ndef use(x: Base):\n    x.ping()\n    x.extra()\n",
+		}, []map[string]string{{"other.py": "class Base: pass\n"}, {"other.py": ""}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newTestEngine(t)
+			wt := t.TempDir()
+			src := &mutMemSource{files: maps.Clone(tc.files)}
+			coldOf := func(files map[string]string) *Engine {
+				cold := newTestEngine(t)
+				if err := cold.Reconcile(ctx, t.TempDir(), &mutMemSource{files: maps.Clone(files)}); err != nil {
+					t.Fatal(err)
+				}
+				return cold
+			}
+			other := coldOf(tc.files)
+			for _, w := range []string{t.TempDir(), wt} {
+				if err := e.Reconcile(ctx, w, &mutMemSource{files: maps.Clone(tc.files)}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for i, step := range tc.steps {
+				for path, s := range step {
+					if s == "" {
+						delete(src.files, path)
+					} else {
+						src.files[path] = s
+					}
+				}
+				p := &phaseLog{}
+				if err := e.Reconcile(ctx, wt, src, WithProgress(p)); err != nil {
+					t.Fatal(err)
+				}
+				if slices.ContainsFunc(p.phases, func(s string) bool { return strings.Contains(s, "/8:") }) {
+					t.Errorf("step %d resolved fully, want incrementally", i+1)
+				}
+				cold := coldOf(src.files)
+				for _, kind := range []string{"extends", "calls"} {
+					want := append(pythonTargets(t, cold, kind), pythonTargets(t, other, kind)...)
+					slices.Sort(want)
+					if got := pythonTargets(t, e, kind); !slices.Equal(got, want) {
+						t.Errorf("step %d, %s:\n incremental %q\n        cold %q", i+1, kind, got, want)
+					}
+				}
+			}
+		})
+	}
+}
+
 // TestPythonLocalImportScope: a def's own import of a name does not change what
 // a class elsewhere in the file derives from, nor where its super() calls bind.
 func TestPythonLocalImportScope(t *testing.T) {
@@ -636,5 +724,45 @@ func TestPythonLocalImportScope(t *testing.T) {
 	}
 	if len(sup) != 1 || sup[0].Path != "a.py" {
 		t.Errorf("Implementations(Child, up) = %+v, want a.py's Base", sup)
+	}
+}
+
+// TestPythonBaseUnmoved: an edit that re-creates or unlinks a base without moving
+// it re-resolves no call through it that its names do not reach: a candidate
+// planted on one survives.
+func TestPythonBaseUnmoved(t *testing.T) {
+	ctx := context.Background()
+	e := newTestEngine(t)
+	wt := t.TempDir()
+	src := &mutMemSource{files: map[string]string{
+		"a/base.py": "class Base:\n    def ping(self): pass\n",
+		"b/app.py":  "from a.base import Base\n\n\nclass App(Base):\n    def run(self): pass\n",
+		"c/use.py":  "from b.app import App\n\n\ndef use(x: App):\n    x.run()\n    x.ping()\n",
+	}}
+	if err := e.Reconcile(ctx, wt, src); err != nil {
+		t.Fatal(err)
+	}
+	for _, step := range []struct{ path, call string }{
+		{"b/app.py", "ping"}, // re-creates App's base; b/app.py names no ping
+		{"a/base.py", "run"}, // unlinks it, deleting Base; a/base.py names no run
+	} {
+		q := `UPDATE edge_candidates SET method = 'planted' WHERE edge_id IN (
+  SELECT ed.id FROM edges ed JOIN files f ON f.id = ed.file_id WHERE f.path = 'c/use.py' AND ed.dst_name = ?)`
+		if _, err := e.st.DB.Exec(q, step.call); err != nil {
+			t.Fatal(err)
+		}
+		src.files[step.path] += "\n# edited\n"
+		if err := e.Reconcile(ctx, wt, src); err != nil {
+			t.Fatal(err)
+		}
+		var method string
+		if err := e.st.DB.QueryRow(`
+SELECT ec.method FROM edge_candidates ec JOIN edges ed ON ed.id = ec.edge_id JOIN files f ON f.id = ed.file_id
+ WHERE f.path = 'c/use.py' AND ed.dst_name = ?`, step.call).Scan(&method); err != nil {
+			t.Fatal(err)
+		}
+		if method != "planted" {
+			t.Errorf("editing %s re-resolved use's x.%s() (method %q): its base did not move", step.path, step.call, method)
+		}
 	}
 }
