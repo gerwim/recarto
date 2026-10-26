@@ -553,29 +553,55 @@ func TestPythonReexports(t *testing.T) {
 // TestPythonModuleCreated: which modules exist decides a base: one naming a
 // module that is not in the worktree stays unresolved, and once the module is
 // (re-exporting the base with a star import, so no edge or name of its own
-// tells), the base is the one class of its name — and unresolved again when
-// the module goes. Reconcile picks each change up, inherited calls too.
+// tells), the base is the one class of its name, its calls inherited too; and
+// a submodule shadows the symbol of its name a package re-exports. Reconcile
+// picks each change up, resolving fully for a module something names and
+// incrementally for a new one nothing does.
 func TestPythonModuleCreated(t *testing.T) {
 	e := newTestEngine(t)
 	ctx := context.Background()
 	wt := t.TempDir()
 	src := &mutMemSource{files: map[string]string{
-		"lib/impl.py": "class Base:\n    def ping(self): pass\n",
-		"app.py":      "from lib import api\n\n\nclass App(api.Base):\n    def run(self):\n        self.ping()\n",
+		"lib/impl.py": "class Base:\n    def ping(self): pass\n\n\ndef tool(): pass\n",
+		// only App's base names lib.api, only an import lib.tool
+		"app.py": "import lib.api\nfrom lib import tool\n\n\nclass App(lib.api.Base):\n    def run(self):\n        self.ping()\n",
 	}}
-	check := func(when string, want ...string) {
+	before := []string{"<file> -> tool @lib/impl.py (imports)", "App.run -> Base.ping @lib/impl.py (name)"}
+	check := func(when string, wantFull bool, want ...string) {
 		t.Helper()
-		if err := e.Reconcile(ctx, wt, src); err != nil {
+		p := &phaseLog{}
+		if err := e.Reconcile(ctx, wt, src, WithProgress(p)); err != nil {
 			t.Fatal(err)
 		}
-		got := append(pythonTargets(t, e, "extends"), pythonTargets(t, e, "calls")...)
+		got := append(append(pythonTargets(t, e, "imports"), pythonTargets(t, e, "extends")...), pythonTargets(t, e, "calls")...)
 		if !slices.Equal(got, want) {
 			t.Errorf("%s:\n got %q\nwant %q", when, got, want)
 		}
+		if full := slices.ContainsFunc(p.phases, func(s string) bool { return strings.Contains(s, "/8:") }); full != wantFull {
+			t.Errorf("%s: full resolve = %v, want %v (phases %q)", when, full, wantFull, p.phases)
+		}
 	}
-	check("without lib/api.py", "App.run -> Base.ping @lib/impl.py (name)")
+	check("without lib/api.py", true, before...)
 	src.files["lib/api.py"] = "from lib.impl import *\n"
-	check("with lib/api.py", "App -> Base @lib/impl.py (extends)", "App.run -> Base.ping @lib/impl.py (typed)")
+	check("with lib/api.py", true, "<file> -> tool @lib/impl.py (imports)",
+		"App -> Base @lib/impl.py (extends)", "App.run -> Base.ping @lib/impl.py (typed)")
+	src.files["lib/tool.py"] = "def run(): pass\n"
+	check("with lib/tool.py", true, "App -> Base @lib/impl.py (extends)", "App.run -> Base.ping @lib/impl.py (typed)")
+	src.files["lib/extra.py"] = "def helper(): pass\n"
+	check("with lib/extra.py, which nothing names", false,
+		"App -> Base @lib/impl.py (extends)", "App.run -> Base.ping @lib/impl.py (typed)")
 	delete(src.files, "lib/api.py")
-	check("without lib/api.py again", "App.run -> Base.ping @lib/impl.py (name)")
+	delete(src.files, "lib/tool.py")
+	check("without lib/api.py and lib/tool.py again", true, before...)
+	delete(src.files, "lib/extra.py")
+	check("without lib/extra.py again", false, before...)
 }
+
+// phaseLog records the phases a Reconcile announces: a full Resolve's carry
+// "(n/8: ...)", the incremental resolve's do not.
+type phaseLog struct {
+	noopProgress
+	phases []string
+}
+
+func (p *phaseLog) Phase(label string) { p.phases = append(p.phases, label) }

@@ -23,8 +23,8 @@ import (
 //	(a) a candidate target node m, always matched by m.name = edge.dst_name;
 //	(b) interface dispatch (stratInterface), which expands an `extends` edge; or
 //	(c) a Python import's re-export (resolvePythonModules): another file's
-//	    import edge of the same dst_name, so the dirty files' module-naming
-//	    imports count as names.
+//	    import edge of the same dst_name, so every module-naming import of a
+//	    name a dirty file imports so, before or after the edit, is re-resolved.
 //
 // Case (a) is covered by re-resolving every edge whose dst_name matches a node
 // name (or qualified_name) that was present in a dirty file BEFORE or AFTER the
@@ -35,15 +35,18 @@ import (
 // Resolve whenever a dirty file's `extends` edge set changed (see
 // extendsSigForPaths); when it has NOT changed, the interface→implementer
 // structure is identical and (a) is sufficient. Nor can which Python modules
-// exist, which an import or base elsewhere resolves by (resolvePythonModules):
-// creating or deleting a Python file resolves fully too. Over-inclusion is always safe (re-resolving an unaffected
+// exist, which a base elsewhere resolves by (resolvePythonModules' unique-class
+// fallback), or an import as pkg.X (its submodule rule): creating or deleting a
+// Python file whose module something names so resolves fully too (see
+// structureChanged). Over-inclusion is always safe (re-resolving an unaffected
 // edge reproduces its current binding); only under-inclusion would regress, and
 // the construction above admits none.
 //
 // dirtyPaths is the worktree-relative paths re-indexed or deleted this reconcile;
-// oldNames is the node names+qualified_names those paths held BEFORE the edit
-// (captured by the caller pre-reindex). The post-edit names are read here.
-func (e *Engine) ResolveIncremental(ctx context.Context, worktree string, dirtyPaths, oldNames []string) error {
+// oldNames is the node names+qualified_names those paths held BEFORE the edit,
+// oldImports the names they imported by module (both captured by the caller
+// pre-reindex, see namesForPaths). The post-edit ones are read here.
+func (e *Engine) ResolveIncremental(ctx context.Context, worktree string, dirtyPaths, oldNames, oldImports []string) error {
 	if len(dirtyPaths) == 0 {
 		return nil
 	}
@@ -55,6 +58,8 @@ func (e *Engine) ResolveIncremental(ctx context.Context, worktree string, dirtyP
 			`CREATE TEMP TABLE _dirty_paths(path TEXT PRIMARY KEY)`,
 			`DROP TABLE IF EXISTS _affected_names`,
 			`CREATE TEMP TABLE _affected_names(name TEXT PRIMARY KEY)`,
+			`DROP TABLE IF EXISTS _affected_imports`,
+			`CREATE TEMP TABLE _affected_imports(name TEXT PRIMARY KEY)`,
 			`DROP TABLE IF EXISTS _resolve_scope`,
 			`CREATE TEMP TABLE _resolve_scope(edge_id TEXT PRIMARY KEY)`,
 		} {
@@ -67,6 +72,9 @@ func (e *Engine) ResolveIncremental(ctx context.Context, worktree string, dirtyP
 			return err
 		}
 		if err := insertValues(ctx, c, `INSERT OR IGNORE INTO _affected_names(name) VALUES (?)`, oldNames); err != nil {
+			return err
+		}
+		if err := insertValues(ctx, c, `INSERT OR IGNORE INTO _affected_imports(name) VALUES (?)`, oldImports); err != nil {
 			return err
 		}
 		// Post-edit names (and qualified names) of nodes now in the dirty files.
@@ -82,10 +90,10 @@ INSERT OR IGNORE INTO _affected_names(name)
    WHERE f.worktree = ? AND f.path IN (SELECT path FROM _dirty_paths)`, worktree); err != nil {
 			return err
 		}
-		// ... and what they import by module, which an import elsewhere may take as
-		// a re-export (resolvePythonModules)
+		// ... and the names they import by module, which an import elsewhere may
+		// take as a re-export (resolvePythonModules)
 		if _, err := c.ExecContext(ctx, `
-INSERT OR IGNORE INTO _affected_names(name)
+INSERT OR IGNORE INTO _affected_imports(name)
   SELECT e.dst_name FROM edges e JOIN files f ON f.id = e.file_id
    WHERE f.worktree = ? AND f.path IN (SELECT path FROM _dirty_paths)
      AND e.kind = 'imports' AND e.dst_recv <> ''`, worktree); err != nil {
@@ -105,6 +113,15 @@ INSERT OR IGNORE INTO _resolve_scope(edge_id)
 INSERT OR IGNORE INTO _resolve_scope(edge_id)
   SELECT e.id FROM edges e JOIN files f ON f.id = e.file_id
    WHERE f.worktree = ? AND e.dst_name IN (SELECT name FROM _affected_names)`, worktree); err != nil {
+			return err
+		}
+		// ... and (c) every module-naming import of a name a dirty file imports so:
+		// only imports follow a re-export, so no call or base re-resolves for it
+		if _, err := c.ExecContext(ctx, `
+INSERT OR IGNORE INTO _resolve_scope(edge_id)
+  SELECT e.id FROM edges e JOIN files f ON f.id = e.file_id
+   WHERE f.worktree = ? AND e.kind = 'imports' AND e.dst_recv <> ''
+     AND e.dst_name IN (SELECT name FROM _affected_imports)`, worktree); err != nil {
 			return err
 		}
 
@@ -173,6 +190,7 @@ UPDATE edges SET dst_node_id = (
 		for _, ddl := range []string{
 			`DROP TABLE IF EXISTS _resolve_scope`,
 			`DROP TABLE IF EXISTS _affected_names`,
+			`DROP TABLE IF EXISTS _affected_imports`,
 			`DROP TABLE IF EXISTS _dirty_paths`,
 		} {
 			if _, err := c.ExecContext(ctx, ddl); err != nil {
@@ -229,14 +247,15 @@ func scopeStrategy(full string) string {
 const maxIncrementalDirty = 200
 
 // namesForPaths returns the distinct node names AND qualified names held by the
-// given worktree-relative paths in the CURRENT index, and the names they import
-// by module (a re-export others may resolve through). Called pre-reindex to
-// record what a dirty file contained, so edges that resolved INTO a since-removed
-// symbol are still re-resolved (see ResolveIncremental). Paths are bounded by
-// maxIncrementalDirty, so a single parametrized IN is fine.
-func (e *Engine) namesForPaths(ctx context.Context, worktree string, paths []string) ([]string, error) {
+// given worktree-relative paths in the CURRENT index and, separately, the names
+// they import by module (which an import elsewhere may resolve through, as a
+// re-export). Called pre-reindex to record what a dirty file contained, so
+// edges that resolved INTO a since-removed symbol are still re-resolved (see
+// ResolveIncremental). Paths are bounded by maxIncrementalDirty, so a single
+// parametrized IN is fine.
+func (e *Engine) namesForPaths(ctx context.Context, worktree string, paths []string) (names, imports []string, err error) {
 	if len(paths) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 	args := make([]any, 0, len(paths)+1)
 	args = append(args, worktree)
@@ -244,41 +263,45 @@ func (e *Engine) namesForPaths(ctx context.Context, worktree string, paths []str
 		args = append(args, p)
 	}
 	rows, err := e.st.DB.QueryContext(ctx, `
-SELECT n.name FROM nodes n JOIN files f ON f.id = n.file_id
+SELECT 0, n.name FROM nodes n JOIN files f ON f.id = n.file_id
  WHERE f.worktree = ? AND f.path IN (`+placeholders(len(paths))+`)
 UNION
-SELECT n.qualified_name FROM nodes n JOIN files f ON f.id = n.file_id
+SELECT 0, n.qualified_name FROM nodes n JOIN files f ON f.id = n.file_id
  WHERE f.worktree = ? AND f.path IN (`+placeholders(len(paths))+`)
 UNION
-SELECT e.dst_name FROM edges e JOIN files f ON f.id = e.file_id
+SELECT 1, e.dst_name FROM edges e JOIN files f ON f.id = e.file_id
  WHERE f.worktree = ? AND f.path IN (`+placeholders(len(paths))+`)
    AND e.kind = 'imports' AND e.dst_recv <> ''`,
 		append(append(append([]any{}, args...), args...), args...)...)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer rows.Close()
-	var out []string
 	for rows.Next() {
+		var imported bool
 		var s string
-		if err := rows.Scan(&s); err != nil {
-			return nil, err
+		if err := rows.Scan(&imported, &s); err != nil {
+			return nil, nil, err
 		}
-		if s != "" {
-			out = append(out, s)
+		switch {
+		case s == "":
+		case imported:
+			imports = append(imports, s)
+		default:
+			names = append(names, s)
 		}
 	}
-	return out, rows.Err()
+	return names, imports, rows.Err()
 }
 
 // extendsSigForPaths returns a set identifying the `extends`/`implements` edges
 // the given paths currently contribute, keyed by "<deriving qualified_name>\x00
 // <base name>\x00<base module>" (the module a Python base names; else empty),
-// and the Python files among them, keyed "\x00\x00<path>". Comparing this set
-// before and after a reconcile detects whether a dirty file changed the
-// interface/base structure or the Python modules — the cases the name-scoped
-// incremental resolve cannot bound (see ResolveIncremental), forcing a full
-// Resolve.
+// and the Python files among them, keyed "\x00\x00<path>". structureChanged
+// compares the set before and after a reconcile to tell whether a dirty file
+// changed the interface/base structure or the Python modules others name — the
+// cases the name-scoped incremental resolve cannot bound (see
+// ResolveIncremental), forcing a full Resolve.
 func (e *Engine) extendsSigForPaths(ctx context.Context, worktree string, paths []string) (map[string]struct{}, error) {
 	sig := map[string]struct{}{}
 	if len(paths) == 0 {
@@ -314,17 +337,43 @@ SELECT '', '', path FROM files
 	return sig, rows.Err()
 }
 
-// sameStringSet reports whether two string-keyed sets are equal.
-func sameStringSet(a, b map[string]struct{}) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for k := range a {
-		if _, ok := b[k]; !ok {
-			return false
+// structureChanged reports whether a reconcile must resolve fully, given the
+// dirty files' extendsSigForPaths before and after: an `extends` edge of theirs
+// changed, or a Python file appeared or went whose module a base elsewhere
+// names (the unique-class fallback of resolvePythonModules) or anything names
+// as pkg.X (its submodule rule) — which modules exist is no name the
+// incremental resolve could scope by. A module nothing names yet, as a new one,
+// stays incremental.
+func (e *Engine) structureChanged(ctx context.Context, worktree string, before, after map[string]struct{}) (bool, error) {
+	var mods []string
+	for _, d := range [][2]map[string]struct{}{{before, after}, {after, before}} {
+		for k := range d[0] {
+			if _, ok := d[1][k]; ok {
+				continue
+			}
+			path, ok := strings.CutPrefix(k, "\x00\x00")
+			if !ok {
+				return true, nil
+			}
+			mods = append(mods, pyModuleNames(path)...)
 		}
 	}
-	return true
+	if len(mods) == 0 {
+		return false, nil
+	}
+	args := []any{worktree}
+	for range 2 {
+		for _, m := range mods {
+			args = append(args, m)
+		}
+	}
+	var named bool
+	err := e.st.DB.QueryRowContext(ctx, `
+SELECT EXISTS (SELECT 1 FROM edges e JOIN files f ON f.id = e.file_id
+ WHERE f.worktree = ? AND e.kind <> 'calls' AND e.dst_recv <> ''
+   AND ( (e.kind = 'extends' AND e.dst_recv IN (`+placeholders(len(mods))+`))
+         OR e.dst_recv || '.' || e.dst_name IN (`+placeholders(len(mods))+`) ))`, args...).Scan(&named)
+	return named, err
 }
 
 // placeholders returns "?,?,…" with n marks for a parametrized IN clause.

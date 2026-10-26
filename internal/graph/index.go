@@ -46,7 +46,7 @@ func (e *Engine) IndexFile(ctx context.Context, worktree, path string, src []byt
 // keystroke cost ~14s on a large repo for a one-file change.
 func (e *Engine) ReindexFileIncremental(ctx context.Context, worktree, path string, src []byte, mtime, size int64) error {
 	dirty := []string{path}
-	oldNames, err := e.namesForPaths(ctx, worktree, dirty)
+	oldNames, oldImports, err := e.namesForPaths(ctx, worktree, dirty)
 	if err != nil {
 		return err
 	}
@@ -61,8 +61,12 @@ func (e *Engine) ReindexFileIncremental(ctx context.Context, worktree, path stri
 	if err != nil {
 		return err
 	}
-	if sameStringSet(oldExtends, newExtends) {
-		return e.ResolveIncremental(ctx, worktree, dirty, oldNames)
+	full, err := e.structureChanged(ctx, worktree, oldExtends, newExtends)
+	if err != nil {
+		return err
+	}
+	if !full {
+		return e.ResolveIncremental(ctx, worktree, dirty, oldNames, oldImports)
 	}
 	return e.Resolve(ctx, worktree, noopProgress{})
 }

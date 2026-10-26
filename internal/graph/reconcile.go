@@ -155,11 +155,11 @@ func (e *Engine) Reconcile(ctx context.Context, worktree string, src Source, opt
 	// a dirty file held (so a removed/renamed symbol still re-resolves the edges
 	// that pointed at it) and its `extends` edges (so a structural change falls back
 	// to a full resolve — see ResolveIncremental).
-	var oldNames []string
+	var oldNames, oldImports []string
 	var oldExtends map[string]struct{}
 	if incremental {
 		var err error
-		if oldNames, err = e.namesForPaths(ctx, worktree, dirtyPaths); err != nil {
+		if oldNames, oldImports, err = e.namesForPaths(ctx, worktree, dirtyPaths); err != nil {
 			return err
 		}
 		if oldExtends, err = e.extendsSigForPaths(ctx, worktree, dirtyPaths); err != nil {
@@ -254,14 +254,19 @@ func (e *Engine) Reconcile(ctx context.Context, worktree string, src Source, opt
 		// structure is unchanged (ResolveIncremental); a dirty file that gained or
 		// lost an `extends` edge can redirect interface dispatch in OTHER files,
 		// which the name-scoped affected set cannot see — so re-resolve fully then
-		// (and when a Python module appeared or went: see extendsSigForPaths).
+		// (and when a Python module others name appeared or went: see
+		// structureChanged).
 		useIncremental := incremental
 		if useIncremental {
 			newExtends, err := e.extendsSigForPaths(ctx, worktree, dirtyPaths)
 			if err != nil {
 				return err
 			}
-			useIncremental = sameStringSet(oldExtends, newExtends)
+			full, err := e.structureChanged(ctx, worktree, oldExtends, newExtends)
+			if err != nil {
+				return err
+			}
+			useIncremental = !full
 		}
 		if useIncremental {
 			// The incremental path has no sub-phases of its own; announce the base
@@ -269,7 +274,7 @@ func (e *Engine) Reconcile(ctx context.Context, worktree string, src Source, opt
 			// hint, the crash-safety cancel hook) still see the resolve stage begin.
 			// A full Resolve emits the base label (and its sub-phases) itself.
 			o.progress.Phase("resolving references")
-			if err := e.ResolveIncremental(ctx, worktree, dirtyPaths, oldNames); err != nil {
+			if err := e.ResolveIncremental(ctx, worktree, dirtyPaths, oldNames, oldImports); err != nil {
 				return err
 			}
 		} else if err := e.Resolve(ctx, worktree, o.progress); err != nil {
