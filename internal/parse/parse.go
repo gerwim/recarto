@@ -2,7 +2,6 @@ package parse
 
 import (
 	"fmt"
-	"slices"
 	"strings"
 	"unicode"
 
@@ -186,8 +185,7 @@ func (r *Registry) ParseFile(lang, path string, src []byte) (Result, error) {
 
 	captureNames := q.CaptureNames()
 	var res Result
-	var pyAttrs []pyAttr
-	pyBases := map[uint]string{} // Python class name byte -> first positional base
+	py := pyFile{bases: map[uint]string{}, types: map[pyName]string{}}
 	matches := cur.Matches(q, tree.RootNode(), src)
 	for m := matches.Next(); m != nil; m = matches.Next() {
 		var name, recv, recvType, recvName, bindName, bindType string
@@ -195,7 +193,9 @@ func (r *Registry) ParseFile(lang, path string, src []byte) (Result, error) {
 		var defKind, refKind string
 		var sb, eb, sl, el uint
 		var nameByte, nameLine uint
-		var recvNameByte, bindByte, selfByte, superClass uint
+		var recvNameByte, bindByte, selfByte uint
+		var superClass, superOf, bindClass uint
+		var bindDef uintptr
 		var isSelf bool
 		var defNode *sitter.Node
 		for _, c := range m.Captures {
@@ -208,7 +208,9 @@ func (r *Registry) ParseFile(lang, path string, src []byte) (Result, error) {
 			case cn == "recv":
 				recv = c.Node.Utf8Text(src)
 				if lang == "python" {
-					recv = pyRecv(c.Node, src, recv)
+					if recv = pyRecv(c.Node, src, recv); recv == "super()" {
+						superOf, _ = pyScope(&c.Node)
+					}
 				}
 			case cn == "recv.type":
 				recvType = strings.TrimPrefix(c.Node.Utf8Text(src), "*")
@@ -218,12 +220,16 @@ func (r *Registry) ParseFile(lang, path string, src []byte) (Result, error) {
 			case cn == "bind.name":
 				bindName = c.Node.Utf8Text(src)
 				bindByte = c.Node.StartByte()
-				// A Python class-body `x: T` / `x = T()` is what methods read as self.x.
-				if lang == "python" && pyClassLevel(c.Node) {
-					bindAttr, bindName = bindName, ""
+				if lang == "python" {
+					// A `x: T` / `x = T()` in a class body, outside any def, is what
+					// methods read as self.x.
+					if bindClass, bindDef = pyScope(&c.Node); bindClass != 0 && bindDef == 0 {
+						bindAttr, bindName = bindName, ""
+					}
 				}
 			case cn == "bind.attr":
-				bindAttr, bindByte = c.Node.Utf8Text(src), c.Node.StartByte()
+				bindAttr = c.Node.Utf8Text(src)
+				bindClass, bindDef = pyScope(&c.Node)
 			case cn == "bind.from":
 				bindFrom = c.Node.Utf8Text(src)
 			case cn == "bind.type":
@@ -295,6 +301,9 @@ func (r *Registry) ParseFile(lang, path string, src []byte) (Result, error) {
 					TypeBinding{Name: recvName, TypeName: recvType, StartByte: recvNameByte})
 			}
 		case refKind != "" && name != "":
+			if superOf != 0 {
+				py.supers = append(py.supers, pySuper{edge: len(res.Edges), class: superOf})
+			}
 			res.Edges = append(res.Edges, Edge{
 				Kind: edgeKind(refKind), DstName: name, Recv: recv, StartByte: sb, Line: sl,
 			})
@@ -305,28 +314,92 @@ func (r *Registry) ParseFile(lang, path string, src []byte) (Result, error) {
 				TypeBinding{Name: "self", TypeName: bindType, StartByte: selfByte},
 				TypeBinding{Name: "Self", TypeName: bindType, StartByte: selfByte})
 		case superBase != "":
-			pyBases[superClass] = superBase
-		case bindAttr != "" && (bindType != "" || bindFrom != ""):
-			pyAttrs = append(pyAttrs, pyAttr{name: bindAttr, typ: bindType, from: bindFrom, at: bindByte})
+			py.bases[superClass] = superBase
+		case bindAttr != "" && (bindType != "" || bindFrom != "") && bindClass != 0:
+			py.attrs = append(py.attrs, pyAttr{name: bindAttr, typ: bindType, from: bindFrom, class: bindClass, def: bindDef})
 		case bindName != "" && bindType != "" && bindType != "var":
 			// C# `var x = …` yields an implicit_type "var"; skip it — the real type
 			// comes from the object-creation binding pattern. ("var" is a contextual
 			// keyword in C# and not a valid type name in Go either, so this is safe.)
 			res.Bindings = append(res.Bindings,
 				TypeBinding{Name: bindName, TypeName: bindType, StartByte: bindByte})
+			if lang == "python" {
+				py.types[pyName{bindDef, bindName}] = bindType
+			}
 		}
 	}
 	if lang == "python" {
-		pyScopeClasses(&res, pyAttrs, pyBases)
+		py.finish(&res)
 	}
 	return res, nil
 }
 
-// pyAttr is a Python self.x binding waiting for its class: typed by a type
-// expression (typ) or by the annotated parameter assigned to it (from).
+// pyFile collects what the Python passes need from every match: each class's
+// first positional base and each def's parameter and local types, for the
+// super() calls and self.x bindings found along the way.
+type pyFile struct {
+	bases  map[uint]string // class name byte -> first positional base
+	types  map[pyName]string
+	supers []pySuper
+	attrs  []pyAttr
+}
+
+// pyName is a name bound in a def (identified by its node id; 0 is module level).
+type pyName struct {
+	def  uintptr
+	name string
+}
+
+// pySuper is a super().m() call edge and the name byte of its innermost class.
+type pySuper struct {
+	edge  int
+	class uint
+}
+
+// pyAttr is a self.x binding of a class (its name byte), typed by a type
+// expression (typ) or by the def's parameter or local it is assigned (from).
 type pyAttr struct {
 	name, typ, from string
-	at              uint
+	class           uint
+	def             uintptr
+}
+
+// finish names each super() receiver after its class's first base, so the call
+// binds Base.m like Base.m() would, and adds the self.x bindings, anchored at
+// the class name so their scope is the whole class.
+func (py *pyFile) finish(res *Result) {
+	for _, s := range py.supers {
+		if base := py.bases[s.class]; base != "" {
+			res.Edges[s.edge].Recv = base
+		}
+	}
+	for _, a := range py.attrs {
+		typ := a.typ
+		if a.from != "" {
+			typ = py.types[pyName{a.def, a.from}]
+		}
+		if typ != "" {
+			res.Bindings = append(res.Bindings, TypeBinding{Name: "self." + a.name, TypeName: typ, StartByte: a.class})
+		}
+	}
+}
+
+// pyScope returns the name byte of n's innermost enclosing class and the node id
+// of its innermost def within that class (0 when there is none).
+func pyScope(n *sitter.Node) (class uint, def uintptr) {
+	for p := n.Parent(); p != nil; p = p.Parent() {
+		switch p.Kind() {
+		case "class_definition":
+			if nm := p.ChildByFieldName("name"); nm != nil {
+				return nm.StartByte(), def
+			}
+		case "function_definition":
+			if def == 0 {
+				def = p.Id()
+			}
+		}
+	}
+	return 0, def
 }
 
 // pyInClass reports whether a def's nearest enclosing def or class is a class,
@@ -341,19 +414,6 @@ func pyInClass(n *sitter.Node) bool {
 		}
 	}
 	return false
-}
-
-// pyClassLevel reports whether a bound name is the target of a statement written
-// directly in a class body.
-func pyClassLevel(n sitter.Node) bool {
-	p := n.Parent()
-	for _, kind := range []string{"assignment", "expression_statement", "block", "class_definition"} {
-		if p == nil || p.Kind() != kind {
-			return false
-		}
-		p = p.Parent()
-	}
-	return true
 }
 
 // pyRecv normalizes a Python call receiver: super() and super(C, self) become
@@ -374,54 +434,4 @@ func pyRecv(n sitter.Node, src []byte, text string) string {
 		}
 	}
 	return text
-}
-
-// pyScopeClasses runs the Python passes that need the file's classes: a
-// super().m() receiver becomes the innermost class's first base, so the call
-// binds Base.m like Base.m() would, and each self.x binding is scoped to its
-// innermost class (`self.x = param` taking the parameter's annotated type).
-func pyScopeClasses(res *Result, attrs []pyAttr, bases map[uint]string) {
-	for i := range res.Edges {
-		e := &res.Edges[i]
-		if e.Kind == "calls" && e.Recv == "super()" {
-			if c := innermostSymbol(res.Symbols, e.StartByte, "class"); c != nil && bases[c.NameByte] != "" {
-				e.Recv = bases[c.NameByte]
-			}
-		}
-	}
-	params := res.Bindings // the parameters and locals; self.x ones are appended below
-	for _, a := range attrs {
-		c := innermostSymbol(res.Symbols, a.at, "class")
-		if c == nil {
-			continue
-		}
-		typ := a.typ
-		if a.from != "" {
-			if fn := innermostSymbol(res.Symbols, a.at, "method", "function"); fn != nil {
-				for _, b := range params {
-					if b.Name == a.from && fn.StartByte <= b.StartByte && b.StartByte < fn.EndByte {
-						typ = b.TypeName
-						break
-					}
-				}
-			}
-		}
-		if typ != "" {
-			// Anchored at the class name, the binding's scope is the whole class.
-			res.Bindings = append(res.Bindings, TypeBinding{Name: "self." + a.name, TypeName: typ, StartByte: c.NameByte})
-		}
-	}
-}
-
-// innermostSymbol returns the smallest symbol of one of kinds whose span holds b.
-func innermostSymbol(syms []Symbol, b uint, kinds ...string) *Symbol {
-	var best *Symbol
-	for i := range syms {
-		s := &syms[i]
-		if s.StartByte <= b && b < s.EndByte && slices.Contains(kinds, s.Kind) &&
-			(best == nil || s.EndByte-s.StartByte < best.EndByte-best.StartByte) {
-			best = s
-		}
-	}
-	return best
 }

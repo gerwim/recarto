@@ -159,6 +159,7 @@ func TestParsePythonBindingShapes(t *testing.T) {
 			{"def f():\n    x: " + ty + " = g()", "x:Area"},
 			{"class C:\n    def f(self):\n        self.x: " + ty + " = g()", "self.x:Area"},
 			{"class C:\n    x: " + ty, "self.x:Area"},
+			{"class C:\n    if TYPE_CHECKING:\n        x: " + ty, "self.x:Area"},
 		} {
 			var got []string
 			for _, b := range parsePy(c.src).Bindings {
@@ -233,6 +234,29 @@ func TestParsePythonReceivers(t *testing.T) {
 		}
 		if !slices.Equal(got, []string{c.recv}) {
 			t.Errorf("%s: f receivers %q, want [%q]", c.call, got, c.recv)
+		}
+	}
+}
+
+// TestParsePythonSelfAttrs: self.x = name takes the type that name has in the
+// def doing the assignment — not a same-named parameter of another def.
+func TestParsePythonSelfAttrs(t *testing.T) {
+	parsePy := pythonParser(t)
+	for _, c := range []struct{ src, want string }{
+		{"class C:\n    def m(self, p: A):\n        def inner(p: B):\n            pass\n        self.x = p", "self.x:A"},
+		{"class C:\n    def m(self, p: A):\n        def inner(p: B):\n            self.x = p", "self.x:B"},
+		{"class C:\n    def m(self):\n        x = Repo()\n        self.x = x", "self.x:Repo"},
+		{"class C:\n    def m(self, p):\n        self.x = p", ""},
+		{"def f(self, p: A):\n    self.x = p", ""}, // no class: no attribute to type
+	} {
+		var got []string
+		for _, b := range parsePy(c.src).Bindings {
+			if strings.HasPrefix(b.Name, "self.") {
+				got = append(got, b.Name+":"+b.TypeName)
+			}
+		}
+		if want := strings.Fields(c.want); !slices.Equal(got, want) {
+			t.Errorf("%q: self bindings %v, want %v", c.src, got, want)
 		}
 	}
 }
