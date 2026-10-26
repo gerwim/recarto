@@ -196,7 +196,7 @@ func (r *Registry) ParseFile(lang, path string, src []byte) (Result, error) {
 		var recvNameByte, bindByte, selfByte uint
 		var superClass, superOf, bindClass uint
 		var bindDef uintptr
-		var isSelf bool
+		var isSelf, onLiteral bool
 		var defNode *sitter.Node
 		for _, c := range m.Captures {
 			cn := captureNames[c.Index]
@@ -208,6 +208,7 @@ func (r *Registry) ParseFile(lang, path string, src []byte) (Result, error) {
 			case cn == "recv":
 				recv = c.Node.Utf8Text(src)
 				if lang == "python" {
+					onLiteral = pyLiterals[c.Node.Kind()]
 					if recv = pyRecv(c.Node, src, recv); recv == "super()" {
 						superOf, _ = pyScope(&c.Node)
 					}
@@ -300,7 +301,7 @@ func (r *Registry) ParseFile(lang, path string, src []byte) (Result, error) {
 				res.Bindings = append(res.Bindings,
 					TypeBinding{Name: recvName, TypeName: recvType, StartByte: recvNameByte})
 			}
-		case refKind != "" && name != "":
+		case refKind != "" && name != "" && !onLiteral:
 			if superOf != 0 {
 				py.supers = append(py.supers, pySuper{edge: len(res.Edges), class: superOf})
 			}
@@ -414,6 +415,15 @@ func pyInClass(n *sitter.Node) bool {
 		}
 	}
 	return false
+}
+
+// pyLiterals are the receiver kinds whose methods are the builtins' (", ".join,
+// [].append): a call on one gets no edge, which name matching would otherwise
+// bind to any same-named method of the worktree.
+var pyLiterals = map[string]bool{
+	"string": true, "concatenated_string": true, "integer": true, "float": true,
+	"list": true, "dictionary": true, "set": true, "tuple": true,
+	"list_comprehension": true, "dictionary_comprehension": true, "set_comprehension": true,
 }
 
 // pyRecv normalizes a Python call receiver: super() and super(C, self) become

@@ -212,7 +212,8 @@ func TestParsePythonSuper(t *testing.T) {
 
 // TestParsePythonReceivers: a call's receiver is its object expression, except
 // that a CapWords last segment (a class, by PEP 8) stands alone so m.Type.f()
-// binds Type.f like Type.f() does.
+// binds Type.f like Type.f() does, and a call on a literal (a builtin's method)
+// gets no edge at all.
 func TestParsePythonReceivers(t *testing.T) {
 	parsePy := pythonParser(t)
 	for _, c := range []struct{ call, recv string }{
@@ -225,6 +226,7 @@ func TestParsePythonReceivers(t *testing.T) {
 		{"self.Config.f()", "Config"},
 		{"items[0].f()", "items[0]"},
 		{"g().f()", "g()"},
+		{"(1).f()", "(1)"},
 	} {
 		var got []string
 		for _, e := range parsePy("def caller():\n    " + c.call).Edges {
@@ -234,6 +236,13 @@ func TestParsePythonReceivers(t *testing.T) {
 		}
 		if !slices.Equal(got, []string{c.recv}) {
 			t.Errorf("%s: f receivers %q, want [%q]", c.call, got, c.recv)
+		}
+	}
+	for _, call := range []string{`", ".f(xs)`, `f"{a}".f()`, `b"".f()`, `"a" "b".f()`, "[1].f()", "{}.f()", "{1}.f()", "(1, 2).f()", "[x for x in y].f()", "1.0.f()"} {
+		for _, e := range parsePy("def caller():\n    " + call).Edges {
+			if e.Kind == "calls" && e.DstName == "f" {
+				t.Errorf("%s: call edge to f (receiver %q); a literal's method is a builtin's", call, e.Recv)
+			}
 		}
 	}
 }
