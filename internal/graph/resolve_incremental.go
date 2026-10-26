@@ -116,22 +116,7 @@ INSERT OR IGNORE INTO _resolve_scope(edge_id)
 		// only over affected edges (which were just nulled, so the IS NULL guard
 		// selects exactly them).
 		if _, err := c.ExecContext(ctx, `
-UPDATE edges SET dst_node_id = (
-  SELECT n.id
-    FROM nodes n
-    JOIN files f  ON f.id = n.file_id
-    JOIN files ef ON ef.id = edges.file_id
-   WHERE f.worktree = ?
-     AND (n.name = edges.dst_name OR n.qualified_name = edges.dst_name)
-     AND ( ef.language = f.language
-           OR ( ef.language IN ('typescript','tsx','javascript')
-                AND f.language IN ('typescript','tsx','javascript') ) )
-   ORDER BY
-     CASE WHEN f.id = edges.file_id THEN 0 ELSE 1 END,
-     CASE WHEN substr(f.path,1,instr(f.path,'/')) = substr(ef.path,1,instr(ef.path,'/'))
-          THEN 0 ELSE 1 END,
-     f.path, n.start_byte, n.id
-   LIMIT 1)
+UPDATE edges SET dst_node_id = (`+nonCallTarget+`)
 WHERE dst_node_id IS NULL
   AND dst_name <> ''
   AND kind <> 'calls'
@@ -265,8 +250,9 @@ SELECT n.qualified_name FROM nodes n JOIN files f ON f.id = n.file_id
 
 // extendsSigForPaths returns a set identifying the `extends`/`implements` edges
 // the given paths currently contribute, keyed by "<deriving qualified_name>\x00
-// <base name>". Comparing this set before and after a reconcile detects whether a
-// dirty file changed the interface/base structure — the one case the name-scoped
+// <base name>\x00<base module>" (the module a Python base names; else empty).
+// Comparing this set before and after a reconcile detects whether a dirty file
+// changed the interface/base structure — the one case the name-scoped
 // incremental resolve cannot bound (see ResolveIncremental), forcing a full
 // Resolve.
 func (e *Engine) extendsSigForPaths(ctx context.Context, worktree string, paths []string) (map[string]struct{}, error) {
@@ -280,7 +266,7 @@ func (e *Engine) extendsSigForPaths(ctx context.Context, worktree string, paths 
 		args = append(args, p)
 	}
 	rows, err := e.st.DB.QueryContext(ctx, `
-SELECT COALESCE(src.qualified_name, ''), e.dst_name
+SELECT COALESCE(src.qualified_name, ''), e.dst_name, e.dst_recv
   FROM edges e
   JOIN files f   ON f.id = e.file_id
   LEFT JOIN nodes src ON src.id = e.src_node_id
@@ -291,11 +277,11 @@ SELECT COALESCE(src.qualified_name, ''), e.dst_name
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var s, d string
-		if err := rows.Scan(&s, &d); err != nil {
+		var s, d, m string
+		if err := rows.Scan(&s, &d, &m); err != nil {
 			return nil, err
 		}
-		sig[s+"\x00"+d] = struct{}{}
+		sig[s+"\x00"+d+"\x00"+m] = struct{}{}
 	}
 	return sig, rows.Err()
 }

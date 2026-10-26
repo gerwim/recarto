@@ -185,19 +185,19 @@ func (r *Registry) ParseFile(lang, path string, src []byte) (Result, error) {
 
 	captureNames := q.CaptureNames()
 	var res Result
-	py := pyFile{bases: map[uint]string{}, types: map[pyName]string{}}
+	py := pyFile{imports: map[string]pyImport{}, modules: map[string]string{}, types: map[pyName]string{}}
 	matches := cur.Matches(q, tree.RootNode(), src)
 	for m := matches.Next(); m != nil; m = matches.Next() {
 		var name, recv, recvType, recvName, bindName, bindType string
-		var bindAttr, bindFrom, superBase string
+		var bindAttr, bindFrom, importFrom, importAlias string
 		var defKind, refKind string
 		var sb, eb, sl, el uint
 		var nameByte, nameLine uint
-		var recvNameByte, bindByte, selfByte uint
-		var superClass, superOf, bindClass uint
+		var recvNameByte, bindByte, selfByte, bindClass uint
 		var bindDef uintptr
-		var isSelf, onLiteral bool
+		var isSelf, onLiteral, isImportFrom bool
 		var defNode *sitter.Node
+		var refNode sitter.Node
 		for _, c := range m.Captures {
 			cn := captureNames[c.Index]
 			switch {
@@ -209,9 +209,7 @@ func (r *Registry) ParseFile(lang, path string, src []byte) (Result, error) {
 				recv = c.Node.Utf8Text(src)
 				if lang == "python" {
 					onLiteral = pyLiterals[c.Node.Kind()]
-					if recv = pyRecv(c.Node, src, recv); recv == "super()" {
-						superOf, _ = pyScope(&c.Node)
-					}
+					recv = pyRecv(c.Node, src, recv)
 				}
 			case cn == "recv.type":
 				recvType = strings.TrimPrefix(c.Node.Utf8Text(src), "*")
@@ -248,10 +246,10 @@ func (r *Registry) ParseFile(lang, path string, src []byte) (Result, error) {
 						bindClass, bindDef = pyScope(&c.Node)
 					}
 				}
-			case cn == "super.base":
-				superBase = c.Node.Utf8Text(src)
-			case cn == "super.class":
-				superClass = c.Node.StartByte()
+			case cn == "import.from":
+				importFrom, isImportFrom = c.Node.Utf8Text(src), true
+			case cn == "import.alias":
+				importAlias = c.Node.Utf8Text(src)
 			case cn == "macro.args":
 				res.Edges = append(res.Edges, macroCalls(c.Node, walker, src, false)...)
 			case strings.HasPrefix(cn, "definition."):
@@ -262,6 +260,7 @@ func (r *Registry) ParseFile(lang, path string, src []byte) (Result, error) {
 				sl, el = c.Node.StartPosition().Row+1, c.Node.EndPosition().Row+1
 			case strings.HasPrefix(cn, "reference."):
 				refKind = strings.TrimPrefix(cn, "reference.")
+				refNode = c.Node
 				sb = c.Node.StartByte()
 				sl = c.Node.StartPosition().Row + 1
 			}
@@ -313,8 +312,13 @@ func (r *Registry) ParseFile(lang, path string, src []byte) (Result, error) {
 					TypeBinding{Name: recvName, TypeName: recvType, StartByte: recvNameByte})
 			}
 		case refKind != "" && name != "" && !onLiteral:
-			if superOf != 0 {
-				py.supers = append(py.supers, pySuper{edge: len(res.Edges), class: superOf})
+			if lang == "python" {
+				switch refKind {
+				case "import":
+					recv = py.addImport(path, name, importFrom, importAlias, isImportFrom)
+				case "extends":
+					py.bases = append(py.bases, pyBase{edge: len(res.Edges), qualifier: pyBaseQualifier(refNode, src)})
+				}
 			}
 			res.Edges = append(res.Edges, Edge{
 				Kind: edgeKind(refKind), DstName: name, Recv: recv, StartByte: sb, Line: sl,
@@ -325,8 +329,6 @@ func (r *Registry) ParseFile(lang, path string, src []byte) (Result, error) {
 			res.Bindings = append(res.Bindings,
 				TypeBinding{Name: "self", TypeName: bindType, StartByte: selfByte},
 				TypeBinding{Name: "Self", TypeName: bindType, StartByte: selfByte})
-		case superBase != "":
-			py.bases[superClass] = superBase
 		case bindAttr != "" && (bindType != "" || bindFrom != "") && bindClass != 0:
 			py.attrs = append(py.attrs, pyAttr{name: bindAttr, typ: bindType, from: bindFrom, class: bindClass, def: bindDef})
 		case bindName != "" && bindType != "" && bindType != "var":
@@ -346,26 +348,31 @@ func (r *Registry) ParseFile(lang, path string, src []byte) (Result, error) {
 	return res, nil
 }
 
-// pyFile collects what the Python passes need from every match: each class's
-// first positional base and each def's parameter and local types, for the
-// super() calls and self.x bindings found along the way.
+// pyFile collects what the Python passes need from every match: the file's
+// imports and each def's parameter and local types, for the bases and self.x
+// bindings found along the way.
 type pyFile struct {
-	bases  map[uint]string // class name byte -> first positional base
-	types  map[pyName]string
-	supers []pySuper
-	attrs  []pyAttr
+	imports map[string]pyImport // name bound by `from M import X [as name]`
+	modules map[string]string   // name bound by `import a.b [as name]` -> its module
+	types   map[pyName]string
+	bases   []pyBase
+	attrs   []pyAttr
+}
+
+// pyImport is a name a from-import binds: class (or function, or submodule)
+// name of module.
+type pyImport struct{ module, name string }
+
+// pyBase is an extends edge and what qualifies its base: "m" for m.Base.
+type pyBase struct {
+	edge      int
+	qualifier string
 }
 
 // pyName is a name bound in a def (identified by its node id; 0 is module level).
 type pyName struct {
 	def  uintptr
 	name string
-}
-
-// pySuper is a super().m() call edge and the name byte of its innermost class.
-type pySuper struct {
-	edge  int
-	class uint
 }
 
 // pyAttr is a self.x binding of a class (its name byte), typed by a type
@@ -376,14 +383,48 @@ type pyAttr struct {
 	def             uintptr
 }
 
-// finish names each super() receiver after its class's first base, so the call
-// binds Base.m like Base.m() would, and adds the self.x bindings, anchored at
-// the class name so their scope is the whole class.
-func (py *pyFile) finish(res *Result) {
-	for _, s := range py.supers {
-		if base := py.bases[s.class]; base != "" {
-			res.Edges[s.edge].Recv = base
+// addImport records the names an import binds and returns the module a
+// from-import reads (a relative one resolved against path's package), which the
+// edge carries so it resolves to that module's X rather than any X.
+func (py *pyFile) addImport(path, name, from, alias string, isFrom bool) string {
+	if !isFrom { // import a.b [as m]: m, or else a, is a module
+		if alias == "" {
+			name, _, _ = strings.Cut(name, ".")
+			alias = name
 		}
+		py.modules[alias] = name
+		return ""
+	}
+	module := pyModule(path, from)
+	if alias == "" {
+		alias = name
+	}
+	py.imports[alias] = pyImport{module, name}
+	return module
+}
+
+// finish names each base after the class it denotes — an imported alias's real
+// name, with the module the class comes from — and adds the self.x bindings,
+// anchored at the class name so their scope is the whole class.
+func (py *pyFile) finish(res *Result) {
+	for _, b := range py.bases {
+		e := &res.Edges[b.edge]
+		if b.qualifier == "" { // `class C(Base)`: Base may be imported, maybe as an alias
+			if imp, ok := py.imports[e.DstName]; ok {
+				e.DstName, e.Recv = imp.name, imp.module
+			}
+			continue
+		}
+		// `class C(m.Base)`: m is an imported module, or a from-imported submodule
+		first, rest, dotted := strings.Cut(b.qualifier, ".")
+		module := py.modules[first]
+		if imp, ok := py.imports[first]; ok {
+			module = strings.TrimPrefix(imp.module+"."+imp.name, ".")
+		}
+		if module != "" && dotted {
+			module += "." + rest
+		}
+		e.Recv = module
 	}
 	for _, a := range py.attrs {
 		typ := a.typ
@@ -394,6 +435,39 @@ func (py *pyFile) finish(res *Result) {
 			res.Bindings = append(res.Bindings, TypeBinding{Name: "self." + a.name, TypeName: typ, StartByte: a.class})
 		}
 	}
+}
+
+// pyModule returns the absolute module a from-import reads: a relative one (.m,
+// ..m) is resolved against the package of the importing file at path.
+func pyModule(path, from string) string {
+	rel := strings.TrimLeft(from, ".")
+	level := len(from) - len(rel)
+	if level == 0 {
+		return from
+	}
+	pkg := strings.Split(path, "/")
+	pkg = pkg[:len(pkg)-1] // the file's directory is its package
+	pkg = pkg[:max(0, len(pkg)-(level-1))]
+	if rel != "" {
+		pkg = append(pkg, rel)
+	}
+	return strings.Join(pkg, ".")
+}
+
+// pyBaseQualifier returns what qualifies a base class expression: "m" for
+// m.Base, "a.b" for a.b.Base[T], "" for a bare Base.
+func pyBaseQualifier(n sitter.Node, src []byte) string {
+	if n.Kind() == "subscript" {
+		if v := n.ChildByFieldName("value"); v != nil {
+			n = *v
+		}
+	}
+	if n.Kind() == "attribute" {
+		if o := n.ChildByFieldName("object"); o != nil {
+			return o.Utf8Text(src)
+		}
+	}
+	return ""
 }
 
 // pyScope returns the name byte of n's innermost enclosing class and the node id
@@ -441,9 +515,9 @@ var pyLiterals = map[string]bool{
 }
 
 // pyRecv normalizes a Python call receiver: super() and super(C, self) become
-// "super()", named after the base once the classes are known, and m.Type (a
-// CapWords last segment is a class, by PEP 8) becomes Type, the receiver static
-// resolution binds, as for Rust's module::Type::f().
+// "super()", which the resolver binds through the enclosing class's bases, and
+// m.Type (a CapWords last segment is a class, by PEP 8) becomes Type, the
+// receiver static resolution binds, as for Rust's module::Type::f().
 func pyRecv(n sitter.Node, src []byte, text string) string {
 	switch n.Kind() {
 	case "call":

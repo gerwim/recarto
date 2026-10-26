@@ -118,13 +118,13 @@ func TestPythonGraph(t *testing.T) {
 
 	got := callCandidates(t, e)
 	for _, want := range []string{
-		"Shape.describe -> Shape.label (typed)",      // self.label()
-		"Shape.describe -> Shape.area (typed)",       // self.area() ...
-		"Shape.describe -> Circle.area (iface)",      // ... and the override it may dispatch to
-		"Circle.__init__ -> Shape.__init__ (static)", // super().__init__()
-		"Circle.area -> area (name)",                 // bare area() is the module function
-		"Circle.unit -> Circle.make (typed)",         // cls.make()
-		"Circle.make -> Circle (ctor)",               // Circle(r)
+		"Shape.describe -> Shape.label (typed)",     // self.label()
+		"Shape.describe -> Shape.area (typed)",      // self.area() ...
+		"Shape.describe -> Circle.area (iface)",     // ... and the override it may dispatch to
+		"Circle.__init__ -> Shape.__init__ (typed)", // super().__init__()
+		"Circle.area -> area (name)",                // bare area() is the module function
+		"Circle.unit -> Circle.make (typed)",        // cls.make()
+		"Circle.make -> Circle (ctor)",              // Circle(r)
 		"Service.__init__ -> Repo (ctor)",
 		"Service.run -> Shape.area (typed)",
 		"Service.run -> Circle.area (iface)",
@@ -314,5 +314,140 @@ func TestPythonResolutionScoping(t *testing.T) {
 			}
 			check("incremental")
 		})
+	}
+}
+
+// pythonTargets lists every candidate of the given edge kind (calls: from
+// edge_candidates; others: the resolved target) as "src -> dst @path (method)",
+// the path telling same-named classes apart.
+func pythonTargets(t *testing.T, e *Engine, kind string) []string {
+	t.Helper()
+	q := `
+SELECT COALESCE(sn.qualified_name, '<file>'), dn.qualified_name, df.path, ec.method
+  FROM edges ed
+  LEFT JOIN nodes sn ON sn.id = ed.src_node_id
+  JOIN edge_candidates ec ON ec.edge_id = ed.id
+  JOIN nodes dn ON dn.id = ec.dst_node_id JOIN files df ON df.id = dn.file_id
+ WHERE ed.kind = 'calls'`
+	if kind != "calls" {
+		q = `
+SELECT COALESCE(sn.qualified_name, '<file>'), dn.qualified_name, df.path, ed.kind
+  FROM edges ed
+  LEFT JOIN nodes sn ON sn.id = ed.src_node_id
+  JOIN nodes dn ON dn.id = ed.dst_node_id JOIN files df ON df.id = dn.file_id
+ WHERE ed.kind = '` + kind + `'`
+	}
+	rows, err := e.st.DB.Query(q)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var src, dst, path, method string
+		if err := rows.Scan(&src, &dst, &path, &method); err != nil {
+			t.Fatal(err)
+		}
+		out = append(out, src+" -> "+dst+" @"+path+" ("+method+")")
+	}
+	slices.Sort(out)
+	return out
+}
+
+// TestPythonModules: an import or base resolves to the class of the module it
+// names, even when another module (a_decoy.py, first in path order) or the
+// deriving class itself has the same name — the `from m import X as Base;
+// class X(Base)` and `class X(m.X)` idioms — and super() binds through the
+// class's bases.
+func TestPythonModules(t *testing.T) {
+	e := newTestEngine(t)
+	ctx := context.Background()
+	wt := t.TempDir()
+	files := map[string]string{
+		"pkg/a_decoy.py": "class Store:\n    def save(self): pass\n    def load(self): pass\n\n\nclass Serializer:\n    def serialize(self): pass\n    def end(self): pass\n",
+		"pkg/db.py":      "class Store:\n    def save(self): pass\n    def load(self): pass\n",
+		"pkg/cached.py":  "from pkg.db import Store as DBStore\n\n\nclass Store(DBStore):\n    def save(self):\n        super().save()\n        self.load()\n",
+		"pkg/base.py":    "class Serializer:\n    def serialize(self): pass\n    def end(self): pass\n",
+		"pkg/json.py":    "from pkg import base\n\n\nclass Serializer(base.Serializer):\n    def serialize(self):\n        super(Serializer, self).serialize()\n        self.end()\n",
+		"pkg/mi.py":      "class A:\n    pass\n\n\nclass B:\n    def m(self): pass\n\n\nclass C(A, B):\n    def m(self):\n        super().m()\n",
+		// an external base of the same name: not this Session, so unresolved
+		"pkg/wrap.py": "import requests\n\n\nclass Session(requests.Session):\n    pass\n",
+	}
+	for path, src := range files {
+		if err := e.IndexFile(ctx, wt, path, []byte(src), 1, int64(len(src))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := e.Resolve(ctx, wt, noopProgress{}); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string][]string{
+		"imports": {"<file> -> Store @pkg/db.py (imports)"},
+		"extends": {
+			"C -> A @pkg/mi.py (extends)", "C -> B @pkg/mi.py (extends)",
+			"Serializer -> Serializer @pkg/base.py (extends)", "Store -> Store @pkg/db.py (extends)",
+		},
+		"calls": {
+			"C.m -> B.m @pkg/mi.py (typed)",
+			"Serializer.serialize -> Serializer.end @pkg/base.py (typed)",
+			"Serializer.serialize -> Serializer.serialize @pkg/base.py (typed)",
+			"Store.save -> Store.load @pkg/db.py (typed)",
+			"Store.save -> Store.save @pkg/db.py (typed)",
+		},
+	}
+	check := func(mode string) {
+		t.Helper()
+		for _, kind := range []string{"imports", "extends", "calls"} {
+			if got := pythonTargets(t, e, kind); !slices.Equal(got, want[kind]) {
+				t.Errorf("%s resolve, %s:\n got %q\nwant %q", mode, kind, got, want[kind])
+			}
+		}
+	}
+	check("full")
+	for path, src := range files {
+		if err := e.ReindexFileIncremental(ctx, wt, path, []byte(src), 2, int64(len(src))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	check("incremental")
+
+	sup, err := e.Implementations(ctx, wt, "Store", "up", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sup) != 1 || sup[0].Path != "pkg/db.py" {
+		t.Errorf("Implementations(Store, up) = %+v, want only pkg/db.py's Store", sup)
+	}
+}
+
+// TestPythonBaseModuleChange: an edit that only changes the module a base comes
+// from re-resolves the calls inheriting through it in other files too.
+func TestPythonBaseModuleChange(t *testing.T) {
+	e := newTestEngine(t)
+	ctx := context.Background()
+	wt := t.TempDir()
+	root := "class Root:\n    def ping(self): pass\n"
+	for path, src := range map[string]string{
+		"pkg/m1.py":   root,
+		"pkg/m2.py":   root,
+		"pkg/leaf.py": "from pkg.m1 import Root\n\n\nclass Leaf(Root):\n    pass\n",
+		"pkg/use.py":  "from pkg.leaf import Leaf\n\n\ndef run(s: Leaf):\n    s.ping()\n",
+	} {
+		if err := e.IndexFile(ctx, wt, path, []byte(src), 1, int64(len(src))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := e.Resolve(ctx, wt, noopProgress{}); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := pythonTargets(t, e, "calls"), []string{"run -> Root.ping @pkg/m1.py (typed)"}; !slices.Equal(got, want) {
+		t.Fatalf("calls %q, want %q", got, want)
+	}
+	leaf := []byte("from pkg.m2 import Root\n\n\nclass Leaf(Root):\n    pass\n")
+	if err := e.ReindexFileIncremental(ctx, wt, "pkg/leaf.py", leaf, 2, int64(len(leaf))); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := pythonTargets(t, e, "calls"), []string{"run -> Root.ping @pkg/m2.py (typed)"}; !slices.Equal(got, want) {
+		t.Errorf("after moving Leaf's base to pkg.m2: calls %q, want %q", got, want)
 	}
 }

@@ -5,18 +5,24 @@
 ; PEP 695 aliases: type Alias = ..., type Pair[T] = ...
 (type_alias_statement left: (type [(identifier) @name (generic_type (identifier) @name)])) @definition.type
 
-; calls: f() and recv.m(), the receiver being the object expression's text.
-; ParseFile renames a super() receiver to the enclosing class's first base.
+; calls: f() and recv.m(), the receiver being the object expression's text
+; (ParseFile writes super(C, self) as super(), which binds through the class's bases)
 (call function: (identifier) @name) @reference.call
 (call function: (attribute object: (_) @recv attribute: (identifier) @name)) @reference.call
 
 ; imports, one edge per name: `import a.b` names the module, `from m import X as Y`
-; names X, so the edge resolves to X's definition
-(import_statement name: [(dotted_name) @name (aliased_import name: (dotted_name) @name)] @reference.import)
-(import_from_statement name: [(dotted_name) @name (aliased_import name: (dotted_name) @name)] @reference.import)
+; names X and carries m, so the edge resolves to m's X. ParseFile also records
+; what each import binds, to tell where a base class comes from.
+(import_statement name: [
+  (dotted_name) @name
+  (aliased_import name: (dotted_name) @name alias: (identifier) @import.alias)] @reference.import)
+(import_from_statement module_name: (_) @import.from name: [
+  (dotted_name) @name
+  (aliased_import name: (dotted_name) @name alias: (identifier) @import.alias)] @reference.import)
 
 ; positional bases of `class C(Base, mod.Base, Generic[T], metaclass=M)`; a keyword
-; argument is not a base
+; argument is not a base. ParseFile names an imported alias's real class and the
+; module a base comes from.
 (class_definition superclasses: (argument_list [
   (identifier) @name
   (attribute attribute: (identifier) @name)
@@ -69,10 +75,3 @@
 ; under a class-body if or try counts too
 (function_definition parameters: (parameters . [(identifier) @bind.recv (typed_parameter . (identifier) @bind.recv)])
   (#any-of? @bind.recv "self" "cls"))
-
-; a class's first positional base, which super() and super(C, self) resolve to
-(class_definition name: (identifier) @super.class superclasses: (argument_list . [
-  (identifier) @super.base
-  (attribute attribute: (identifier) @super.base)
-  (subscript value: [(identifier) @super.base (attribute attribute: (identifier) @super.base)])
-]))

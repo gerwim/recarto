@@ -103,16 +103,18 @@ func TestParsePython(t *testing.T) {
 		edges = append(edges, fmt.Sprintf("%s %s %s %d", e.Kind, e.DstName, e.Recv, e.Line))
 	}
 	wantEdges := []string{
-		"imports os  1", "imports os.path  1", "imports Thing  2", "imports other  2",
-		"imports Shape  3", "imports Square  4",
+		// a from-import carries its module, relative ones resolved against pkg/
+		"imports os  1", "imports os.path  1", "imports Thing pkg.mod 2", "imports other pkg.mod 2",
+		"imports Shape pkg.shapes 3", "imports Square pkg.shapes 4",
 		"annotates dataclass  7", "annotates register  8", "calls register registry 8",
-		"extends Shape  9", "extends Named  9", "extends Generic  9", // metaclass= is no base
+		// an imported base carries its module too; metaclass= is no base
+		"extends Shape pkg.shapes 9", "extends Named  9", "extends Generic  9",
 		"calls Store  11",
-		"calls super  14", "calls __init__ Shape 14", // super() is the first base
+		"calls super  14", "calls __init__ super() 14",
 		"calls Logger  17",
 		"annotates staticmethod  19", "calls Circle  21",
 		"annotates property  23", "calls load self.repo 26", "calls helper  27", "calls inner  27",
-		"calls super  34", "calls m super() 34", // Config has no base to name
+		"calls super  34", "calls m super() 34",
 		"calls area c 41", "calls side s 42", "calls make Circle 43", "calls area t 44",
 	}
 	slices.Sort(edges)
@@ -182,22 +184,16 @@ func TestParsePythonBindingShapes(t *testing.T) {
 	}
 }
 
-// TestParsePythonSuper: a super() receiver is the first positional base of the
-// innermost enclosing class, never an outer class's.
+// TestParsePythonSuper: a call on super itself has the receiver super(), which
+// the resolver binds through the enclosing class's bases; a call on what super()
+// returns does not.
 func TestParsePythonSuper(t *testing.T) {
 	parsePy := pythonParser(t)
 	for _, c := range []struct{ src, recv string }{
-		{"class A(B):\n    def f(self):\n        super().f()", "B"},
-		{"class A(B):\n    def f(self):\n        super(A, self).f()", "B"},
-		{"class A(m.B[T], C):\n    def f(self):\n        super().f()", "B"},
-		{"class A:\n    def f(self):\n        super().f()", "super()"},
-		{"class A(metaclass=M):\n    def f(self):\n        super().f()", "super()"},
-		{"class A(B):\n    class C:\n        def f(self):\n            super().f()", "super()"},
-		// f is called on what super() returns, not on super itself
+		{"class A(B):\n    def f(self):\n        super().f()", "super()"},
+		{"class A(B):\n    def f(self):\n        super(A, self).f()", "super()"},
 		{"class A(B):\n    def g(self):\n        super().x.f()", "super().x"},
 		{"class A(B):\n    def g(self):\n        super().g().f()", "super().g()"},
-		// C is A's last statement, so both classes end on the same byte
-		{"class A(B):\n    def f(self):\n        super().f()\n    class C(D):\n        pass", "B"},
 	} {
 		var got []string
 		for _, e := range parsePy(c.src).Edges {
@@ -292,6 +288,46 @@ func TestParsePythonMethodReceivers(t *testing.T) {
 		}
 		if want := strings.Fields(c.want); !slices.Equal(got, want) {
 			t.Errorf("%q: bindings %v, want %v", c.src, got, want)
+		}
+	}
+}
+
+// TestParsePythonModules: a from-import edge carries the module it reads,
+// relative ones resolved against the importing file's package, and a base names
+// the class it denotes (an imported alias's real name) with its module.
+func TestParsePythonModules(t *testing.T) {
+	r, err := NewRegistry()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	for _, c := range []struct{ path, src, want string }{
+		{"a/b/c.py", "from x.y import Z", "imports Z x.y"},
+		{"a/b/c.py", "from . import Z", "imports Z a.b"},
+		{"a/b/c.py", "from .m import Z as W", "imports Z a.b.m"},
+		{"a/b/c.py", "from ..m import Z", "imports Z a.m"},
+		{"c.py", "from .m import Z", "imports Z m"},
+		{"a/b/c.py", "import x.y as z", "imports x.y "},
+		{"a/b/c.py", "from db import Store as DBStore\nclass Store(DBStore): pass", "imports Store db; extends Store db"},
+		{"a/b/c.py", "from x import Base\nclass C(Base[int]): pass", "imports Base x; extends Base x"},
+		{"a/b/c.py", "from django.core.serializers import base\nclass Serializer(base.Serializer): pass", "imports base django.core.serializers; extends Serializer django.core.serializers.base"},
+		{"a/b/c.py", "import a.b\nclass C(a.b.Base): pass", "imports a.b ; extends Base a.b"},
+		{"a/b/c.py", "import x.y as m\nclass C(m.Base): pass", "imports x.y ; extends Base x.y"},
+		{"a/b/c.py", "from . import sib\nclass C(sib.Base): pass", "imports sib a.b; extends Base a.b.sib"},
+		{"a/b/c.py", "class Base: pass\nclass C(Base, other.Mixin): pass", "extends Base ; extends Mixin "},
+	} {
+		res, err := r.ParseFile("python", c.path, []byte(c.src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got []string
+		for _, e := range res.Edges {
+			if e.Kind == "imports" || e.Kind == "extends" {
+				got = append(got, e.Kind+" "+e.DstName+" "+e.Recv)
+			}
+		}
+		if want := strings.Split(c.want, "; "); !slices.Equal(got, want) {
+			t.Errorf("%s %q: %q, want %q", c.path, c.src, got, want)
 		}
 	}
 }
