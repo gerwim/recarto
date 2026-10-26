@@ -19,6 +19,8 @@ require (
 	github.com/tree-sitter/tree-sitter-rust v0.24.2
 	github.com/tree-sitter/tree-sitter-typescript v0.23.2
 	golang.org/x/mod v0.36.0
+	golang.org/x/sys v0.47.0
+	golang.org/x/term v0.45.0
 	golang.org/x/text v0.37.0
 	modernc.org/sqlite v1.51.0
 	mvdan.cc/sh/v3 v3.14.1
@@ -53,8 +55,6 @@ require (
 	golang.org/x/image v0.41.0 // indirect
 	golang.org/x/oauth2 v0.35.0 // indirect
 	golang.org/x/sync v0.20.0 // indirect
-	golang.org/x/sys v0.47.0 // indirect
-	golang.org/x/term v0.45.0 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
 	k8s.io/klog/v2 v2.140.0 // indirect
 	modernc.org/libc v1.72.3 // indirect

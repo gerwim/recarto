@@ -7,7 +7,7 @@ import (
 )
 
 func TestRecordMemorySchemaHasKindEnum(t *testing.T) {
-	sc := recordMemorySchema()
+	sc := recordMemorySchema(nil)
 	p := sc.Properties["kind"]
 	if p == nil {
 		t.Fatal("no kind property")

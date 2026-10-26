@@ -88,6 +88,7 @@ func TestIdleEventsAreHandlerNoOps(t *testing.T) {
 }
 
 func TestRunHookOpenFailureWritesNothing(t *testing.T) {
+	clearRecartoEnv(t) // the user's config could switch these hooks off before they open
 	boom := errors.New("store cannot open")
 	file := filepath.Join(t.TempDir(), "a.go") // absolute on every OS
 	for _, ev := range []Event{

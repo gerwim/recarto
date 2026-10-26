@@ -187,6 +187,7 @@ Day to day you don't call Recarto directly; your agent uses the MCP tools and th
 hooks fire automatically. The CLI is available for inspection and scripting:
 
 ```
+recarto config            turn features on or off (interactive; or list|enable|disable|path)
 recarto status            repo id, branch, memory counts, ledger
 recarto doctor            health checks (db, WAL, integrity, git)
 recarto remember <kind>   record a memory (--title --body --files --symbols --tags --pin --global)
@@ -209,6 +210,40 @@ MCP tools exposed by `recarto serve`: `record_memory`, `recall_memory`, `get_mem
 `list_memory`, `record_bug`, `search_bugs`, `search_graph`, `search_content`,
 `get_code_snippet`, `get_file_outline`, `trace_call_path`, `find_implementations`,
 `find_annotated`, `get_architecture`, `query_graph`.
+
+## Turning features on or off
+
+Every feature is on by default. Run `recarto config` in a terminal to switch them:
+↑/↓ to move, space to toggle, `a` to turn everything on, `q` to quit. Each change is
+saved at once and applies to new agent sessions.
+
+```sh
+recarto config                            # interactive; prints the list outside a terminal
+recarto config list                       # every feature, its state and what it does
+recarto config disable todos stop-nudge   # or enable
+recarto config path                       # where the file lives
+```
+
+The features cover the session-start context, the hints while working (bug warnings,
+todos, search and shell hints, …), the end-of-turn reminder and nudge, the MCP tool
+groups, and background work such as sync and compaction. A new feature shows up in
+`recarto config` on its own, switched on.
+
+The file is `~/.config/recarto/config.toml` (`%AppData%\recarto\config.toml` on
+Windows, `~/Library/Application Support/recarto/config.toml` on macOS);
+`RECARTO_CONFIG` points elsewhere. It holds `feature = true|false` lines and `#`
+comments, so you can edit it by hand: a feature left out is on, and saving from
+`recarto config` keeps your comments and layout.
+
+```toml
+# Session start
+session-memories = true  # Inject the most relevant memories for this branch
+code-map = false         # Add a map of the codebase's modules
+```
+
+A misspelled feature or a value other than `true`/`false` is reported with its line
+number by `recarto config` and `recarto doctor`; hooks skip the bad line.
+`RECARTO_SEMANTIC=0` and `RECARTO_AUTO_REPAIR=0` still turn those features off too.
 
 ## Shell searches and file views
 

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"git.gerwim.nl/gerwim/recarto/internal/app"
+	"git.gerwim.nl/gerwim/recarto/internal/features"
 )
 
 // Doctor runs health checks: store reachable, WAL enabled, integrity ok, a schema
@@ -54,6 +55,25 @@ func Doctor(ctx context.Context, a *app.App, w io.Writer) error {
 
 	check("git", a.Git.RepoID != "", fmt.Sprintf("id=%s repo=%s branch=%s nongit=%v",
 		a.Git.RepoID, a.Git.RepoName, a.Git.Branch, a.Git.NonGit))
+
+	// A typo in the config file leaves the feature it meant on, unnoticed.
+	if path, err := features.Path(); err == nil {
+		s, err := features.Read(path)
+		detail := strings.ReplaceAll(fmt.Sprint(err), "\n", "; ")
+		if err == nil {
+			var off []string
+			for _, f := range features.All() {
+				if !s.On(f) {
+					off = append(off, f.Key)
+				}
+			}
+			detail = "all features on"
+			if len(off) > 0 {
+				detail = fmt.Sprintf("%d off: %s", len(off), strings.Join(off, ", "))
+			}
+		}
+		check("config", err == nil, detail)
+	}
 
 	// Sync reachability is diagnostic only: an unreachable server must never
 	// fail doctor (offline mode is the floor), so this check never flips allOK.

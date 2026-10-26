@@ -13,6 +13,7 @@ import (
 
 	"git.gerwim.nl/gerwim/recarto/internal/cache"
 	"git.gerwim.nl/gerwim/recarto/internal/clock"
+	"git.gerwim.nl/gerwim/recarto/internal/features"
 	"git.gerwim.nl/gerwim/recarto/internal/gitctx"
 	"git.gerwim.nl/gerwim/recarto/internal/graph"
 	"git.gerwim.nl/gerwim/recarto/internal/ledger"
@@ -81,6 +82,9 @@ type App struct {
 	// or nil when unconfigured. Like Sync, every caller must nil-check: the
 	// feature is opt-in and its absence must never be an error.
 	Workspace *workspace.Bundle
+	// Features are the user's feature switches (features.Load), read once at
+	// Open: hooks and MCP handlers consult them, and tests set them directly.
+	Features features.Set
 	// SyncTrigger is signaled (non-blocking, via SignalSync) by write paths that
 	// want a long-lived `recarto serve` process to sync sooner than its next
 	// periodic tick — e.g. an MCP record_memory/complete_todo/forget_memory call,
@@ -146,6 +150,7 @@ func Open(cfg Config) (*App, error) {
 	a := &App{
 		Git: gc, Runner: runner, Store: st, Ledger: led, Engine: eng, Graph: gr, Clock: clk,
 		Sync: syncer, Workspace: ws, Repos: openRepos(gc.RepoID, clk, storeOpts...), SyncTrigger: make(chan struct{}, 1),
+		Features: features.Load(),
 	}
 	if err := a.writeMeta(context.Background()); err != nil {
 		_ = a.Close()

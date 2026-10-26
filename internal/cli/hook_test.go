@@ -88,6 +88,8 @@ func TestRunHookFailsOpen(t *testing.T) {
 	for _, k := range []string{"RECARTO_WORKSPACE", "RECARTO_REPOS", "RECARTO_SYNC_URL", "RECARTO_SYNC_KEY"} {
 		t.Setenv(k, "")
 	}
+	// The user's config could switch these hooks off before they open.
+	t.Setenv("RECARTO_CONFIG", filepath.Join(t.TempDir(), "config.toml"))
 	file, _ := json.Marshal(filepath.Join(cwd, "a.go")) // inside the served (non-git) cwd
 	payloads := map[string]string{
 		"claude":   `{"session_id":"s","tool_input":{"file_path":` + string(file) + `,"pattern":"Foo","command":"rg Foo"}}`,

@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -37,6 +38,8 @@ func (f fakeGit) Run(args ...string) (string, error) {
 // newTestApp builds an App against a temp store with a fixed branch and clock.
 func newTestApp(t *testing.T, branch string) *app.App {
 	t.Helper()
+	// A developer's own config file must not switch features off under the tests.
+	t.Setenv("RECARTO_CONFIG", filepath.Join(t.TempDir(), "config.toml"))
 	t.Setenv("RECARTO_CACHE_DIR", t.TempDir())
 	a, err := app.Open(app.Config{
 		CWD:    "/repo",

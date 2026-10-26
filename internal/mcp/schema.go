@@ -3,6 +3,7 @@ package mcp
 import (
 	"github.com/google/jsonschema-go/jsonschema"
 
+	"git.gerwim.nl/gerwim/recarto/internal/features"
 	"git.gerwim.nl/gerwim/recarto/internal/memory"
 )
 
@@ -27,16 +28,20 @@ func withEnum(s *jsonschema.Schema, field string, vals ...string) *jsonschema.Sc
 	return s
 }
 
-func kindStrings() []string {
-	out := make([]string, len(memory.AllKinds))
-	for i, k := range memory.AllKinds {
-		out[i] = string(k)
+// kindStrings lists the kinds record_memory takes: todo only while f has the
+// todos feature on.
+func kindStrings(f features.Set) []string {
+	var out []string
+	for _, k := range memory.AllKinds {
+		if k != memory.KindTodo || f.On(features.Todos) {
+			out = append(out, string(k))
+		}
 	}
 	return out
 }
 
-func recordMemorySchema() *jsonschema.Schema {
-	s := withEnum(schemaFor[RecordMemoryInput](), "kind", kindStrings()...)
+func recordMemorySchema(f features.Set) *jsonschema.Schema {
+	s := withEnum(schemaFor[RecordMemoryInput](), "kind", kindStrings(f)...)
 	return withEnum(s, "scope", scopeRepo, scopeWorkspace)
 }
 

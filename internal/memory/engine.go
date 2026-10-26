@@ -11,6 +11,7 @@ import (
 
 	"git.gerwim.nl/gerwim/recarto/internal/clock"
 	"git.gerwim.nl/gerwim/recarto/internal/embedding"
+	"git.gerwim.nl/gerwim/recarto/internal/features"
 	"git.gerwim.nl/gerwim/recarto/internal/ids"
 	"git.gerwim.nl/gerwim/recarto/internal/ledger"
 	"git.gerwim.nl/gerwim/recarto/internal/store"
@@ -30,7 +31,7 @@ type Engine struct {
 // New returns an Engine with the default FTS5 lexical backend.
 func New(st *store.Store, led *ledger.Ledger, clk clock.Clock) *Engine {
 	e := &Engine{st: st, led: led, clk: clk, lex: NewFTSLexical(st), floor: os.Getenv("RECARTO_RECALL_FLOOR") != "0"}
-	if os.Getenv("RECARTO_SEMANTIC") != "0" {
+	if os.Getenv("RECARTO_SEMANTIC") != "0" && features.Load().On(features.SemanticRecall) {
 		e.emb = embedding.Default()
 	}
 	return e

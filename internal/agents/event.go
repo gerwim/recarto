@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 
 	"git.gerwim.nl/gerwim/recarto/internal/app"
+	"git.gerwim.nl/gerwim/recarto/internal/features"
 )
 
 // EventKind enumerates the lifecycle events Recarto reacts to.
@@ -90,10 +91,10 @@ func KindFromString(s string) (EventKind, error) {
 // open returns, then encodes the result back through ad. Hooks fail open: an
 // open or Handle error returns before any output — even advisory context built
 // before a failing side effect is dropped — for the (non-blocking) caller to
-// log. open is called only for an event with something to act on: an idle one
-// encodes the empty result without resolving git or opening a store. open may
-// itself find the event idle (a nil App, e.g. a post-edit outside every served
-// repo).
+// log. open is called only for an event with something to act on: an idle one,
+// or one whose features are all off, encodes the empty result without
+// resolving git or opening a store. open may itself find the event idle (a nil
+// App, e.g. a post-edit outside every served repo).
 func RunHook(ctx context.Context, open func(Event) (*app.App, error), ad Adapter, kind EventKind, in io.Reader, out io.Writer) error {
 	ev, err := ad.Decode(kind, in)
 	if err != nil {
@@ -104,7 +105,7 @@ func RunHook(ctx context.Context, open func(Event) (*app.App, error), ad Adapter
 			ev.Patterns, ev.Files = p.patterns, p.files
 		}
 	}
-	if idle(ev) {
+	if idle(ev) || !wanted(ev, features.Load()) {
 		return ad.Encode(kind, out, Result{})
 	}
 	a, err := open(ev)
@@ -124,6 +125,21 @@ func RunHook(ctx context.Context, open func(Event) (*app.App, error), ad Adapter
 // Opened adapts an already-open App to RunHook's opener.
 func Opened(a *app.App) func(Event) (*app.App, error) {
 	return func(Event) (*app.App, error) { return a, nil }
+}
+
+// wanted reports whether f leaves on a feature of ev's hook. Handle checks each
+// feature itself; this only spares a hook with none on from opening a store.
+func wanted(ev Event, f features.Set) bool {
+	switch ev.Kind {
+	case KindPostRead:
+		return f.On(features.RepeatedReads) || f.On(features.LargeReads) ||
+			f.On(features.BugWarnings) || f.On(features.Guidance) || f.On(features.Todos)
+	case KindAugment:
+		return f.On(features.SearchHints)
+	case KindShell:
+		return f.On(features.ShellHints)
+	}
+	return true
 }
 
 // idle reports whether ev has nothing to act on, judged from the payload alone.

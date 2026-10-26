@@ -7,6 +7,7 @@ import (
 	"io"
 
 	"git.gerwim.nl/gerwim/recarto/internal/app"
+	"git.gerwim.nl/gerwim/recarto/internal/features"
 	"git.gerwim.nl/gerwim/recarto/internal/remotesync"
 )
 
@@ -41,6 +42,10 @@ func Sync(ctx context.Context, a *app.App, w io.Writer, args []string) error {
 	}
 	if a.Workspace != nil && a.Workspace.Sync != nil {
 		targets = append(targets, target{"workspace " + a.Workspace.Name, a.Workspace.Sync})
+	}
+	if !a.Features.On(features.Sync) {
+		fmt.Fprintln(w, "sync: off (recarto config enable sync turns it on)")
+		return nil
 	}
 	if len(targets) == 0 {
 		fmt.Fprintln(w, "sync: not configured (set RECARTO_SYNC_URL and RECARTO_SYNC_KEY; "+

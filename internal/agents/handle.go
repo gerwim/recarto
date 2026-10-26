@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
 	"git.gerwim.nl/gerwim/recarto/internal/app"
+	"git.gerwim.nl/gerwim/recarto/internal/features"
 	"git.gerwim.nl/gerwim/recarto/internal/graph"
 	"git.gerwim.nl/gerwim/recarto/internal/ledger"
 	"git.gerwim.nl/gerwim/recarto/internal/memory"
@@ -203,7 +205,9 @@ func handleSessionStart(ctx context.Context, a *app.App, ev Event) (Result, erro
 	}
 
 	// Absorb a teammate's committed memory snapshot when it changed (best-effort).
-	_, _ = snapshot.SyncOnSessionStart(ctx, a.Engine, a.Store, a.Git.Worktree)
+	if a.Features.On(features.TeamSnapshot) {
+		_, _ = snapshot.SyncOnSessionStart(ctx, a.Engine, a.Store, a.Git.Worktree)
+	}
 
 	// Push anything now sitting in the local outbox/tombstone queue — a prior
 	// session on this machine that recorded something but never reached its own
@@ -226,36 +230,50 @@ func handleSessionStart(ctx context.Context, a *app.App, ev Event) (Result, erro
 	// Opportunistic memory compaction (best-effort, gated to once per interval,
 	// single-flight across worktrees). Runs before recall so this session's
 	// recalls stamp the freshly-advanced epoch. Never blocks the agent.
-	_, _ = a.Engine.Compact(ctx, memory.CompactOptions{})
+	if a.Features.On(features.AutoCompact) {
+		_, _ = a.Engine.Compact(ctx, memory.CompactOptions{})
+	}
 
 	budget := sessionBudget()
 	repoBudget := budget
 	// The workspace tier borrows a third of the session budget rather than
 	// growing the block: RECARTO_SESSION_BUDGET stays the whole block's bound.
-	var wsResults []memory.RecallResult
-	if a.Workspace != nil {
-		wsBudget := budget / 3
-		repoBudget = budget - wsBudget
-		if wsSet, err := a.Workspace.Engine.Recall(ctx, memory.RecallQuery{
-			Baseline:    true,
-			TokenBudget: wsBudget,
-		}); err == nil {
-			wsResults = wsSet.Results
+	var results, wsResults []memory.RecallResult
+	if a.Features.On(features.SessionMemories) {
+		if a.Workspace != nil {
+			wsBudget := budget / 3
+			repoBudget = budget - wsBudget
+			if wsSet, err := a.Workspace.Engine.Recall(ctx, memory.RecallQuery{
+				Baseline:    true,
+				TokenBudget: wsBudget,
+			}); err == nil {
+				wsResults = wsSet.Results
+			}
 		}
+		set, err := a.Engine.Recall(ctx, memory.RecallQuery{
+			Branch:      a.Git.Branch,
+			Worktree:    a.Git.Worktree,
+			Baseline:    true,
+			TokenBudget: repoBudget,
+		})
+		if err != nil {
+			return Result{}, err
+		}
+		results = set.Results
 	}
-	set, err := a.Engine.Recall(ctx, memory.RecallQuery{
-		Branch:      a.Git.Branch,
-		Worktree:    a.Git.Worktree,
-		Baseline:    true,
-		TokenBudget: repoBudget,
-	})
-	if err != nil {
-		return Result{}, err
+	if !a.Features.On(features.Todos) {
+		isTodo := func(r memory.RecallResult) bool { return r.Record.Kind == memory.KindTodo }
+		results, wsResults = slices.DeleteFunc(results, isTodo), slices.DeleteFunc(wsResults, isTodo)
 	}
-	results := set.Results
 	// Orientation map + recent bugs are best-effort tiers; failure omits the tier.
-	arch, _ := a.Graph.Architecture(ctx, a.Git.Worktree, "")
-	bugs, _ := a.Engine.RecentBugs(ctx, a.Git.Branch, recentBugLimit)
+	var arch graph.Architecture
+	if a.Features.On(features.CodeMap) {
+		arch, _ = a.Graph.Architecture(ctx, a.Git.Worktree, "")
+	}
+	var bugs []*memory.Record
+	if a.Features.On(features.RecentBugs) {
+		bugs, _ = a.Engine.RecentBugs(ctx, a.Git.Branch, recentBugLimit)
+	}
 
 	// "What changed since you were last here": baseline = the last session that
 	// journaled deltas, so /clear and open-and-close sessions are transparent
@@ -265,7 +283,9 @@ func handleSessionStart(ctx context.Context, a *app.App, ev Event) (Result, erro
 	var deltaBaseline int64
 	if at, ok, err := a.Graph.DeltaBaseline(ctx, a.Git.Worktree, now); err == nil && ok {
 		deltaBaseline = at
-		deltas, deltaTotal, _ = a.Graph.DeltasSince(ctx, a.Git.Worktree, at, 200)
+		if a.Features.On(features.RecentChanges) {
+			deltas, deltaTotal, _ = a.Graph.DeltasSince(ctx, a.Git.Worktree, at, 200)
+		}
 	}
 	// Retention: drop journal rows no baseline walk can reach (best-effort).
 	// The walk is unbounded — it skips no-op sessions all the way back to the
@@ -288,7 +308,7 @@ func handleSessionStart(ctx context.Context, a *app.App, ev Event) (Result, erro
 	for _, rc := range a.Repos {
 		extraRepos = append(extraRepos, rc.Git.RepoName)
 	}
-	out, emitted := formatSessionContext(results, wsName, wsResults, extraRepos, arch, bugs, deltas, deltaTotal, deltaBaseline, repoBudget)
+	out, emitted := formatSessionContext(results, wsName, wsResults, extraRepos, arch, bugs, deltas, deltaTotal, deltaBaseline, repoBudget, a.Features)
 	// Mark every memory rendered into this block as surfaced for the session, so the
 	// just-in-time read/edit hooks won't re-inject a guardrail/bug/todo the agent can
 	// already see here. Memories dropped under budget stay unmarked and still surface
@@ -354,7 +374,7 @@ func handlePostRead(ctx context.Context, a *app.App, ev Event) (Result, error) {
 	}
 
 	var msgs []string
-	if n > 1 {
+	if n > 1 && a.Features.On(features.RepeatedReads) {
 		_ = a.Ledger.Incr(ctx, "lifetime", "repeated_reads_blocked", 1)
 		msgs = append(msgs, fmt.Sprintf("You have already read %s in this session (%d times, ~%d tokens each). "+
 			"Rely on the earlier read instead of reading it again.", file, n, tokens))
@@ -372,7 +392,7 @@ func handlePostRead(ctx context.Context, a *app.App, ev Event) (Result, error) {
 	// the graph offers a structural alternative only when the file actually has symbols.
 	// Gated to the first read (n == 1) because a repeat already gets the stronger
 	// "rely on the earlier read" warning above — so this fires at most once per file.
-	if n == 1 && tokens >= int64(largeReadThreshold()) {
+	if n == 1 && tokens >= int64(largeReadThreshold()) && a.Features.On(features.LargeReads) && a.Features.On(features.GraphTools) {
 		if syms, err := target.Graph.Outline(ctx, target.Git.Worktree, rel); err == nil && len(syms) > 0 {
 			_ = a.Ledger.Incr(ctx, "lifetime", "large_reads_nudged", 1)
 			msgs = append(msgs, fmt.Sprintf("Recarto: %s is large (~%d tokens, %d symbols indexed). "+
@@ -392,19 +412,25 @@ func handlePostRead(ctx context.Context, a *app.App, ev Event) (Result, error) {
 // stored refs by path, so the file need not exist on disk.
 func anchoredNotes(ctx context.Context, a *app.App, sessionID string, target *app.RepoContext, rel string) []string {
 	var msgs []string
-	if found, err := target.Engine.BugsForCode(ctx, target.Git.Branch, []string{rel}, nil); err == nil {
-		if found = dedupSurfaced(ctx, a, sessionID, found); len(found) > 0 {
-			msgs = append(msgs, formatBugWarnings(rel, found))
+	if a.Features.On(features.BugWarnings) {
+		if found, err := target.Engine.BugsForCode(ctx, target.Git.Branch, []string{rel}, nil); err == nil {
+			if found = dedupSurfaced(ctx, a, sessionID, found); len(found) > 0 {
+				msgs = append(msgs, formatBugWarnings(rel, found))
+			}
 		}
 	}
-	if found, err := target.Engine.GuidanceForCode(ctx, target.Git.Branch, []string{rel}, nil); err == nil {
-		if found = dedupSurfaced(ctx, a, sessionID, found); len(found) > 0 {
-			msgs = append(msgs, formatGuidance(rel, found))
+	if a.Features.On(features.Guidance) {
+		if found, err := target.Engine.GuidanceForCode(ctx, target.Git.Branch, []string{rel}, nil); err == nil {
+			if found = dedupSurfaced(ctx, a, sessionID, found); len(found) > 0 {
+				msgs = append(msgs, formatGuidance(rel, found))
+			}
 		}
 	}
-	if found, err := target.Engine.TodosForCode(ctx, target.Git.Branch, []string{rel}, nil); err == nil {
-		if found = dedupSurfaced(ctx, a, sessionID, found); len(found) > 0 {
-			msgs = append(msgs, formatTodoReminders(rel, found))
+	if a.Features.On(features.Todos) {
+		if found, err := target.Engine.TodosForCode(ctx, target.Git.Branch, []string{rel}, nil); err == nil {
+			if found = dedupSurfaced(ctx, a, sessionID, found); len(found) > 0 {
+				msgs = append(msgs, formatTodoReminders(rel, found))
+			}
 		}
 	}
 	return msgs
@@ -454,7 +480,7 @@ func handlePostEdit(ctx context.Context, a *app.App, ev Event) (Result, error) {
 // also surfaces any kind=bug memories matching that pattern.
 func handleAugment(ctx context.Context, a *app.App, ev Event) (Result, error) {
 	pattern := ev.Pattern
-	if pattern == "" {
+	if pattern == "" || !a.Features.On(features.SearchHints) {
 		return Result{}, nil
 	}
 
@@ -506,7 +532,9 @@ func handleAugment(ctx context.Context, a *app.App, ev Event) (Result, error) {
 	if len(symLines) > 0 {
 		b.WriteString("Recarto code graph — symbols matching your search:\n")
 		b.WriteString(strings.Join(symLines, "\n"))
-		b.WriteString("\nUse get_code_snippet to read one symbol instead of the whole file.")
+		if a.Features.On(features.GraphTools) {
+			b.WriteString("\nUse get_code_snippet to read one symbol instead of the whole file.")
+		}
 	}
 
 	var bugResults []memory.RecallResult
@@ -586,6 +614,9 @@ const shellSearchNudge = "Recarto: next time, search with its MCP tools instead 
 // a served repo surfaces its anchored memories, deduped exactly like a Read —
 // without a Read's counters, repeat warning or large-file nudge.
 func handleShell(ctx context.Context, a *app.App, ev Event) (Result, error) {
+	if !a.Features.On(features.ShellHints) {
+		return Result{}, nil
+	}
 	var msgs []string
 	for _, p := range ev.Patterns {
 		res, err := handleAugment(ctx, a, Event{Kind: KindAugment, SessionID: ev.SessionID, Pattern: p})
@@ -596,7 +627,7 @@ func handleShell(ctx context.Context, a *app.App, ev Event) (Result, error) {
 			msgs = append(msgs, res.Context)
 		}
 	}
-	if len(ev.Patterns) > 0 && ev.SessionID != "" {
+	if len(ev.Patterns) > 0 && ev.SessionID != "" && a.Features.On(features.GraphTools) {
 		scope := "session:" + ev.SessionID
 		if n, err := a.Ledger.Get(ctx, scope, "shell_search_nudged"); err == nil && n == 0 {
 			_ = a.Ledger.Incr(ctx, scope, "shell_search_nudged", 1)
@@ -634,7 +665,10 @@ const stopNudgeEditThreshold = 3
 // fallback (low-edit sessions, memories already recorded, or any fault in the
 // nudge decision). Conversation-heavy low-edit sessions are exactly where
 // preference corrections surface, so it must not disappear with the nudge.
-const stopCaptureReminder = "recarto: before ending, record any new learnings (record_memory), bug fixes (record_bug), and preferences — e.g. if the user corrected your approach or stated a style/workflow choice. And if Recarto itself errored, ranked the wrong result first, confused you, or lacked a capability you needed this session, call report_recarto_issue so it can be fixed."
+const stopCaptureReminder = "recarto: before ending, record any new learnings (record_memory), bug fixes (record_bug), and preferences — e.g. if the user corrected your approach or stated a style/workflow choice."
+
+// stopIssueReminder follows stopCaptureReminder while issue reports are on.
+const stopIssueReminder = " And if Recarto itself errored, ranked the wrong result first, confused you, or lacked a capability you needed this session, call report_recarto_issue so it can be fixed."
 
 // handleStop closes the session row and, at most once per session, blocks the
 // stop with a capture nudge when the session edited code but recorded nothing.
@@ -675,16 +709,24 @@ func handleStop(ctx context.Context, a *app.App, ev Event) (Result, error) {
 	if a.Workspace != nil && a.Workspace.Sync != nil {
 		boundedSync(ctx, syncPushBudget, a.Workspace.Sync.Push)
 	}
-	if ev.StopActive {
+	// Without the memory tools there is nothing to remind the agent to call.
+	if ev.StopActive || !a.Features.On(features.MemoryTools) {
 		return Result{}, nil
 	}
+	reminder := ""
+	if a.Features.On(features.StopReminder) {
+		reminder = stopCaptureReminder
+		if a.Features.On(features.IssueReports) {
+			reminder += stopIssueReminder
+		}
+	}
 	edits, err := a.Ledger.Get(ctx, ev.SessionID, "edits")
-	if err != nil || edits < stopNudgeEditThreshold {
-		return Result{SystemMessage: stopCaptureReminder}, nil
+	if err != nil || edits < stopNudgeEditThreshold || !a.Features.On(features.StopNudge) {
+		return Result{SystemMessage: reminder}, nil
 	}
 	nudged, err := a.Ledger.Get(ctx, ev.SessionID, "stop_nudged")
 	if err != nil {
-		return Result{SystemMessage: stopCaptureReminder}, nil
+		return Result{SystemMessage: reminder}, nil
 	}
 	if nudged > 0 {
 		// The model just saw the block reason; re-showing the reminder is noise.
@@ -693,7 +735,7 @@ func handleStop(ctx context.Context, a *app.App, ev Event) (Result, error) {
 	var startedAt int64
 	if err := a.Store.DB.QueryRowContext(ctx,
 		`SELECT started_at FROM sessions WHERE id = ?`, ev.SessionID).Scan(&startedAt); err != nil {
-		return Result{SystemMessage: stopCaptureReminder}, nil
+		return Result{SystemMessage: reminder}, nil
 	}
 	// "Recorded anything" must count reinforcements too: Record on a near-dup
 	// bumps only updated_at (created_at stays with the original), and the
@@ -709,7 +751,7 @@ func handleStop(ctx context.Context, a *app.App, ev Event) (Result, error) {
 		`SELECT COUNT(*) FROM memories
 		  WHERE updated_at >= ? AND status = 'active' AND (branch IS NULL OR branch = ?)`,
 		startedAt, a.Git.Branch).Scan(&recorded); err != nil || recorded > 0 {
-		return Result{SystemMessage: stopCaptureReminder}, nil
+		return Result{SystemMessage: reminder}, nil
 	}
 	// A session that recorded only workspace-scoped or served-repo memories
 	// recorded something: the nudge must not fire on it. Workspace rows are
@@ -718,18 +760,20 @@ func handleStop(ctx context.Context, a *app.App, ev Event) (Result, error) {
 		if err := a.Workspace.Store.DB.QueryRowContext(ctx,
 			`SELECT COUNT(*) FROM memories WHERE updated_at >= ? AND status = 'active'`,
 			startedAt).Scan(&recorded); err != nil || recorded > 0 {
-			return Result{SystemMessage: stopCaptureReminder}, nil
+			return Result{SystemMessage: reminder}, nil
 		}
 	}
 	for _, rc := range a.Repos {
 		if err := rc.Store.DB.QueryRowContext(ctx,
 			`SELECT COUNT(*) FROM memories WHERE updated_at >= ? AND status = 'active'`,
 			startedAt).Scan(&recorded); err != nil || recorded > 0 {
-			return Result{SystemMessage: stopCaptureReminder}, nil
+			return Result{SystemMessage: reminder}, nil
 		}
 	}
 	_ = a.Ledger.Incr(ctx, ev.SessionID, "stop_nudged", 1)
-	return Result{Block: true, Reason: fmt.Sprintf(
-		"recarto: you made %d edits this session and recorded nothing. Record learnings, preferences (especially if the user corrected your approach), or bug fixes now (record_memory / record_bug) — and report_recarto_issue if Recarto itself misbehaved. Or finish if there's genuinely nothing to keep.",
-		edits)}, nil
+	reason := fmt.Sprintf("recarto: you made %d edits this session and recorded nothing. Record learnings, preferences (especially if the user corrected your approach), or bug fixes now (record_memory / record_bug)", edits)
+	if a.Features.On(features.IssueReports) {
+		reason += " — and report_recarto_issue if Recarto itself misbehaved"
+	}
+	return Result{Block: true, Reason: reason + ". Or finish if there's genuinely nothing to keep."}, nil
 }

@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -51,6 +52,8 @@ func clearRecartoEnv(t *testing.T) {
 	} {
 		t.Setenv(k, "")
 	}
+	// A developer's own config file must not switch features off under the tests.
+	t.Setenv("RECARTO_CONFIG", filepath.Join(t.TempDir(), "config.toml"))
 }
 
 func newTestApp(t *testing.T, branch string) *app.App {

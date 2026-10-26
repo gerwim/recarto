@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"git.gerwim.nl/gerwim/recarto/internal/features"
 )
 
 // Repairing a corrupt store is a BUILD-ASIDE operation: nothing at the store's
@@ -185,13 +187,14 @@ var repairVerify = func(ctx context.Context, db *sql.DB) error {
 }
 
 // AutoRepairEnabled reports whether automatic (non-manual) repair is permitted.
-// RECARTO_AUTO_REPAIR=0 disables it; `recarto repair` still works.
+// RECARTO_AUTO_REPAIR=0 or the auto-repair feature switched off disables it;
+// `recarto repair` still works.
 func AutoRepairEnabled() bool {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv("RECARTO_AUTO_REPAIR"))) {
 	case "0", "false", "off", "no":
 		return false
 	}
-	return true
+	return features.Load().On(features.AutoRepair)
 }
 
 // Repair rebuilds the store file at path from whatever is still readable in it.
