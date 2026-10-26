@@ -605,3 +605,36 @@ type phaseLog struct {
 }
 
 func (p *phaseLog) Phase(label string) { p.phases = append(p.phases, label) }
+
+// TestPythonLocalImportScope: a def's own import of a name does not change what
+// a class elsewhere in the file derives from, nor where its super() calls bind.
+func TestPythonLocalImportScope(t *testing.T) {
+	e := newTestEngine(t)
+	ctx := context.Background()
+	wt := t.TempDir()
+	for path, src := range map[string]string{
+		"a.py":   "class Base:\n    def ping(self): pass\n",
+		"b.py":   "class Base:\n    def ping(self): pass\n",
+		"app.py": "from a import Base\n\n\nclass Child(Base):\n    def run(self):\n        super().ping()\n\n\ndef unrelated():\n    from b import Base\n    return Base\n",
+	} {
+		if err := e.IndexFile(ctx, wt, path, []byte(src), 1, int64(len(src))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := e.Resolve(ctx, wt, noopProgress{}); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := pythonTargets(t, e, "extends"), []string{"Child -> Base @a.py (extends)"}; !slices.Equal(got, want) {
+		t.Errorf("extends %q, want %q", got, want)
+	}
+	if got, want := pythonTargets(t, e, "calls"), []string{"Child.run -> Base.ping @a.py (typed)"}; !slices.Equal(got, want) {
+		t.Errorf("calls %q, want %q", got, want)
+	}
+	sup, err := e.Implementations(ctx, wt, "Child", "up", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sup) != 1 || sup[0].Path != "a.py" {
+		t.Errorf("Implementations(Child, up) = %+v, want a.py's Base", sup)
+	}
+}

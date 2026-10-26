@@ -315,6 +315,19 @@ func TestParsePythonModules(t *testing.T) {
 		{"a/b/c.py", "import x.y as m\nclass C(m.Base): pass", "imports x.y ; extends Base x.y"},
 		{"a/b/c.py", "from . import sib\nclass C(sib.Base): pass", "imports sib a.b; extends Base a.b.sib"},
 		{"a/b/c.py", "class Base: pass\nclass C(Base, other.Mixin): pass", "extends Base ; extends Mixin "},
+		// a base sees the bindings of its class statement's scopes, as Python does:
+		// not a def's local import, nor an import or class statement after it in
+		// its own scope; a later one of the module once in a def, which runs later
+		{"m.py", "from a import Base\nclass C(Base): pass\ndef f():\n    from b import Base\n", "imports Base a; extends Base a; imports Base b"},
+		{"m.py", "from a import Base\ndef f():\n    from b import Base\nclass C(Base): pass\n", "imports Base a; imports Base b; extends Base a"},
+		{"m.py", "class O:\n    class I(Base): pass\nfrom a import Base\n", "extends Base ; imports Base a"},
+		{"m.py", "from a import Base\ndef f():\n    from b import Base\n    class L(Base): pass\n", "imports Base a; imports Base b; extends Base b"},
+		{"m.py", "def f():\n    class L(Base): pass\nfrom a import Base\n", "extends Base a; imports Base a"},
+		{"m.py", "class C(Base): pass\nfrom a import Base\n", "extends Base ; imports Base a"},
+		{"m.py", "from a import Base\nclass C(Base): pass\nfrom b import Base\n", "imports Base a; extends Base a; imports Base b"},
+		{"m.py", "from a import Base\nclass Base(Base): pass\nclass C(Base): pass\n", "imports Base a; extends Base a; extends Base "},
+		{"m.py", "class O:\n    from a import Base\n    class I(Base): pass\n    def m(self):\n        class L(Base): pass\n", "imports Base a; extends Base a; extends Base "},
+		{"m.py", "import a as m\nclass C(m.Base): pass\ndef f():\n    import b as m\n", "imports a ; extends Base a; imports b "},
 	} {
 		res, err := r.ParseFile("python", c.path, []byte(c.src))
 		if err != nil {

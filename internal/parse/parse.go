@@ -185,7 +185,7 @@ func (r *Registry) ParseFile(lang, path string, src []byte) (Result, error) {
 
 	captureNames := q.CaptureNames()
 	var res Result
-	py := pyFile{imports: map[string]pyImport{}, modules: map[string]string{}, types: map[pyName]string{}}
+	py := pyFile{names: map[string][]pyBinding{}, types: map[pyName]string{}}
 	matches := cur.Matches(q, tree.RootNode(), src)
 	for m := matches.Next(); m != nil; m = matches.Next() {
 		var name, recv, recvType, recvName, bindName, bindType string
@@ -301,6 +301,9 @@ func (r *Registry) ParseFile(lang, path string, src []byte) (Result, error) {
 				if defKind == "function" && pyMethodClass(defNode) != nil {
 					defKind = "method"
 				}
+				if defKind == "class" { // a base named after it means this class, once its statement ran
+					py.names[name] = append(py.names[name], pyBinding{scope: pyBindScope(defNode), at: defNode.EndByte(), class: true})
+				}
 			}
 			res.Symbols = append(res.Symbols, Symbol{
 				Kind: defKind, Name: name, QualifiedName: name, RecvType: recvType,
@@ -315,9 +318,17 @@ func (r *Registry) ParseFile(lang, path string, src []byte) (Result, error) {
 			if lang == "python" {
 				switch refKind {
 				case "import":
-					recv = py.addImport(path, name, importFrom, importAlias, isImportFrom)
+					recv = py.addImport(path, name, importFrom, importAlias, isImportFrom, pyBindScope(&refNode), sb)
 				case "extends":
-					py.bases = append(py.bases, pyBase{edge: len(res.Edges), qualifier: pyBaseQualifier(refNode, src)})
+					cls := refNode.Parent()
+					for cls != nil && cls.Kind() != "class_definition" {
+						cls = cls.Parent()
+					}
+					if cls != nil {
+						scopes, defBody := pyLookupScopes(cls)
+						py.bases = append(py.bases, pyBase{edge: len(res.Edges), qualifier: pyBaseQualifier(refNode, src),
+							at: cls.StartByte(), scopes: scopes, defBody: defBody})
+					}
 				}
 			}
 			res.Edges = append(res.Edges, Edge{
@@ -348,25 +359,36 @@ func (r *Registry) ParseFile(lang, path string, src []byte) (Result, error) {
 	return res, nil
 }
 
-// pyFile collects what the Python passes need from every match: the file's
-// imports and each def's parameter and local types, for the bases and self.x
-// bindings found along the way.
+// pyFile collects what the Python passes need from every match: what imports and
+// class statements bind each name, and each def's parameter and local types, for
+// the bases and self.x bindings found along the way.
 type pyFile struct {
-	imports map[string]pyImport // name bound by `from M import X [as name]`
-	modules map[string]string   // name bound by `import a.b [as name]` -> its module
-	types   map[pyName]string
-	bases   []pyBase
-	attrs   []pyAttr
+	names map[string][]pyBinding
+	types map[pyName]string
+	bases []pyBase
+	attrs []pyAttr
 }
 
-// pyImport is a name a from-import binds: class (or function, or submodule)
-// name of module.
-type pyImport struct{ module, name string }
+// pyBinding is what binds a name in a scope (the def or class whose body holds
+// the statement, 0 for the module) from byte at on: `from M import X [as name]`
+// (module M, name X), `import a.b [as name]` (module a.b, or a), or a class
+// statement of the file.
+type pyBinding struct {
+	scope        uintptr
+	at           uint
+	module, name string
+	class        bool
+}
 
-// pyBase is an extends edge and what qualifies its base: "m" for m.Base.
+// pyBase is an extends edge, what qualifies its base ("m" for m.Base), and where
+// its class statement reads that name: at byte at, in scopes (see
+// pyLookupScopes), the first of them a def's body when defBody.
 type pyBase struct {
 	edge      int
 	qualifier string
+	at        uint
+	scopes    []uintptr
+	defBody   bool
 }
 
 // pyName is a name bound in a def (identified by its node id; 0 is module level).
@@ -383,24 +405,48 @@ type pyAttr struct {
 	def             uintptr
 }
 
-// addImport records the names an import binds and returns the module a
-// from-import reads (a relative one resolved against path's package), which the
-// edge carries so it resolves to that module's X rather than any X.
-func (py *pyFile) addImport(path, name, from, alias string, isFrom bool) string {
+// addImport records the name an import binds in scope from byte at on, and
+// returns the module a from-import reads (a relative one resolved against
+// path's package), which the edge carries so it resolves to that module's X
+// rather than any X.
+func (py *pyFile) addImport(path, name, from, alias string, isFrom bool, scope uintptr, at uint) string {
+	b := pyBinding{scope: scope, at: at}
 	if !isFrom { // import a.b [as m]: m, or else a, is a module
 		if alias == "" {
 			name, _, _ = strings.Cut(name, ".")
 			alias = name
 		}
-		py.modules[alias] = name
+		b.module = name
+		py.names[alias] = append(py.names[alias], b)
 		return ""
 	}
-	module := pyModule(path, from)
+	b.module, b.name = pyModule(path, from), name
 	if alias == "" {
 		alias = name
 	}
-	py.imports[alias] = pyImport{module, name}
-	return module
+	py.names[alias] = append(py.names[alias], b)
+	return b.module
+}
+
+// lookup returns what name denotes in base b's class statement, as Python
+// finds it: the innermost of b's scopes that binds it, by its last binding
+// before the statement — or by its last binding at all in a scope that reaches
+// the statement through a def, which runs once that scope has.
+func (py *pyFile) lookup(name string, b pyBase) (pyBinding, bool) {
+	for i, s := range b.scopes {
+		late := i >= 2 || (i == 1 && b.defBody)
+		var best pyBinding
+		found := false
+		for _, d := range py.names[name] {
+			if d.scope == s && (late || d.at < b.at) && (!found || d.at > best.at) {
+				best, found = d, true
+			}
+		}
+		if found {
+			return best, true
+		}
+	}
+	return pyBinding{}, false
 }
 
 // finish names each base after the class it denotes — an imported alias's real
@@ -410,15 +456,19 @@ func (py *pyFile) finish(res *Result) {
 	for _, b := range py.bases {
 		e := &res.Edges[b.edge]
 		if b.qualifier == "" { // `class C(Base)`: Base may be imported, maybe as an alias
-			if imp, ok := py.imports[e.DstName]; ok {
+			if imp, ok := py.lookup(e.DstName, b); ok && imp.name != "" {
 				e.DstName, e.Recv = imp.name, imp.module
 			}
 			continue
 		}
 		// `class C(m.Base)`: m is an imported module, or a from-imported submodule
 		first, rest, dotted := strings.Cut(b.qualifier, ".")
-		module := py.modules[first]
-		if imp, ok := py.imports[first]; ok {
+		imp, ok := py.lookup(first, b)
+		if !ok || imp.class {
+			continue
+		}
+		module := imp.module
+		if imp.name != "" {
 			module = strings.TrimPrefix(imp.module+"."+imp.name, ".")
 		}
 		if module != "" && dotted {
@@ -468,6 +518,36 @@ func pyBaseQualifier(n sitter.Node, src []byte) string {
 		}
 	}
 	return ""
+}
+
+// pyBindScope returns the scope n's statement binds names in: the node id of the
+// def or class whose body holds it, 0 for the module.
+func pyBindScope(n *sitter.Node) uintptr {
+	for p := n.Parent(); p != nil; p = p.Parent() {
+		if k := p.Kind(); k == "function_definition" || k == "class_definition" {
+			return p.Id()
+		}
+	}
+	return 0
+}
+
+// pyLookupScopes returns the scopes a name in n's statement is looked up in,
+// innermost first: n's own (pyBindScope), the defs around it — a class body is no
+// scope for what nests in it — and the module, 0. defBody reports whether the
+// first is a def.
+func pyLookupScopes(n *sitter.Node) (scopes []uintptr, defBody bool) {
+	for p := n.Parent(); p != nil; p = p.Parent() {
+		switch p.Kind() {
+		case "function_definition":
+			defBody = defBody || len(scopes) == 0
+			scopes = append(scopes, p.Id())
+		case "class_definition":
+			if len(scopes) == 0 {
+				scopes = append(scopes, p.Id())
+			}
+		}
+	}
+	return append(scopes, 0), defBody
 }
 
 // pyScope returns the name byte of n's innermost enclosing class and the node id
