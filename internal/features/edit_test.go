@@ -8,7 +8,9 @@ import (
 	"regexp"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
+	"time"
 )
 
 var ansi = regexp.MustCompile("\x1b\\[[0-9;?]*[A-Za-z]")
@@ -24,10 +26,111 @@ func newEditor(t *testing.T) *editor {
 }
 
 func TestKeys(t *testing.T) {
-	in := "j\x1b[A\x1bOB\x1b[H\x1b[4~ \r\x1b\x03q\x1b[1;5Aé\x1b["
+	in := "j\x1b[A\x1bOB\x1b[H\x1b[4~ \r\x1b\x03q\x1b[1;5Aé"
 	want := []string{"j", "up", "down", "home", "end", " ", "enter", "esc", "ctrl-c", "q", "é"}
-	if got := keys([]byte(in)); strings.Join(got, ",") != strings.Join(want, ",") {
-		t.Errorf("keys = %q, want %q", got, want)
+	if got, rest := keys([]byte(in)); strings.Join(got, ",") != strings.Join(want, ",") || rest != nil {
+		t.Errorf("keys = %q, %q; want %q", got, rest, want)
+	}
+}
+
+// TestKeysKeepCutOffInput: what a read cut off mid key comes back as rest.
+func TestKeysKeepCutOffInput(t *testing.T) {
+	for in, want := range map[string]struct{ keys, rest string }{
+		"j\x1b":       {"j", "\x1b"},
+		"j\x1b[":      {"j", "\x1b["},
+		"\x1bO":       {"", "\x1bO"},
+		"\x1b[1;5":    {"", "\x1b[1;5"},
+		"q\xc3":       {"q", "\xc3"}, // the first byte of é
+		"\x1bj\x1b[B": {"esc,j,down", ""},
+	} {
+		got, rest := keys([]byte(in))
+		if strings.Join(got, ",") != want.keys || string(rest) != want.rest {
+			t.Errorf("keys(%q) = %q, %q; want %q, %q", in, got, rest, want.keys, want.rest)
+		}
+	}
+}
+
+// waits makes e hand the test each wait it starts for the rest of a key, so
+// the test decides whether the rest comes first or the wait runs out.
+func waits(e *editor) chan chan time.Time {
+	c := make(chan chan time.Time, 8)
+	e.after = func(time.Duration) <-chan time.Time {
+		w := make(chan time.Time, 1)
+		c <- w
+		return w
+	}
+	return c
+}
+
+// start runs e on keys typed into the returned pipe, drawing into frames.
+// The pipe closes when the editor ends, so typing into an ended editor fails.
+func start(e *editor, drawn io.Writer, stop chan os.Signal) (*io.PipeWriter, chan error) {
+	in, typing := io.Pipe()
+	done := make(chan error, 1)
+	go func() {
+		done <- e.run(in, drawn, func() (int, int) { return 80, 40 }, nil, stop)
+		in.Close()
+	}()
+	return typing, done
+}
+
+func TestEditorJoinsKeysSplitAcrossReads(t *testing.T) {
+	e := newEditor(t)
+	waits(e) // never run out: the rest of each key comes first
+	typing, done := start(e, io.Discard, nil)
+	for _, chunk := range []string{"\x1b[", "B", "\x1b", "[B", "\x1bO", "B", "\x1b[", "1;5", "A", "q"} {
+		if _, err := typing.Write([]byte(chunk)); err != nil {
+			t.Fatalf("editor ended before %q (cursor %d): %v", chunk, e.cursor, err)
+		}
+	}
+	if err := <-done; err != nil || e.cursor != 3 {
+		t.Errorf("err %v, cursor %d; want three downs and an ignored ctrl-up", err, e.cursor)
+	}
+}
+
+func TestEditorEscapeAloneQuitsOnceTheWaitRunsOut(t *testing.T) {
+	e := newEditor(t)
+	w := waits(e)
+	drawn := make(frames)
+	typing, done := start(e, drawn, nil)
+	<-drawn
+	if _, err := typing.Write([]byte("\x1b")); err != nil {
+		t.Fatal(err)
+	}
+	<-drawn              // the ESC is read and waiting
+	(<-w) <- time.Time{} // and nothing follows it
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestEditorDropsACutOffSequenceOnceTheWaitRunsOut(t *testing.T) {
+	e := newEditor(t)
+	w := waits(e)
+	drawn := make(frames)
+	typing, done := start(e, drawn, nil)
+	<-drawn
+	if _, err := typing.Write([]byte("\x1b[")); err != nil {
+		t.Fatal(err)
+	}
+	<-drawn
+	(<-w) <- time.Time{}
+	<-drawn // the cut-off sequence is dropped without ending the editor
+	if _, err := typing.Write([]byte("j q")); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil || e.cursor != 1 || e.set.On(CodeMap) {
+		t.Errorf("err %v, cursor %d, code-map on %v; want j, space and q applied", err, e.cursor, e.set.On(CodeMap))
+	}
+}
+
+func TestEditorEndsOnAStopSignal(t *testing.T) {
+	stop := make(chan os.Signal, 1)
+	stop <- syscall.SIGTERM
+	typing, done := start(newEditor(t), io.Discard, stop)
+	defer typing.Close()
+	if err := <-done; err == nil || err.Error() != "terminated" {
+		t.Errorf("err = %v, want terminated", err)
 	}
 }
 
@@ -37,7 +140,7 @@ func TestEditorTogglesAndSavesAtOnce(t *testing.T) {
 	// then back on; quit.
 	in := strings.NewReader("jj \x1b[F x\x1b[Aq")
 	var out strings.Builder
-	if err := e.run(in, &out, func() (int, int) { return 80, 40 }, nil); err != nil {
+	if err := e.run(in, &out, func() (int, int) { return 80, 40 }, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	s, err := Read(e.path)
@@ -80,7 +183,7 @@ func TestEditorQuits(t *testing.T) {
 		}
 	}
 	// End of input ends the editor too.
-	if err := newEditor(t).run(strings.NewReader("j"), &strings.Builder{}, func() (int, int) { return 80, 24 }, nil); err != nil {
+	if err := newEditor(t).run(strings.NewReader("j"), &strings.Builder{}, func() (int, int) { return 80, 24 }, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -143,7 +246,7 @@ func TestEditorRedrawsOnResize(t *testing.T) {
 	defer typing.Close()
 	drawn := make(frames)
 	done := make(chan error)
-	go func() { done <- e.run(in, drawn, func() (int, int) { return int(width.Load()), 40 }, resized) }()
+	go func() { done <- e.run(in, drawn, func() (int, int) { return int(width.Load()), 40 }, resized, nil) }()
 	before := <-drawn
 	width.Store(30)
 	resized <- os.Interrupt // any signal: run only needs to hear of the resize

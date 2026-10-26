@@ -7,6 +7,8 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"syscall"
+	"time"
 	"unicode/utf8"
 
 	"golang.org/x/term"
@@ -21,9 +23,8 @@ func Edit(path string, in, out *os.File) error {
 	}
 	start := maps.Clone(s)
 	e := &editor{path: path, set: s, color: os.Getenv("NO_COLOR") == ""}
-	if err := e.onTerminal(in, out); err != nil {
-		return err
-	}
+	err = e.onTerminal(in, out)
+	// Every change is saved as it is made, so report them however the editor ended.
 	changed := false
 	for _, f := range all {
 		if on := e.set.On(f); on != start.On(f) {
@@ -34,7 +35,7 @@ func Edit(path string, in, out *os.File) error {
 	if changed {
 		fmt.Fprintf(out, "Saved to %s\n", path)
 	}
-	return nil
+	return err
 }
 
 // OnOff names a feature state.
@@ -46,8 +47,12 @@ func OnOff(on bool) string {
 }
 
 // onTerminal runs the editor full screen in raw mode, restoring the terminal
-// however it ends.
+// however it ends: a quit key, the end of input, or a signal to stop.
 func (e *editor) onTerminal(in, out *os.File) error {
+	// Catch the signals before raw mode, so none can end the process in between.
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+	defer signal.Stop(stop)
 	fd := int(in.Fd())
 	old, err := term.MakeRaw(fd)
 	if err != nil {
@@ -62,11 +67,11 @@ func (e *editor) onTerminal(in, out *os.File) error {
 	defer signal.Stop(resized)
 	return e.run(in, out, func() (int, int) {
 		w, h, err := term.GetSize(int(out.Fd()))
-		if err != nil {
+		if err != nil || w <= 0 || h <= 0 { // a terminal without a set size reports 0x0
 			return 80, 24
 		}
 		return w, h
-	}, resized)
+	}, resized, stop)
 }
 
 // editor is the state of the interactive feature list.
@@ -78,44 +83,74 @@ type editor struct {
 	status string // outcome of the last change
 	failed bool   // status is an error
 	color  bool
+	// after starts the wait for the rest of an escape sequence; nil is time.After.
+	after func(time.Duration) <-chan time.Time
 }
 
+// escDelay is how long input cut off mid escape sequence waits for its rest.
+// A lone ESC still alone after it is the Escape key.
+const escDelay = 100 * time.Millisecond
+
 // run draws the editor and applies the keys read from in until the user
-// quits or in ends, redrawing too when the terminal is resized.
-func (e *editor) run(in io.Reader, out io.Writer, size func() (int, int), resized <-chan os.Signal) error {
+// quits, in ends or a signal arrives on stop, redrawing too when the terminal
+// is resized. A key cut off by the end of a read waits escDelay for its rest.
+func (e *editor) run(in io.Reader, out io.Writer, size func() (int, int), resized, stop <-chan os.Signal) error {
 	type input struct {
-		keys []string
-		err  error
+		b   []byte
+		err error
 	}
 	inputs := make(chan input, 1)
 	go func() {
-		buf := make([]byte, 64)
 		for {
+			buf := make([]byte, 64)
 			n, err := in.Read(buf)
-			inputs <- input{keys(buf[:n]), err}
+			inputs <- input{buf[:n], err}
 			if err != nil {
 				return
 			}
 		}
 	}()
+	after := e.after
+	if after == nil {
+		after = time.After
+	}
+	var pending []byte        // input cut off at the end of the last read
+	var wait <-chan time.Time // runs out escDelay after pending was cut off
 	for {
 		if _, err := io.WriteString(out, e.view(size())); err != nil {
 			return err
 		}
+		var ks []string
+		var err error
 		select {
 		case <-resized:
-		case in := <-inputs:
-			for _, k := range in.keys {
-				if e.handle(k) {
-					return nil
-				}
+		case sig := <-stop:
+			return fmt.Errorf("%v", sig)
+		case <-wait:
+			// Nothing completed the cut-off input: a lone ESC is the Escape
+			// key; anything else is no key the editor uses.
+			if string(pending) == "\x1b" {
+				ks = []string{"esc"}
 			}
-			if in.err == io.EOF {
+			pending, wait = nil, nil
+		case in := <-inputs:
+			ks, pending = keys(append(pending, in.b...))
+			wait = nil
+			if len(pending) > 0 {
+				wait = after(escDelay)
+			}
+			err = in.err
+		}
+		for _, k := range ks {
+			if e.handle(k) {
 				return nil
 			}
-			if in.err != nil {
-				return in.err
-			}
+		}
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return err
 		}
 	}
 }
@@ -275,19 +310,22 @@ var escKeys = map[string]string{
 }
 
 // keys splits raw terminal input into key names: "up", "down", "home", "end",
-// "enter", "esc", "ctrl-c", or the typed character itself.
-func keys(b []byte) []string {
-	var out []string
+// "enter", "esc", "ctrl-c", or the typed character itself. Input cut off at
+// the end — a lone ESC, an unfinished escape sequence or character — comes
+// back as rest, for the next read to complete.
+func keys(b []byte) (out []string, rest []byte) {
 	for len(b) > 0 {
 		k, n := "", 1
 		switch c := b[0]; {
-		case c == 0x1b && len(b) > 1 && (b[1] == '[' || b[1] == 'O'):
+		case c == 0x1b && len(b) == 1:
+			return out, b // the Escape key, or the start of a sequence
+		case c == 0x1b && (b[1] == '[' || b[1] == 'O'):
 			n = 2
 			for n < len(b) && (b[n] < 0x40 || b[n] > 0x7e) {
 				n++
 			}
 			if n == len(b) {
-				return out // a sequence cut off by the read
+				return out, b
 			}
 			n++
 			k = escKeys[string(b[2:n])]
@@ -297,6 +335,8 @@ func keys(b []byte) []string {
 			k = "enter"
 		case c == 3:
 			k = "ctrl-c"
+		case !utf8.FullRune(b):
+			return out, b
 		default:
 			var r rune
 			r, n = utf8.DecodeRune(b)
@@ -307,5 +347,5 @@ func keys(b []byte) []string {
 		}
 		b = b[n:]
 	}
-	return out
+	return out, nil
 }
