@@ -867,7 +867,8 @@ SELECT ed.id, m.id, 0.45, 'ctor'
 // stratInterface (S4, C#/Rust/Python): the receiver's bound type T is an interface, base
 // class or trait; expand to <method> on each implementing/deriving type (a Rust
 // impl block), found via the extends edges (X extends/implements T) and X's
-// contained methods. Confidence 0.5 — a set of possible dispatch targets. Go interfaces are structural (no
+// contained methods, in the call's language family (a C# T is never a Python
+// call's). Confidence 0.5 — a set of possible dispatch targets. Go interfaces are structural (no
 // extends edge), so this yields nothing for Go (intended: Go stays S5).
 const stratInterface = `
 INSERT OR IGNORE INTO edge_candidates(edge_id, dst_node_id, confidence, method)
@@ -885,7 +886,13 @@ SELECT ed.id, m.id, 0.5, 'iface'
   CROSS JOIN edges cm  ON cm.kind = 'contains' AND cm.src_node_id = ext.src_node_id
   CROSS JOIN nodes m   ON m.id = cm.dst_node_id AND m.kind = 'method' AND m.name = ed.dst_name
   JOIN files mf  ON mf.id = m.file_id
- WHERE ef.worktree = ? AND mf.worktree = ?`
+ WHERE ef.worktree = ? AND mf.worktree = ?
+   AND ( ef.language = mf.language
+         OR ( ef.language IN ('typescript','tsx','javascript')
+              AND mf.language IN ('typescript','tsx','javascript') ) )
+   -- Python: a class the call's own file declares shadows same-named ones elsewhere
+   AND NOT ( ef.language = 'python' AND iface.file_id <> ed.file_id
+             AND EXISTS (SELECT 1 FROM nodes lc WHERE lc.file_id = ed.file_id AND lc.kind = 'class' AND lc.name = iface.name) )`
 
 // stratTypedReceiverShared (S2) and stratInterfaceShared (S4) are the full-Resolve
 // forms of the two receiver strategies. They read the recv_types temp table
@@ -907,7 +914,10 @@ SELECT rt.edge_id, m.id, 0.9, 'typed'
  WHERE mf.worktree = ?
    AND ( rt.ef_language = mf.language
          OR ( rt.ef_language IN ('typescript','tsx','javascript')
-              AND mf.language IN ('typescript','tsx','javascript') ) )`
+              AND mf.language IN ('typescript','tsx','javascript') ) )
+   -- Python: a class the call's own file declares shadows same-named ones elsewhere
+   AND NOT ( rt.ef_language = 'python' AND m.file_id <> rt.file_id
+             AND EXISTS (SELECT 1 FROM nodes lc WHERE lc.file_id = rt.file_id AND lc.kind = 'class' AND lc.name = m.parent_name) )`
 
 const stratInterfaceShared = `
 INSERT OR IGNORE INTO edge_candidates(edge_id, dst_node_id, confidence, method)
@@ -918,15 +928,23 @@ SELECT rt.edge_id, m.id, 0.5, 'iface'
   CROSS JOIN edges cm  ON cm.kind = 'contains' AND cm.src_node_id = ext.src_node_id
   CROSS JOIN nodes m   ON m.id = cm.dst_node_id AND m.kind = 'method' AND m.name = rt.dst_name
   JOIN files mf  ON mf.id = m.file_id
- WHERE mf.worktree = ?`
+ WHERE mf.worktree = ?
+   AND ( rt.ef_language = mf.language
+         OR ( rt.ef_language IN ('typescript','tsx','javascript')
+              AND mf.language IN ('typescript','tsx','javascript') ) )
+   -- Python: a class the call's own file declares shadows same-named ones elsewhere
+   AND NOT ( rt.ef_language = 'python' AND iface.file_id <> rt.file_id
+             AND EXISTS (SELECT 1 FROM nodes lc WHERE lc.file_id = rt.file_id AND lc.kind = 'class' AND lc.name = iface.name) )`
 
 // stratInherited (S2b, Python): the receiver names a class T — its bound type,
 // as for S2, or the receiver itself, as for S3 — that does not declare the
 // method; bind to the declaration on T's nearest ancestor along the resolved
 // extends edges, the one Python's attribute lookup finds (overrides below T are
-// S4's). Confidence 0.9, as for S2: the type is as certain. A T declared in the
-// call's own file shadows same-named classes elsewhere (self's class always is).
-// The full Resolve reads S2's recv_types; the incremental one binds inline.
+// S4's). Confidence 0.9, as for S2: the type is as certain. T is a Python class
+// of the call's worktree, and one declared in the call's own file shadows
+// same-named classes elsewhere (self's class always is) — the rule S2, S3 and
+// S4 apply to Python calls too. The full Resolve reads S2's recv_types; the
+// incremental one binds inline.
 const stratInherited = `
 INSERT OR IGNORE INTO edge_candidates(edge_id, dst_node_id, confidence, method)
 WITH RECURSIVE calls AS MATERIALIZED (
@@ -970,7 +988,9 @@ const stratInheritedTail = `
   UNION ALL
   SELECT p.type_name, p.file_id, t.id
     FROM pairs p
+    JOIN files pf ON pf.id = p.file_id
     CROSS JOIN nodes t ON t.name = p.type_name AND t.kind = 'class'
+    JOIN files tf ON tf.id = t.file_id AND tf.language = 'python' AND tf.worktree = pf.worktree
    WHERE NOT EXISTS (SELECT 1 FROM local l WHERE l.type_name = p.type_name AND l.file_id = p.file_id)
 ), anc(root_id, node_id, depth) AS (
   SELECT DISTINCT root_id, root_id, 0 FROM roots
@@ -1032,7 +1052,10 @@ SELECT ed.id, m.id, 0.9, 'static'
  WHERE ef.worktree = ? AND mf.worktree = ?
    AND ( ef.language = mf.language
          OR ( ef.language IN ('typescript','tsx','javascript')
-              AND mf.language IN ('typescript','tsx','javascript') ) )`
+              AND mf.language IN ('typescript','tsx','javascript') ) )
+   -- Python: a class the call's own file declares shadows same-named ones elsewhere
+   AND NOT ( ef.language = 'python' AND m.file_id <> ed.file_id
+             AND EXISTS (SELECT 1 FROM nodes lc WHERE lc.file_id = ed.file_id AND lc.kind = 'class' AND lc.name = m.parent_name) )`
 
 // stratSelf (S1): a bare M() or this.M() inside a class binds to a sibling method
 // of the same class, linked via contains edges (class -> caller, class -> target).
@@ -1082,7 +1105,10 @@ SELECT ed.id, m.id, 0.9, 'typed'
  WHERE ef.worktree = ? AND mf.worktree = ?
    AND ( ef.language = mf.language
          OR ( ef.language IN ('typescript','tsx','javascript')
-              AND mf.language IN ('typescript','tsx','javascript') ) )`
+              AND mf.language IN ('typescript','tsx','javascript') ) )
+   -- Python: a class the call's own file declares shadows same-named ones elsewhere
+   AND NOT ( ef.language = 'python' AND m.file_id <> ed.file_id
+             AND EXISTS (SELECT 1 FROM nodes lc WHERE lc.file_id = ed.file_id AND lc.kind = 'class' AND lc.name = m.parent_name) )`
 
 // stratNameFallback (S5): name-only fallback — any same-name callable in the
 // language family (no method for a bare Rust/Python call), capped per edge

@@ -64,11 +64,11 @@
 ; self.x = param: the attribute takes the parameter's annotated type (ParseFile)
 (assignment left: (attribute object: (identifier) @_self attribute: (identifier) @bind.attr)
   right: (identifier) @bind.from (#eq? @_self "self"))
-; a method's first parameter, self or cls, is its class (scoped to the method)
-(class_definition name: (identifier) @bind.type body: (block [
-  (function_definition parameters: (parameters . [(identifier) @bind.name (typed_parameter . (identifier) @bind.name)]))
-  (decorated_definition definition: (function_definition parameters: (parameters . [(identifier) @bind.name (typed_parameter . (identifier) @bind.name)])))
-]) (#any-of? @bind.name "self" "cls"))
+; a method's first parameter, self or cls, is its class (scoped to the method);
+; ParseFile names the class by the rule that makes the def a method, so a def
+; under a class-body if or try counts too
+(function_definition parameters: (parameters . [(identifier) @bind.recv (typed_parameter . (identifier) @bind.recv)])
+  (#any-of? @bind.recv "self" "cls"))
 
 ; a class's first positional base, which super() and super(C, self) resolve to
 (class_definition name: (identifier) @super.class superclasses: (argument_list . [

@@ -132,6 +132,7 @@ func TestParsePython(t *testing.T) {
 	}
 	wantBinds := []string{
 		"self:Circle", "repo:Repo", "cache:Cache", "x:int", "self:Circle", "self:Config",
+		"cls:Circle", // typed(cls), declared under the class body's if
 		"c:Circle", "s:Square", "t:Shape",
 		// class-level fields, self.x = T(), and self.x = param via its annotation
 		"self.radius:float", "self.store:Store", "self.repo:Repo", "self.cache:Cache", "self.log:Logger",
@@ -266,6 +267,31 @@ func TestParsePythonSelfAttrs(t *testing.T) {
 		}
 		if want := strings.Fields(c.want); !slices.Equal(got, want) {
 			t.Errorf("%q: self bindings %v, want %v", c.src, got, want)
+		}
+	}
+}
+
+// TestParsePythonMethodReceivers: a method's self/cls is bound to its class by
+// the rule that makes the def a method, whatever block of the class body
+// declares it; a function's first parameter is bound to nothing.
+func TestParsePythonMethodReceivers(t *testing.T) {
+	parsePy := pythonParser(t)
+	for _, c := range []struct{ src, want string }{
+		{"class C:\n    def m(self): pass", "self:C"},
+		{"class C:\n    @classmethod\n    def m(cls): pass", "cls:C"},
+		{"class C:\n    if X:\n        def m(self): pass", "self:C"},
+		{"class C:\n    try:\n        @property\n        def m(self): pass\n    except E:\n        pass", "self:C"},
+		{"class C:\n    class D:\n        def m(self): pass", "self:D"},
+		{"class C:\n    def m(other): pass", ""},
+		{"def f(self): pass", ""},
+		{"class C:\n    def m(this):\n        def inner(self): pass", ""}, // inner is a function
+	} {
+		var got []string
+		for _, b := range parsePy(c.src).Bindings {
+			got = append(got, b.Name+":"+b.TypeName)
+		}
+		if want := strings.Fields(c.want); !slices.Equal(got, want) {
+			t.Errorf("%q: bindings %v, want %v", c.src, got, want)
 		}
 	}
 }

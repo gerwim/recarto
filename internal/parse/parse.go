@@ -237,6 +237,17 @@ func (r *Registry) ParseFile(lang, path string, src []byte) (Result, error) {
 				bindType = strings.TrimPrefix(c.Node.Utf8Text(src), "*")
 			case cn == "bind.self":
 				isSelf, selfByte = true, c.Node.StartByte()
+			case cn == "bind.recv": // Python self/cls: the class of the def it opens
+				def := c.Node.Parent()
+				for def != nil && def.Kind() != "function_definition" {
+					def = def.Parent()
+				}
+				if cls := pyMethodClass(def); cls != nil {
+					if nm := cls.ChildByFieldName("name"); nm != nil {
+						bindName, bindByte, bindType = c.Node.Utf8Text(src), c.Node.StartByte(), nm.Utf8Text(src)
+						bindClass, bindDef = pyScope(&c.Node)
+					}
+				}
 			case cn == "super.base":
 				superBase = c.Node.Utf8Text(src)
 			case cn == "super.class":
@@ -288,7 +299,7 @@ func (r *Registry) ParseFile(lang, path string, src []byte) (Result, error) {
 				if p := defNode.Parent(); p != nil && p.Kind() == "decorated_definition" {
 					sb, sl = p.StartByte(), p.StartPosition().Row+1
 				}
-				if defKind == "function" && pyInClass(defNode) {
+				if defKind == "function" && pyMethodClass(defNode) != nil {
 					defKind = "method"
 				}
 			}
@@ -403,18 +414,21 @@ func pyScope(n *sitter.Node) (class uint, def uintptr) {
 	return 0, def
 }
 
-// pyInClass reports whether a def's nearest enclosing def or class is a class,
-// which makes it a method.
-func pyInClass(n *sitter.Node) bool {
-	for p := n.Parent(); p != nil; p = p.Parent() {
+// pyMethodClass returns the class a def is a method of: its nearest enclosing
+// def or class, when that is a class. Nil for a function, or a nil def.
+func pyMethodClass(def *sitter.Node) *sitter.Node {
+	if def == nil {
+		return nil
+	}
+	for p := def.Parent(); p != nil; p = p.Parent() {
 		switch p.Kind() {
 		case "class_definition":
-			return true
+			return p
 		case "function_definition":
-			return false
+			return nil
 		}
 	}
-	return false
+	return nil
 }
 
 // pyLiterals are the receiver kinds whose methods are the builtins' (", ".join,
