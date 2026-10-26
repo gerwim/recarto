@@ -118,7 +118,7 @@ func TestFormatDeltaTierDegradesUnderBudgetWithLongNames(t *testing.T) {
 		{Path: "internal/the/module/f1.go", QualifiedName: fmt.Sprintf("%s1", long), Kind: "method", Change: "added"},
 		{Path: "internal/the/module/f2.go", QualifiedName: fmt.Sprintf("%s2", long), Kind: "method", Change: "added"},
 	}
-	out := formatDeltaTier(deltas, 3, 1749340800000)
+	out := formatDeltaTier(deltas, 3, 1749340800000, true)
 	if got := ledger.EstimateTokens(out); got > deltaTierBudget {
 		t.Errorf("degraded tier costs %d tokens, budget %d:\n%s", got, deltaTierBudget, out)
 	}
@@ -128,6 +128,17 @@ func TestFormatDeltaTierDegradesUnderBudgetWithLongNames(t *testing.T) {
 	if !strings.Contains(out, "get_graph_delta") {
 		t.Errorf("drill-down pointer must survive degradation:\n%s", out)
 	}
+
+	out = formatDeltaTier(deltas, 3, 1749340800000, false)
+	if got := ledger.EstimateTokens(out); got > deltaTierBudget {
+		t.Errorf("degraded tier costs %d tokens, budget %d:\n%s", got, deltaTierBudget, out)
+	}
+	if !strings.Contains(out, "(Jun") {
+		t.Errorf("degradation must never strip the baseline date from the header:\n%s", out)
+	}
+	if strings.Contains(out, "get_graph_delta") {
+		t.Errorf("graph-tools off must not point at get_graph_delta:\n%s", out)
+	}
 }
 
 func TestFormatDeltaTier(t *testing.T) {
@@ -136,7 +147,7 @@ func TestFormatDeltaTier(t *testing.T) {
 		{Path: "internal/mcp/graph.go", QualifiedName: "getCodeSnippet", Kind: "function", Change: "changed"},
 		{Path: "internal/parse/parse.go", QualifiedName: "ParseFile", Kind: "function", Change: "changed"},
 	}
-	out := formatDeltaTier(deltas, 3, 1749340800000) // 2025-06-08 (any fixed ms)
+	out := formatDeltaTier(deltas, 3, 1749340800000, true) // 2025-06-08 (any fixed ms)
 	if !strings.Contains(out, "Changed since your last working session") {
 		t.Errorf("missing tier header: %q", out)
 	}
@@ -152,7 +163,16 @@ func TestFormatDeltaTier(t *testing.T) {
 	if got := ledger.EstimateTokens(out); got > deltaTierBudget {
 		t.Errorf("tier costs %d tokens, budget %d", got, deltaTierBudget)
 	}
-	if formatDeltaTier(nil, 0, 0) != "" {
+
+	out = formatDeltaTier(deltas, 3, 1749340800000, false)
+	if !strings.Contains(out, "Changed since your last working session") || !strings.Contains(out, "internal/mcp: +1 ~1") {
+		t.Errorf("graph-tools off must keep the tier and its counts: %q", out)
+	}
+	if strings.Contains(out, "get_graph_delta") {
+		t.Errorf("graph-tools off must not point at get_graph_delta: %q", out)
+	}
+
+	if formatDeltaTier(nil, 0, 0, true) != "" {
 		t.Error("empty delta must render nothing at all")
 	}
 }

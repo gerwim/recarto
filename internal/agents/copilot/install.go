@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"git.gerwim.nl/gerwim/recarto/internal/agents"
+	"git.gerwim.nl/gerwim/recarto/internal/features"
 )
 
 // hookFile is the recarto-owned Copilot CLI hook config. Copilot merges hook files
@@ -134,7 +135,7 @@ func Install(p agents.Paths, binary string) (agents.InstallResult, error) {
 	}
 	res.Hooks = "written"
 
-	if err := agents.WriteInstructionsBlock(docPath); err != nil {
+	if err := agents.WriteInstructionsBlock(docPath, features.Load()); err != nil {
 		return res, err
 	}
 	res.Docs = "written"

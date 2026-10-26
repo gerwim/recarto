@@ -7,6 +7,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"git.gerwim.nl/gerwim/recarto/internal/features"
 )
 
 func TestWriteInstructionsBlockIdempotent(t *testing.T) {
@@ -16,7 +18,7 @@ func TestWriteInstructionsBlockIdempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 	for i := 0; i < 2; i++ {
-		if err := WriteInstructionsBlock(p); err != nil {
+		if err := WriteInstructionsBlock(p, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -31,12 +33,41 @@ func TestWriteInstructionsBlockIdempotent(t *testing.T) {
 	if !strings.Contains(s, "record_memory") {
 		t.Errorf("missing recarto instructions body:\n%s", s)
 	}
+
+	// A different feature set replaces the block in place rather than appending
+	// a second one.
+	if err := WriteInstructionsBlock(p, off(features.GraphTools)); err != nil {
+		t.Fatal(err)
+	}
+	b, _ = os.ReadFile(p)
+	s = string(b)
+	if strings.Count(s, recartoBlockBegin) != 1 || strings.Count(s, recartoBlockEnd) != 1 {
+		t.Errorf("feature change appended a second block:\n%s", s)
+	}
+	if !strings.Contains(s, "keep me") || !strings.Contains(s, "record_memory") {
+		t.Errorf("feature change clobbered content:\n%s", s)
+	}
+	if strings.Contains(s, "search_graph") {
+		t.Errorf("graph-tools off, block still names search_graph:\n%s", s)
+	}
+
+	if err := WriteInstructionsBlock(p, nil); err != nil {
+		t.Fatal(err)
+	}
+	b, _ = os.ReadFile(p)
+	s = string(b)
+	if strings.Count(s, recartoBlockBegin) != 1 || strings.Count(s, recartoBlockEnd) != 1 {
+		t.Errorf("switching back appended a second block:\n%s", s)
+	}
+	if !strings.Contains(s, "search_graph") {
+		t.Errorf("switching back did not restore the graph bullet:\n%s", s)
+	}
 }
 
 func TestWriteInstructionsBlockCreatesFileWithParents(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "nested", "AGENTS.md")
-	if err := WriteInstructionsBlock(p); err != nil {
+	if err := WriteInstructionsBlock(p, nil); err != nil {
 		t.Fatal(err)
 	}
 	b, err := os.ReadFile(p)

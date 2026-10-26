@@ -6,6 +6,7 @@ import (
 	"reflect"
 
 	"git.gerwim.nl/gerwim/recarto/internal/agents"
+	"git.gerwim.nl/gerwim/recarto/internal/features"
 )
 
 // ensureMCPServer keeps the recarto entry in an opencode.json "mcp" doc current.
@@ -90,7 +91,7 @@ func Install(p agents.Paths, binary string) (agents.InstallResult, error) {
 	}
 	res.Hooks = "plugin written"
 
-	if err := agents.WriteInstructionsBlock(docPath); err != nil {
+	if err := agents.WriteInstructionsBlock(docPath, features.Load()); err != nil {
 		return res, err
 	}
 	res.Docs = "written"

@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"git.gerwim.nl/gerwim/recarto/internal/features"
 )
 
 // Delimiters bounding recarto's managed block inside an instructions file, so a
@@ -13,30 +15,38 @@ const (
 	recartoBlockEnd   = "<!-- recarto:end -->"
 )
 
-// Instructions is the canonical guidance written to each host's instructions file
-// (AGENTS.md at repo scope; the host's global instructions file at user scope).
-const Instructions = `# Recarto
+// The features each part of the instructions needs on.
+var (
+	needsMemory = []*features.Feature{features.MemoryTools}
+	needsTodos  = []*features.Feature{features.MemoryTools, features.Todos}
+	needsGraph  = []*features.Feature{features.GraphTools}
+	needsIssues = []*features.Feature{features.IssueReports}
+)
 
-This repo uses **Recarto** for cross-session memory (preferences, learnings,
-decisions, do-not-repeats, bugs) and a tree-sitter code graph, stored in a shared
-per-repo SQLite cache outside the working tree.
-
-- At session start Recarto injects the most relevant memories for this branch.
-- **Record** knowledge with ` + "`record_memory`" + ` and bug fixes with ` + "`record_bug`" + `.
+// instructionParts is the guidance written to each host's instructions file
+// (AGENTS.md at repo scope; the host's global instructions file at user scope),
+// in order. A part is written only when every feature it needs is on: those
+// are the features that register the MCP tools it names (mcp.NewServer).
+var instructionParts = []struct {
+	needs []*features.Feature
+	text  string
+}{
+	{nil, "# Recarto\n\nThis repo uses **Recarto** for cross-session memory (preferences, learnings,\ndecisions, do-not-repeats, bugs)"},
+	{needsGraph, " and a tree-sitter code graph"},
+	{nil, ", stored in a shared\nper-repo SQLite cache outside the working tree.\n\n- At session start Recarto injects the most relevant memories for this branch."},
+	{needsMemory, "\n- **Record** knowledge with " + "`record_memory`" + " and bug fixes with " + "`record_bug`" + `.
 - **Anchor** each memory to the files/symbols it concerns (the ` + "`record_memory`" + ` refs):
   an anchored bug, do-not-repeat or decision resurfaces automatically the moment you
   read or edit that code — just-in-time, costing no tokens until it is relevant, and
   shown only once per session. Guidance with no refs only appears in the budgeted
   session-start tier, so anchor anything you want to fire at the point of change.
-- **Recall** with ` + "`recall_memory`" + ` (describe the task in plain words as ` + "`task_hint`" + `; it is matched lexically and semantically, and an empty result means nothing stored is relevant) and ` + "`search_bugs`" + ` before changing code.
-- **Track open work** as a ` + "`todo`" + ` memory (` + "`record_memory`" + ` with kind ` + "`todo`" + `): it
+- **Recall** with ` + "`recall_memory`" + ` (describe the task in plain words as ` + "`task_hint`" + `; it is matched lexically and semantically, and an empty result means nothing stored is relevant) and ` + "`search_bugs`" + ` before changing code.`},
+	{needsTodos, "\n- **Track open work** as a " + "`todo`" + ` memory (` + "`record_memory`" + ` with kind ` + "`todo`" + `): it
   resurfaces at session start and when you touch its referenced files. Close it with
-  ` + "`complete_todo`" + ` (or ` + "`recarto todo done <id>`" + `) when the work is finished.
-- **Capture preferences** as they surface: the moment the user corrects your approach,
-  states a style / workflow / naming choice, or rejects a suggestion, record a
-  ` + "`preference`" + ` memory with what they preferred instead. These cues are conversational —
-  not anchored to a file edit — so they are the easiest to miss; the bar is low.
-- Query the code graph with ` + "`search_graph` / `get_code_snippet` / `trace_call_path`" + `
+  ` + "`complete_todo`" + ` (or ` + "`recarto todo done <id>`" + `) when the work is finished.`},
+	{needsMemory, "\n- **Capture preferences** as they surface: the moment the user corrects your approach,\n  states a style / workflow / naming choice, or rejects a suggestion, record a\n  " + "`preference`" + ` memory with what they preferred instead. These cues are conversational —
+  not anchored to a file edit — so they are the easiest to miss; the bar is low.`},
+	{needsGraph, "\n- Query the code graph with " + "`search_graph` / `get_code_snippet` / `trace_call_path`" + `
   instead of reading whole files. When searching ` + "`search_graph`" + ` by concept, also
   pass ` + "`candidate_symbols`" + ` — the identifier names you expect (e.g. ` + "`AddressLookup`, `Geocode`" + `);
   the names you supply are what make concept search land. Results are ranked so the
@@ -111,44 +121,61 @@ per-repo SQLite cache outside the working tree.
   with ` + "`find_annotated`" + ` — e.g. every ` + "`[ExtendObjectType]`" + ` class or ` + "`@Component`" + `.
   Prefer it over grepping for ` + "`[Attr`" + `: the decorated symbol shares no name with
   the attribute, and a text grep also matches the attribute's own definition,
-  doc comments, and string literals.
-- **Report Recarto's own faults**: if a Recarto tool errors, ranks the wrong
-  result first, confuses you, or lacks a capability you needed, call ` + "`report_recarto_issue`" + `
+  doc comments, and string literals.`},
+	{needsIssues, "\n- **Report Recarto's own faults**: if a Recarto tool errors, ranks the wrong\n  result first, confuses you, or lacks a capability you needed, call " + "`report_recarto_issue`" + `
   (signal_type: error|quality|friction|gap). It routes to a global cross-repo queue
   the maintainer triages — describe the Recarto interaction and a minimal repro, not
-  this repo's source.
-- **Inspect & curate** memories with ` + "`list_memory` / `get_memory`" + `; delete one
+  this repo's source.`},
+	{needsMemory, "\n- **Inspect & curate** memories with " + "`list_memory` / `get_memory`" + `; delete one
   recorded in error with ` + "`forget_memory`" + ` (or supersede it via ` + "`supersedes_id`" + `).
 
 Recarto reinforces near-duplicate memories instead of duplicating them, so record
-freely — repeated learnings converge to one entry.`
+freely — repeated learnings converge to one entry.`},
+}
+
+// Instructions returns the guidance for the features in s, naming only the
+// MCP tools s leaves registered. A nil s has every feature on.
+func Instructions(s features.Set) string {
+	var b strings.Builder
+	for _, p := range instructionParts {
+		on := true
+		for _, f := range p.needs {
+			on = on && s.On(f)
+		}
+		if on {
+			b.WriteString(p.text)
+		}
+	}
+	return b.String()
+}
 
 // WriteInstructionsBlock inserts or replaces the recarto-delimited block in the
-// file at path (creating it and its parents if absent), preserving other content.
-// It is idempotent: re-running rewrites only the block.
-func WriteInstructionsBlock(path string) error {
-	block := recartoBlockBegin + "\n" + Instructions + "\n" + recartoBlockEnd + "\n"
+// file at path with the guidance for the features in s (creating the file and
+// its parents if absent), preserving other content. Re-running rewrites only
+// the block.
+func WriteInstructionsBlock(path string, s features.Set) error {
+	block := recartoBlockBegin + "\n" + Instructions(s) + "\n" + recartoBlockEnd + "\n"
 
 	existing, err := os.ReadFile(path)
 	if err != nil && !os.IsNotExist(err) {
 		return err
 	}
-	s := string(existing)
+	src := string(existing)
 
-	if i := strings.Index(s, recartoBlockBegin); i >= 0 {
-		if j := strings.Index(s, recartoBlockEnd); j > i {
-			s = s[:i] + strings.TrimRight(block, "\n") + s[j+len(recartoBlockEnd):]
-			return writeFile(path, s)
+	if i := strings.Index(src, recartoBlockBegin); i >= 0 {
+		if j := strings.Index(src, recartoBlockEnd); j > i {
+			src = src[:i] + strings.TrimRight(block, "\n") + src[j+len(recartoBlockEnd):]
+			return writeFile(path, src)
 		}
 	}
 	// Append, separating from any prior content by a blank line.
-	if len(s) > 0 {
-		if !strings.HasSuffix(s, "\n") {
-			s += "\n"
+	if len(src) > 0 {
+		if !strings.HasSuffix(src, "\n") {
+			src += "\n"
 		}
-		s += "\n"
+		src += "\n"
 	}
-	return writeFile(path, s+block)
+	return writeFile(path, src+block)
 }
 
 // writeFile writes content to path, creating parent directories.

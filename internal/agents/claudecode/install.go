@@ -4,6 +4,7 @@ import (
 	"runtime"
 
 	"git.gerwim.nl/gerwim/recarto/internal/agents"
+	"git.gerwim.nl/gerwim/recarto/internal/features"
 )
 
 // goos is the target OS Recarto installs for. It indirects runtime.GOOS so tests
@@ -100,7 +101,7 @@ func Install(p agents.Paths, binary string) (agents.InstallResult, error) {
 	}
 
 	// 3. Write the instructions block.
-	if err := agents.WriteInstructionsBlock(docPath); err != nil {
+	if err := agents.WriteInstructionsBlock(docPath, features.Load()); err != nil {
 		return res, err
 	}
 	res.Docs = "written"

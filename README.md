@@ -217,6 +217,11 @@ Every feature is on by default. Run `recarto config` in a terminal to switch the
 ↑/↓ to move, space to toggle, `a` to turn everything on, `q` to quit. Each change is
 saved at once and applies to new agent sessions.
 
+The agent instructions `recarto init` writes name only the MCP tools that are on.
+After you switch `memory-tools`, `todos`, `graph-tools` or `issue-reports`,
+`recarto config` asks you to re-run `recarto init` (same `--agent` and `--scope`)
+to update them.
+
 ```sh
 recarto config                            # interactive; prints the list outside a terminal
 recarto config list                       # every feature, its state and what it does
