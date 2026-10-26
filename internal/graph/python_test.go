@@ -357,8 +357,8 @@ SELECT COALESCE(sn.qualified_name, '<file>'), dn.qualified_name, df.path, ed.kin
 // TestPythonModules: an import or base resolves to the class of the module it
 // names, even when another module (a_decoy.py, first in path order) or the
 // deriving class itself has the same name — the `from m import X as Base;
-// class X(Base)` and `class X(m.X)` idioms — and super() binds through the
-// class's bases.
+// class X(Base)` and `class X(m.X)` idioms — and to nothing when that module is
+// not in the worktree; super() binds through the class's bases.
 func TestPythonModules(t *testing.T) {
 	e := newTestEngine(t)
 	ctx := context.Background()
@@ -372,6 +372,19 @@ func TestPythonModules(t *testing.T) {
 		"pkg/mi.py":      "class A:\n    pass\n\n\nclass B:\n    def m(self): pass\n\n\nclass C(A, B):\n    def m(self):\n        super().m()\n",
 		// an external base of the same name: not this Session, so unresolved
 		"pkg/wrap.py": "import requests\n\n\nclass Session(requests.Session):\n    pass\n",
+		// ... even when another Session subclasses this one, which would make a
+		// cycle super() climbs back into close itself
+		"pkg/session.py":    "from wsgiref import simple_server\n\n\nclass Handler(simple_server.Handler):\n    def close(self):\n        super().close()\n",
+		"tests/test_web.py": "from pkg import session\n\n\nclass Handler(session.Handler):\n    pass\n",
+		// imports of an external module or a submodule bind no worktree symbol
+		"pkg/util.py": "from urllib.parse import urlencode as quote\nfrom pkg import mi\n\n\ndef urlencode(q):\n    return quote(q)\n\n\ndef mi(): pass\n",
+		// a base a star import brings in names no module: by name, never itself
+		"pkg/model.py": "class Model:\n    pass\n",
+		"pkg/star.py":  "from pkg.model import *\n\n\nclass Model(Model):\n    pass\n",
+		// a package's own Config, before a submodule's (Alt.py sorts first)
+		"cfg/__init__.py": "class Config:\n    pass\n",
+		"cfg/Alt.py":      "class Config:\n    pass\n",
+		"app.py":          "from cfg import Config\n",
 	}
 	for path, src := range files {
 		if err := e.IndexFile(ctx, wt, path, []byte(src), 1, int64(len(src))); err != nil {
@@ -382,9 +395,10 @@ func TestPythonModules(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := map[string][]string{
-		"imports": {"<file> -> Store @pkg/db.py (imports)"},
+		"imports": {"<file> -> Config @cfg/__init__.py (imports)", "<file> -> Store @pkg/db.py (imports)"},
 		"extends": {
 			"C -> A @pkg/mi.py (extends)", "C -> B @pkg/mi.py (extends)",
+			"Handler -> Handler @pkg/session.py (extends)", "Model -> Model @pkg/model.py (extends)",
 			"Serializer -> Serializer @pkg/base.py (extends)", "Store -> Store @pkg/db.py (extends)",
 		},
 		"calls": {

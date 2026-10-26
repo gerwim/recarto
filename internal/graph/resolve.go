@@ -201,11 +201,13 @@ WHERE dst_node_id IS NULL
 }
 
 // nonCallTarget picks a non-call edge's target (the worktree is its one bound
-// parameter): a node named dst_name in the edge's language family. The module a
-// Python import or base names (dst_recv, the only non-call edges carrying one)
-// comes first, as m.py or m/__init__.py, possibly under a source root; then the
-// edge's own file, its top-level directory, and a stable order. An extends edge
-// never targets its own class: `class Serializer(base.Serializer)` names another.
+// parameter): a node named dst_name in the edge's language family, preferring
+// the edge's own file, its top-level directory, then a stable order. An extends
+// edge never targets its own class. A Python import or base that names its
+// module (dst_recv, the only non-call edges carrying one) resolves within that
+// module — m.py, else a file of package m/ (an __init__ re-export), possibly
+// under a source root, never the importing file — or not at all: wsgiref's
+// ServerHandler is not the worktree's.
 const nonCallTarget = `
   SELECT n.id
     FROM nodes n
@@ -217,6 +219,12 @@ const nonCallTarget = `
            OR ( ef.language IN ('typescript','tsx','javascript')
                 AND f.language IN ('typescript','tsx','javascript') ) )
      AND NOT (edges.kind = 'extends' AND n.id IS edges.src_node_id)
+     AND ( edges.dst_recv = ''
+           OR ( f.id <> edges.file_id
+                AND ( f.path = replace(edges.dst_recv,'.','/') || '.py'
+                      OR f.path GLOB '*/' || replace(edges.dst_recv,'.','/') || '.py'
+                      OR f.path GLOB replace(edges.dst_recv,'.','/') || '/*'
+                      OR f.path GLOB '*/' || replace(edges.dst_recv,'.','/') || '/*' ) ) )
    ORDER BY
      CASE WHEN edges.dst_recv <> ''
            AND ( f.path = replace(edges.dst_recv,'.','/') || '.py'
@@ -456,7 +464,9 @@ SELECT n.id, n.name, n.file_id, n.start_byte, n.kind = 'method'
 	}
 
 	// Eligible call edges, materialized so the cursor is closed before inserting
-	// (one connection cannot read and write concurrently).
+	// (one connection cannot read and write concurrently). A Python super() call
+	// is not one: it binds through its class's bases (S2b) or not at all, never
+	// to a same-named method of the class itself or of an unrelated one.
 	type callEdge struct {
 		id, dstName, fileID string
 		bare                bool // no receiver
@@ -465,7 +475,7 @@ SELECT n.id, n.name, n.file_id, n.start_byte, n.kind = 'method'
 	if err := scan(ctx, c, `
 SELECT ed.id, ed.dst_name, ed.file_id, ed.dst_recv = ''
   FROM edges ed JOIN files f ON f.id = ed.file_id
- WHERE f.worktree = ? AND ed.kind = 'calls' AND ed.dst_name <> ''`,
+ WHERE f.worktree = ? AND ed.kind = 'calls' AND ed.dst_name <> '' AND ed.dst_recv <> 'super()'`,
 		func(rows *sql.Rows) error {
 			var e callEdge
 			if err := rows.Scan(&e.id, &e.dstName, &e.fileID, &e.bare); err != nil {
@@ -1170,6 +1180,7 @@ SELECT edge_id, dst_node_id, CASE WHEN cnt = 1 THEN 0.45 ELSE 0.2 END, 'name' FR
   FROM files ef
   CROSS JOIN edges ed ON ed.file_id = ef.id
                 AND ed.kind = 'calls' AND ed.dst_name <> ''
+                AND ed.dst_recv <> 'super()' -- see resolveNameFallback
                 -- Skip the name-only fallback for hyper-common names (ToString,
                 -- Equals, Id, ...) that match more than 50 callables: it would pick
                 -- 10 arbitrary 0.2-confidence targets (pure noise), and the full
