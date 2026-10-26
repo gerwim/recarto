@@ -14,6 +14,8 @@ import (
 	"os"
 	"strconv"
 	"time"
+
+	"git.gerwim.nl/gerwim/recarto/internal/features"
 )
 
 // Config is resolved once per process from the environment.
@@ -31,8 +33,12 @@ const DefaultInterval = 60 * time.Second
 
 const defaultTimeout = 5 * time.Second
 
-// ConfigFromEnv reads Config from the process environment.
+// ConfigFromEnv reads Config from the process environment. With the sync
+// feature switched off it returns the zero Config, which never syncs.
 func ConfigFromEnv() Config {
+	if !features.Load().On(features.Sync) {
+		return Config{}
+	}
 	return Config{
 		URL:      os.Getenv("RECARTO_SYNC_URL"),
 		Key:      os.Getenv("RECARTO_SYNC_KEY"),

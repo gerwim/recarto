@@ -42,6 +42,11 @@ func Run(args []string, out io.Writer) error {
 		return Init(out, dir, binaryPath(), rest)
 	}
 
+	// config edits the user's feature switches; it needs no repo or store.
+	if cmd == "config" {
+		return Config(out, rest)
+	}
+
 	// feedback reads the global feedback store directly — no git/app resolution —
 	// so it works from anywhere, including outside a git repo.
 	if cmd == "feedback" {
@@ -80,7 +85,7 @@ func Run(args []string, out io.Writer) error {
 	}
 
 	if !known(cmd) {
-		return fmt.Errorf("unknown command %q (try: init serve hook status doctor remember forget recall bug feedback memory index graph compact snapshot todo sync server export import repair)", cmd)
+		return fmt.Errorf("unknown command %q (try: init config serve hook status doctor remember forget recall bug feedback memory index graph compact snapshot todo sync server export import repair)", cmd)
 	}
 
 	// Only the long-lived serving process pays for the proactive corruption check
@@ -141,6 +146,7 @@ func binaryPath() string {
 func usage(w io.Writer) error {
 	fmt.Fprintln(w, "recarto <command>")
 	fmt.Fprintln(w, "  init              configure agents (--agent claude,opencode,copilot  --scope user|repo)")
+	fmt.Fprintln(w, "  config            turn features on or off: interactive in a terminal (or list|enable|disable|path)")
 	fmt.Fprintln(w, "  serve             run the MCP server over stdio")
 	fmt.Fprintln(w, "  hook <event>      run an agent hook (session-start|post-read|post-edit|augment|stop|shell) [--agent] [--cmd]")
 	fmt.Fprintln(w, "  status            repo id, branch, memory counts, ledger")

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"git.gerwim.nl/gerwim/recarto/internal/features"
 	"git.gerwim.nl/gerwim/recarto/internal/graph"
 	"git.gerwim.nl/gerwim/recarto/internal/ledger"
 	"git.gerwim.nl/gerwim/recarto/internal/memory"
@@ -66,11 +67,18 @@ func largeReadThreshold() int {
 // here is deliberately left unmarked so it can still surface when its code is touched.
 // Workspace memories are never marked: the just-in-time hooks only serve the repo
 // store, so there is nothing to dedup against.
+//
+// With the session-memories feature off in f, the memory header, empty-memory
+// line and record nudge go too, leaving the other tiers; a line pointing at
+// tools f turns off is left out.
 func formatSessionContext(results []memory.RecallResult, wsName string, wsResults []memory.RecallResult,
 	extraRepos []string, arch graph.Architecture, bugs []*memory.Record,
-	deltas []graph.Delta, deltaTotal int, deltaBaselineMs int64, budget int) (string, []string) {
+	deltas []graph.Delta, deltaTotal int, deltaBaselineMs int64, budget int, f features.Set) (string, []string) {
 	var b strings.Builder
-	b.WriteString("Recarto memory for this repo/branch:\n")
+	memories := f.On(features.SessionMemories)
+	if memories {
+		b.WriteString("Recarto memory for this repo/branch:\n")
+	}
 
 	var emitted []string
 	markEmitted := func(r memory.RecallResult) {
@@ -124,7 +132,7 @@ func formatSessionContext(results []memory.RecallResult, wsName string, wsResult
 			markEmitted(r)
 		}
 	}
-	if len(results) == 0 {
+	if len(results) == 0 && memories {
 		b.WriteString("(no prior memories yet)\n")
 	}
 
@@ -163,7 +171,9 @@ func formatSessionContext(results []memory.RecallResult, wsName string, wsResult
 		for _, d := range deps {
 			fmt.Fprintf(&b, "  %s → %s (%d)\n", d.From, d.To, d.Count)
 		}
-		b.WriteString("Query the code graph (search/snippet/callers) instead of reading whole files; grep/glob auto-injects matching symbols.\n")
+		if f.On(features.GraphTools) {
+			b.WriteString("Query the code graph (search/snippet/callers) instead of reading whole files; grep/glob auto-injects matching symbols.\n")
+		}
 	}
 
 	if tier := formatDeltaTier(deltas, deltaTotal, deltaBaselineMs); tier != "" {
@@ -181,8 +191,10 @@ func formatSessionContext(results []memory.RecallResult, wsName string, wsResult
 		}
 	}
 
-	b.WriteString("\nRecord new learnings with the record_memory tool and bug fixes with record_bug.")
-	return b.String(), emitted
+	if memories && f.On(features.MemoryTools) {
+		b.WriteString("\nRecord new learnings with the record_memory tool and bug fixes with record_bug.")
+	}
+	return strings.TrimSpace(b.String()), emitted
 }
 
 // formatBugWarnings renders prior bugs tied to a code location as advisory lines.

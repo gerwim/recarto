@@ -348,7 +348,7 @@ func TestFormatSessionContextDegradesToTitles(t *testing.T) {
 		{Record: &memory.Record{Kind: memory.KindLearning, Title: "AAA", Body: "short body"}},
 		{Record: &memory.Record{Kind: memory.KindLearning, Title: "BBB", Body: strings.Repeat("x", 2000)}},
 	}
-	s, _ := formatSessionContext(results, "", nil, nil, graph.Architecture{}, nil, nil, 0, 0, 60)
+	s, _ := formatSessionContext(results, "", nil, nil, graph.Architecture{}, nil, nil, 0, 0, 60, nil)
 	if !strings.Contains(s, "AAA") || !strings.Contains(s, "short body") {
 		t.Errorf("first entry should render with its body:\n%s", s)
 	}
@@ -494,7 +494,7 @@ func TestFormatSessionContextDropsEntryUnderTinyBudget(t *testing.T) {
 	results := []memory.RecallResult{
 		{Record: &memory.Record{Kind: memory.KindLearning, Title: "WontFitAtAll", Body: "body"}},
 	}
-	s, _ := formatSessionContext(results, "", nil, nil, graph.Architecture{}, nil, nil, 0, 0, 2)
+	s, _ := formatSessionContext(results, "", nil, nil, graph.Architecture{}, nil, nil, 0, 0, 2, nil)
 	if strings.Contains(s, "WontFitAtAll") {
 		t.Errorf("entry should be dropped entirely when even its title exceeds the budget:\n%s", s)
 	}

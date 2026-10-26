@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -51,6 +52,8 @@ func newTestApp(t *testing.T, branch string) *app.App {
 	} {
 		t.Setenv(k, "")
 	}
+	// A developer's own config file must not switch features off under the tests.
+	t.Setenv("RECARTO_CONFIG", filepath.Join(t.TempDir(), "config.toml"))
 	t.Setenv("RECARTO_CACHE_DIR", t.TempDir())
 	a, err := app.Open(app.Config{
 		CWD:    "/repo",

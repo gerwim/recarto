@@ -12,6 +12,7 @@ import (
 	"sort"
 
 	"git.gerwim.nl/gerwim/recarto/internal/app"
+	"git.gerwim.nl/gerwim/recarto/internal/features"
 	"git.gerwim.nl/gerwim/recarto/internal/memory"
 )
 
@@ -84,6 +85,9 @@ func recordMemory(ctx context.Context, a *app.App, in RecordMemoryInput) (Record
 	}
 	if kind == memory.KindFeedback {
 		return RecordMemoryOutput{}, fmt.Errorf("kind %q is recorded via report_recarto_issue, not record_memory", in.Kind)
+	}
+	if kind == memory.KindTodo && !a.Features.On(features.Todos) {
+		return RecordMemoryOutput{}, fmt.Errorf("todos are off in the Recarto config (recarto config)")
 	}
 	if in.Body == "" {
 		return RecordMemoryOutput{}, fmt.Errorf("body is required")
