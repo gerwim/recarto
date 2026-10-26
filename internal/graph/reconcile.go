@@ -253,7 +253,8 @@ func (e *Engine) Reconcile(ctx context.Context, worktree string, src Source, opt
 		// Incremental resolve is exact only while the worktree's interface/base
 		// structure is unchanged (ResolveIncremental); a dirty file that gained or
 		// lost an `extends` edge can redirect interface dispatch in OTHER files,
-		// which the name-scoped affected set cannot see — so re-resolve fully then.
+		// which the name-scoped affected set cannot see — so re-resolve fully then
+		// (and when a Python module appeared or went: see extendsSigForPaths).
 		useIncremental := incremental
 		if useIncremental {
 			newExtends, err := e.extendsSigForPaths(ctx, worktree, dirtyPaths)

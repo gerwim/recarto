@@ -191,23 +191,180 @@ UPDATE edges SET dst_node_id = NULL
 // matching dst_name to a node name/qualified_name within the language family
 // (see nonCallTarget for the preference order).
 func resolveNonCallEdges(ctx context.Context, c store.Conn, worktree string) error {
-	_, err := c.ExecContext(ctx, `
+	const inWorktree = `file_id IN (SELECT id FROM files WHERE worktree = ?)`
+	if _, err := c.ExecContext(ctx, `
 UPDATE edges SET dst_node_id = (`+nonCallTarget+`)
 WHERE dst_node_id IS NULL
   AND dst_name <> ''
+  AND dst_recv = ''
   AND kind <> 'calls'
-  AND file_id IN (SELECT id FROM files WHERE worktree = ?)`, worktree, worktree)
-	return err
+  AND `+inWorktree, worktree, worktree); err != nil {
+		return err
+	}
+	// A Python import or base naming its module also hangs on files other than its
+	// target's — a re-export, which modules exist — whose reindex does not unset
+	// it: re-derive them all.
+	if _, err := c.ExecContext(ctx, `
+UPDATE edges SET dst_node_id = NULL
+WHERE kind <> 'calls' AND dst_recv <> '' AND dst_node_id IS NOT NULL AND `+inWorktree, worktree); err != nil {
+		return err
+	}
+	return resolvePythonModules(ctx, c, worktree, inWorktree, worktree)
+}
+
+// buildPyModules (re)creates the py_mod temp table resolvePythonModules reads:
+// every module name a Python file of the
+// worktree answers to — its dotted path and each dotted suffix, so an import
+// from under a source root (flask.app, for src/flask/app.py) finds it too; a
+// package's is its __init__.py. "Is file f module m, or under package m?" is a
+// seek on f's few names; "the files of module m" one on the module index.
+func buildPyModules(ctx context.Context, c store.Conn, worktree string) error {
+	for _, ddl := range []string{
+		`DROP TABLE IF EXISTS py_mod`,
+		`CREATE TEMP TABLE py_mod (file_id TEXT NOT NULL, module TEXT NOT NULL, PRIMARY KEY (file_id, module)) WITHOUT ROWID`,
+		`CREATE INDEX py_mod_module ON py_mod(module)`,
+	} {
+		if _, err := c.ExecContext(ctx, ddl); err != nil {
+			return err
+		}
+	}
+	type pyFile struct{ id, path string }
+	var files []pyFile
+	if err := scan(ctx, c, `SELECT id, path FROM files WHERE worktree = ? AND language = 'python'`,
+		func(rows *sql.Rows) error {
+			var f pyFile
+			if err := rows.Scan(&f.id, &f.path); err != nil {
+				return err
+			}
+			files = append(files, f)
+			return nil
+		}, worktree); err != nil {
+		return err
+	}
+	stmt, err := c.PrepareContext(ctx, `INSERT OR IGNORE INTO py_mod(file_id, module) VALUES (?,?)`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+	for _, f := range files {
+		segs := strings.Split(strings.TrimSuffix(strings.TrimSuffix(f.path, ".py"), "/__init__"), "/")
+		for i := range segs {
+			if _, err := stmt.ExecContext(ctx, f.id, strings.Join(segs[i:], ".")); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// resolvePythonModules resolves the Python imports and bases that name their
+// module (dst_recv) — `from m import X`, `class C(m.X)` — within that module: a
+// module-level X (never a method: `from django import forms` is no
+// InlineAdminFormSet.forms) in m.py, else in a file of package m/ (a star
+// re-export) unless m.X is a submodule (`from django.contrib import messages` is
+// no context_processors.messages), possibly under a source root, never in the
+// importing file; otherwise not at all (wsgiref's ServerHandler is not the
+// worktree's). Candidates are ranked once per (module, name), not per edge:
+// Django has 2.4k `models.Model` bases.
+//
+// If m is in the worktree without X, it re-exports X (`from .base import X` in
+// an __init__, or a module importing it for its users): an import then takes
+// the target of m's own import of X, itself resolved by module — twice, to
+// follow a re-export of a re-export — while a variable m re-exports
+// (django.urls' path) stays unresolved, being no symbol. A base takes the one
+// module-level Python class X outside its file, if there is exactly one — a
+// wrong class would mislead every call it inherits, at full confidence — and
+// does not follow import edges: that would make its inherited calls depend on
+// another file's imports, which neither the incremental resolver's names nor
+// its full-resolve triggers track (which modules exist, they do: see
+// extendsSigForPaths). scope selects the edges.
+func resolvePythonModules(ctx context.Context, c store.Conn, worktree, scope string, scopeArgs ...any) error {
+	if err := buildPyModules(ctx, c, worktree); err != nil {
+		return err
+	}
+	if _, err := c.ExecContext(ctx, `DROP TABLE IF EXISTS py_ranked`); err != nil {
+		return err
+	}
+	if _, err := c.ExecContext(ctx, `
+CREATE TEMP TABLE py_ranked AS
+SELECT p.dst_recv, p.dst_name, n.id AS node_id, n.file_id, f.path, n.start_byte,
+       MIN(pm.module <> p.dst_recv) AS submodule
+  FROM (SELECT DISTINCT dst_recv, dst_name FROM edges
+         WHERE dst_node_id IS NULL AND dst_recv <> '' AND kind <> 'calls' AND `+scope+`) p
+  JOIN nodes n ON n.name = p.dst_name AND n.parent_name = ''
+  JOIN py_mod pm ON pm.file_id = n.file_id
+       AND (pm.module = p.dst_recv
+            OR (pm.module BETWEEN p.dst_recv || '.' AND p.dst_recv || '/'
+                AND NOT EXISTS (SELECT 1 FROM py_mod sm WHERE sm.module = p.dst_recv || '.' || p.dst_name)))
+  JOIN files f ON f.id = n.file_id
+ GROUP BY p.dst_recv, p.dst_name, n.id`, scopeArgs...); err != nil {
+		return err
+	}
+	if _, err := c.ExecContext(ctx, `CREATE INDEX py_ranked_key ON py_ranked(dst_recv, dst_name)`); err != nil {
+		return err
+	}
+	if _, err := c.ExecContext(ctx, `
+UPDATE edges SET dst_node_id = (
+  SELECT r.node_id FROM py_ranked r
+   WHERE r.dst_recv = edges.dst_recv AND r.dst_name = edges.dst_name AND r.file_id <> edges.file_id
+   ORDER BY r.submodule, r.path, r.start_byte, r.node_id
+   LIMIT 1)
+WHERE dst_node_id IS NULL AND dst_recv <> '' AND kind <> 'calls' AND `+scope, scopeArgs...); err != nil {
+		return err
+	}
+	imports := `
+WITH pending AS MATERIALIZED (
+  SELECT DISTINCT dst_recv, dst_name FROM edges
+   WHERE dst_node_id IS NULL AND dst_recv <> '' AND kind = 'imports' AND ` + scope + `
+), via AS MATERIALIZED (
+  SELECT p.dst_recv, p.dst_name, (
+    SELECT re.dst_node_id
+      FROM py_mod pm
+      JOIN files mf ON mf.id = pm.file_id
+      JOIN edges re ON re.file_id = pm.file_id
+     WHERE pm.module = p.dst_recv
+       AND re.kind = 'imports' AND re.dst_name = p.dst_name AND re.dst_node_id IS NOT NULL
+     ORDER BY mf.path
+     LIMIT 1) AS target
+    FROM pending p
+)
+UPDATE edges SET dst_node_id = (
+  SELECT v.target FROM via v WHERE v.dst_recv = edges.dst_recv AND v.dst_name = edges.dst_name)
+WHERE dst_node_id IS NULL AND dst_recv <> '' AND kind = 'imports' AND ` + scope
+	args := append(append([]any{}, scopeArgs...), scopeArgs...)
+	for range 2 {
+		if _, err := c.ExecContext(ctx, imports, args...); err != nil {
+			return err
+		}
+	}
+	bases := `
+UPDATE edges SET dst_node_id = (
+  SELECT MIN(n.id)
+    FROM nodes n
+    JOIN files f ON f.id = n.file_id
+   WHERE f.worktree = ? AND f.language = 'python' AND f.id <> edges.file_id
+     AND n.name = edges.dst_name AND n.kind = 'class' AND n.parent_name = ''
+  HAVING COUNT(*) = 1)
+WHERE dst_node_id IS NULL AND dst_recv <> '' AND kind = 'extends' AND ` + scope + `
+  AND EXISTS (SELECT 1 FROM py_mod pm WHERE pm.module = edges.dst_recv)`
+	if _, err := c.ExecContext(ctx, bases, append([]any{worktree}, scopeArgs...)...); err != nil {
+		return err
+	}
+	for _, t := range []string{"py_ranked", "py_mod"} {
+		if _, err := c.ExecContext(ctx, `DROP TABLE IF EXISTS `+t); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // nonCallTarget picks a non-call edge's target (the worktree is its one bound
 // parameter): a node named dst_name in the edge's language family, preferring
 // the edge's own file, its top-level directory, then a stable order. An extends
-// edge never targets its own class. A Python import or base that names its
-// module (dst_recv, the only non-call edges carrying one) resolves within that
-// module — m.py, else a file of package m/ (an __init__ re-export), possibly
-// under a source root, never the importing file — or not at all: wsgiref's
-// ServerHandler is not the worktree's.
+// edge never targets its own class. Python imports and bases that name their
+// module (dst_recv, the only non-call edges carrying one) are resolvePythonModules';
+// the rest of Python's imports name a module (`import json`), which is no node,
+// and its bases only a class (`class L(list)` is not BaseFinder.list).
 const nonCallTarget = `
   SELECT n.id
     FROM nodes n
@@ -219,19 +376,8 @@ const nonCallTarget = `
            OR ( ef.language IN ('typescript','tsx','javascript')
                 AND f.language IN ('typescript','tsx','javascript') ) )
      AND NOT (edges.kind = 'extends' AND n.id IS edges.src_node_id)
-     AND ( edges.dst_recv = ''
-           OR ( f.id <> edges.file_id
-                AND ( f.path = replace(edges.dst_recv,'.','/') || '.py'
-                      OR f.path GLOB '*/' || replace(edges.dst_recv,'.','/') || '.py'
-                      OR f.path GLOB replace(edges.dst_recv,'.','/') || '/*'
-                      OR f.path GLOB '*/' || replace(edges.dst_recv,'.','/') || '/*' ) ) )
+     AND NOT (ef.language = 'python' AND (edges.kind = 'imports' OR (edges.kind = 'extends' AND n.kind <> 'class')))
    ORDER BY
-     CASE WHEN edges.dst_recv <> ''
-           AND ( f.path = replace(edges.dst_recv,'.','/') || '.py'
-                 OR f.path = replace(edges.dst_recv,'.','/') || '/__init__.py'
-                 OR f.path GLOB '*/' || replace(edges.dst_recv,'.','/') || '.py'
-                 OR f.path GLOB '*/' || replace(edges.dst_recv,'.','/') || '/__init__.py' )
-          THEN 0 ELSE 1 END,
      CASE WHEN f.id = edges.file_id THEN 0 ELSE 1 END,
      -- same top-level directory next. instr(path,'/')=0 for a root-level file, and
      -- substr(s,1,0)='' in SQLite, so two root-level files compare equal here —

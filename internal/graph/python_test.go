@@ -365,22 +365,31 @@ func TestPythonModules(t *testing.T) {
 	wt := t.TempDir()
 	files := map[string]string{
 		"pkg/a_decoy.py": "class Store:\n    def save(self): pass\n    def load(self): pass\n\n\nclass Serializer:\n    def serialize(self): pass\n    def end(self): pass\n",
-		"pkg/db.py":      "class Store:\n    def save(self): pass\n    def load(self): pass\n",
+		"pkg/db.py":      "class Store:\n    def save(self): pass\n    def load(self): pass\n    def json(self): pass\n    def list(self): pass\n",
 		"pkg/cached.py":  "from pkg.db import Store as DBStore\n\n\nclass Store(DBStore):\n    def save(self):\n        super().save()\n        self.load()\n",
 		"pkg/base.py":    "class Serializer:\n    def serialize(self): pass\n    def end(self): pass\n",
 		"pkg/json.py":    "from pkg import base\n\n\nclass Serializer(base.Serializer):\n    def serialize(self):\n        super(Serializer, self).serialize()\n        self.end()\n",
-		"pkg/mi.py":      "class A:\n    pass\n\n\nclass B:\n    def m(self): pass\n\n\nclass C(A, B):\n    def m(self):\n        super().m()\n",
+		// a base is a class: list is the builtin, not Store.list
+		"pkg/mi.py": "class A:\n    pass\n\n\nclass B:\n    def m(self): pass\n\n\nclass C(A, B):\n    def m(self):\n        super().m()\n\n\nclass D(list):\n    pass\n",
 		// an external base of the same name: not this Session, so unresolved
 		"pkg/wrap.py": "import requests\n\n\nclass Session(requests.Session):\n    pass\n",
 		// ... even when another Session subclasses this one, which would make a
 		// cycle super() climbs back into close itself
 		"pkg/session.py":    "from wsgiref import simple_server\n\n\nclass Handler(simple_server.Handler):\n    def close(self):\n        super().close()\n",
 		"tests/test_web.py": "from pkg import session\n\n\nclass Handler(session.Handler):\n    pass\n",
-		// imports of an external module or a submodule bind no worktree symbol
-		"pkg/util.py": "from urllib.parse import urlencode as quote\nfrom pkg import mi\n\n\ndef urlencode(q):\n    return quote(q)\n\n\ndef mi(): pass\n",
+		// imports of an external module, a submodule (whatever else is named mi), a
+		// method or the importing file's own symbol bind no worktree symbol
+		"pkg/util.py": "from urllib.parse import urlencode as quote\nfrom pkg import mi\nfrom pkg.base import end\nfrom pkg import urlencode\nimport json\n\n\ndef urlencode(q):\n    return quote(q)\n\n\ndef mi(): pass\n",
 		// a base a star import brings in names no module: by name, never itself
-		"pkg/model.py": "class Model:\n    pass\n",
+		"pkg/model.py": "class Model:\n    pass\n\n\ndef mi(): pass\n",
 		"pkg/star.py":  "from pkg.model import *\n\n\nclass Model(Model):\n    pass\n",
+		// a package star-importing its submodule; Model is not unique (see pkg/)
+		"orm/__init__.py": "from orm.base import *\n",
+		"orm/base.py":     "class Model:\n    def save(self): pass\n",
+		"blog.py":         "from orm import Model\n\n\nclass Post(Model):\n    def publish(self):\n        self.save()\n",
+		// an absolute import from under a source root finds its module
+		"src/lib/core.py": "class Engine:\n    pass\n",
+		"src/main.py":     "from lib.core import Engine\n",
 		// a package's own Config, before a submodule's (Alt.py sorts first)
 		"cfg/__init__.py": "class Config:\n    pass\n",
 		"cfg/Alt.py":      "class Config:\n    pass\n",
@@ -395,14 +404,19 @@ func TestPythonModules(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := map[string][]string{
-		"imports": {"<file> -> Config @cfg/__init__.py (imports)", "<file> -> Store @pkg/db.py (imports)"},
+		"imports": {
+			"<file> -> Config @cfg/__init__.py (imports)", "<file> -> Engine @src/lib/core.py (imports)",
+			"<file> -> Model @orm/base.py (imports)", "<file> -> Store @pkg/db.py (imports)",
+		},
 		"extends": {
 			"C -> A @pkg/mi.py (extends)", "C -> B @pkg/mi.py (extends)",
 			"Handler -> Handler @pkg/session.py (extends)", "Model -> Model @pkg/model.py (extends)",
+			"Post -> Model @orm/base.py (extends)",
 			"Serializer -> Serializer @pkg/base.py (extends)", "Store -> Store @pkg/db.py (extends)",
 		},
 		"calls": {
 			"C.m -> B.m @pkg/mi.py (typed)",
+			"Post.publish -> Model.save @orm/base.py (typed)",
 			"Serializer.serialize -> Serializer.end @pkg/base.py (typed)",
 			"Serializer.serialize -> Serializer.serialize @pkg/base.py (typed)",
 			"Store.save -> Store.load @pkg/db.py (typed)",
@@ -464,4 +478,104 @@ func TestPythonBaseModuleChange(t *testing.T) {
 	if got, want := pythonTargets(t, e, "calls"), []string{"run -> Root.ping @pkg/m2.py (typed)"}; !slices.Equal(got, want) {
 		t.Errorf("after moving Leaf's base to pkg.m2: calls %q, want %q", got, want)
 	}
+}
+
+// TestPythonReexports: an import whose module re-exports the name resolves to
+// what the module itself imports — through a re-export of a re-export too —
+// while a re-exported variable, no symbol, stays unresolved; editing or
+// dropping the re-export moves its importers along, incrementally or in a full
+// resolve. A base through a re-export resolves to the one module-level class of
+// that name (Widget, Gauge), or not at all (Desc): never to a wrong one, nor
+// itself.
+func TestPythonReexports(t *testing.T) {
+	e := newTestEngine(t)
+	ctx := context.Background()
+	wt := t.TempDir()
+	for path, src := range map[string]string{
+		"fields/descriptors.py": "class Desc:\n    def get(self): pass\n",
+		"fields/other.py":       "class Desc:\n    def get(self): pass\n\n    class Gauge:\n        pass\n",
+		"fields/widgets.py":     "class Widget:\n    def draw(self): pass\n\n\nclass Gauge:\n    pass\n",
+		"fields/related.py":     "from fields.descriptors import Desc\nfrom fields.widgets import Widget, Gauge\n",
+		"app3.py":               "from fields import related\n\n\nclass Gauge(related.Gauge):\n    pass\n",
+		"forms.py":              "from fields.related import Desc\n",
+		"app.py":                "from forms import Desc\nfrom fields import related\n\n\nclass MyWidget(related.Widget):\n    def run(self):\n        self.draw()\n\n\nclass MyDesc(related.Desc):\n    pass\n",
+		"app2.py":               "from fields import related\n\n\nclass Desc(related.Desc):\n    pass\n",
+		"urls/__init__.py":      "from urls.conf import path\n",
+		"urls/conf.py":          "path = make_path()\n",
+		"views.py":              "from urls import path\n\n\nclass Storage:\n    def path(self): pass\n",
+	} {
+		if err := e.IndexFile(ctx, wt, path, []byte(src), 1, int64(len(src))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := e.Resolve(ctx, wt, noopProgress{}); err != nil {
+		t.Fatal(err)
+	}
+	check := func(when, module string, importers int) {
+		t.Helper()
+		for kind, want := range map[string][]string{
+			// related.py's own import, forms.py's (one re-export), app.py's (two)
+			"imports": append(slices.Repeat([]string{"<file> -> Desc @fields/" + module + ".py (imports)"}, importers),
+				"<file> -> Gauge @fields/widgets.py (imports)", "<file> -> Widget @fields/widgets.py (imports)"),
+			"extends": {"Gauge -> Gauge @fields/widgets.py (extends)", "MyWidget -> Widget @fields/widgets.py (extends)"},
+			"calls":   {"MyWidget.run -> Widget.draw @fields/widgets.py (typed)"},
+		} {
+			if got := pythonTargets(t, e, kind); !slices.Equal(got, want) {
+				t.Errorf("%s, %s:\n got %q\nwant %q", when, kind, got, want)
+			}
+		}
+	}
+	check("full resolve", "descriptors", 3)
+
+	edit := func(src string, incremental bool) {
+		t.Helper()
+		b := []byte(src + "from fields.widgets import Widget, Gauge\n")
+		var err error
+		if incremental {
+			err = e.ReindexFileIncremental(ctx, wt, "fields/related.py", b, 2, int64(len(b)))
+		} else if err = e.IndexFile(ctx, wt, "fields/related.py", b, 3, int64(len(b))); err == nil {
+			err = e.Resolve(ctx, wt, noopProgress{})
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	edit("from fields.other import Desc\n", true)
+	check("after re-exporting fields.other's Desc", "other", 3)
+	edit("from fields.descriptors import Desc\n", false)
+	check("full resolve after re-exporting fields.descriptors' Desc again", "descriptors", 3)
+	edit("", true)
+	check("after dropping the re-export", "", 0)
+	edit("from fields.descriptors import Desc\n", true)
+	check("after adding it back", "descriptors", 3)
+}
+
+// TestPythonModuleCreated: which modules exist decides a base: one naming a
+// module that is not in the worktree stays unresolved, and once the module is
+// (re-exporting the base with a star import, so no edge or name of its own
+// tells), the base is the one class of its name — and unresolved again when
+// the module goes. Reconcile picks each change up, inherited calls too.
+func TestPythonModuleCreated(t *testing.T) {
+	e := newTestEngine(t)
+	ctx := context.Background()
+	wt := t.TempDir()
+	src := &mutMemSource{files: map[string]string{
+		"lib/impl.py": "class Base:\n    def ping(self): pass\n",
+		"app.py":      "from lib import api\n\n\nclass App(api.Base):\n    def run(self):\n        self.ping()\n",
+	}}
+	check := func(when string, want ...string) {
+		t.Helper()
+		if err := e.Reconcile(ctx, wt, src); err != nil {
+			t.Fatal(err)
+		}
+		got := append(pythonTargets(t, e, "extends"), pythonTargets(t, e, "calls")...)
+		if !slices.Equal(got, want) {
+			t.Errorf("%s:\n got %q\nwant %q", when, got, want)
+		}
+	}
+	check("without lib/api.py", "App.run -> Base.ping @lib/impl.py (name)")
+	src.files["lib/api.py"] = "from lib.impl import *\n"
+	check("with lib/api.py", "App -> Base @lib/impl.py (extends)", "App.run -> Base.ping @lib/impl.py (typed)")
+	delete(src.files, "lib/api.py")
+	check("without lib/api.py again", "App.run -> Base.ping @lib/impl.py (name)")
 }

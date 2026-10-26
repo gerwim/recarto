@@ -18,10 +18,13 @@ import (
 // is a pure function of its own row plus the nodes/edges/type_bindings it joins
 // against (resolve.go). For an edge in an UNCHANGED file, only rows living in a
 // changed ("dirty") file can have moved, and every resolver join reaches another
-// file in exactly one of two ways:
+// file in exactly one of three ways:
 //
-//	(a) a candidate target node m, always matched by m.name = edge.dst_name; or
-//	(b) interface dispatch (stratInterface), which expands an `extends` edge.
+//	(a) a candidate target node m, always matched by m.name = edge.dst_name;
+//	(b) interface dispatch (stratInterface), which expands an `extends` edge; or
+//	(c) a Python import's re-export (resolvePythonModules): another file's
+//	    import edge of the same dst_name, so the dirty files' module-naming
+//	    imports count as names.
 //
 // Case (a) is covered by re-resolving every edge whose dst_name matches a node
 // name (or qualified_name) that was present in a dirty file BEFORE or AFTER the
@@ -29,9 +32,11 @@ import (
 // pre-state names (so a now-stale S5 candidate count is recomputed, not left
 // stale). Case (b) cannot be bounded by names alone (a partial class can declare
 // `: IFoo` and the method in different files), so the caller falls back to a full
-// Resolve whenever a dirty file's `extends` edge set changed (see ExtendsChanged);
-// when it has NOT changed, the interface→implementer structure is identical and
-// (a) is sufficient. Over-inclusion is always safe (re-resolving an unaffected
+// Resolve whenever a dirty file's `extends` edge set changed (see
+// extendsSigForPaths); when it has NOT changed, the interface→implementer
+// structure is identical and (a) is sufficient. Nor can which Python modules
+// exist, which an import or base elsewhere resolves by (resolvePythonModules):
+// creating or deleting a Python file resolves fully too. Over-inclusion is always safe (re-resolving an unaffected
 // edge reproduces its current binding); only under-inclusion would regress, and
 // the construction above admits none.
 //
@@ -77,6 +82,15 @@ INSERT OR IGNORE INTO _affected_names(name)
    WHERE f.worktree = ? AND f.path IN (SELECT path FROM _dirty_paths)`, worktree); err != nil {
 			return err
 		}
+		// ... and what they import by module, which an import elsewhere may take as
+		// a re-export (resolvePythonModules)
+		if _, err := c.ExecContext(ctx, `
+INSERT OR IGNORE INTO _affected_names(name)
+  SELECT e.dst_name FROM edges e JOIN files f ON f.id = e.file_id
+   WHERE f.worktree = ? AND f.path IN (SELECT path FROM _dirty_paths)
+     AND e.kind = 'imports' AND e.dst_recv <> ''`, worktree); err != nil {
+			return err
+		}
 
 		// Affected edges: (A) every edge in a dirty file — re-inserted unresolved by
 		// the reconcile — and (C) every edge anywhere whose dst_name matches an
@@ -119,8 +133,12 @@ INSERT OR IGNORE INTO _resolve_scope(edge_id)
 UPDATE edges SET dst_node_id = (`+nonCallTarget+`)
 WHERE dst_node_id IS NULL
   AND dst_name <> ''
+  AND dst_recv = ''
   AND kind <> 'calls'
   AND id IN (SELECT edge_id FROM _resolve_scope)`, worktree); err != nil {
+			return err
+		}
+		if err := resolvePythonModules(ctx, c, worktree, `id IN (SELECT edge_id FROM _resolve_scope)`); err != nil {
 			return err
 		}
 
@@ -211,9 +229,10 @@ func scopeStrategy(full string) string {
 const maxIncrementalDirty = 200
 
 // namesForPaths returns the distinct node names AND qualified names held by the
-// given worktree-relative paths in the CURRENT index. Called pre-reindex to record
-// what a dirty file contained, so edges that resolved INTO a since-removed symbol
-// are still re-resolved (see ResolveIncremental). Paths are bounded by
+// given worktree-relative paths in the CURRENT index, and the names they import
+// by module (a re-export others may resolve through). Called pre-reindex to
+// record what a dirty file contained, so edges that resolved INTO a since-removed
+// symbol are still re-resolved (see ResolveIncremental). Paths are bounded by
 // maxIncrementalDirty, so a single parametrized IN is fine.
 func (e *Engine) namesForPaths(ctx context.Context, worktree string, paths []string) ([]string, error) {
 	if len(paths) == 0 {
@@ -229,8 +248,12 @@ SELECT n.name FROM nodes n JOIN files f ON f.id = n.file_id
  WHERE f.worktree = ? AND f.path IN (`+placeholders(len(paths))+`)
 UNION
 SELECT n.qualified_name FROM nodes n JOIN files f ON f.id = n.file_id
- WHERE f.worktree = ? AND f.path IN (`+placeholders(len(paths))+`)`,
-		append(append([]any{}, args...), args...)...)
+ WHERE f.worktree = ? AND f.path IN (`+placeholders(len(paths))+`)
+UNION
+SELECT e.dst_name FROM edges e JOIN files f ON f.id = e.file_id
+ WHERE f.worktree = ? AND f.path IN (`+placeholders(len(paths))+`)
+   AND e.kind = 'imports' AND e.dst_recv <> ''`,
+		append(append(append([]any{}, args...), args...), args...)...)
 	if err != nil {
 		return nil, err
 	}
@@ -250,9 +273,10 @@ SELECT n.qualified_name FROM nodes n JOIN files f ON f.id = n.file_id
 
 // extendsSigForPaths returns a set identifying the `extends`/`implements` edges
 // the given paths currently contribute, keyed by "<deriving qualified_name>\x00
-// <base name>\x00<base module>" (the module a Python base names; else empty).
-// Comparing this set before and after a reconcile detects whether a dirty file
-// changed the interface/base structure — the one case the name-scoped
+// <base name>\x00<base module>" (the module a Python base names; else empty),
+// and the Python files among them, keyed "\x00\x00<path>". Comparing this set
+// before and after a reconcile detects whether a dirty file changed the
+// interface/base structure or the Python modules — the cases the name-scoped
 // incremental resolve cannot bound (see ResolveIncremental), forcing a full
 // Resolve.
 func (e *Engine) extendsSigForPaths(ctx context.Context, worktree string, paths []string) (map[string]struct{}, error) {
@@ -271,7 +295,11 @@ SELECT COALESCE(src.qualified_name, ''), e.dst_name, e.dst_recv
   JOIN files f   ON f.id = e.file_id
   LEFT JOIN nodes src ON src.id = e.src_node_id
  WHERE f.worktree = ? AND e.kind = 'extends'
-   AND f.path IN (`+placeholders(len(paths))+`)`, args...)
+   AND f.path IN (`+placeholders(len(paths))+`)
+UNION ALL
+SELECT '', '', path FROM files
+ WHERE worktree = ? AND language = 'python' AND path IN (`+placeholders(len(paths))+`)`,
+		append(args, args...)...)
 	if err != nil {
 		return nil, err
 	}
