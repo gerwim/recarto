@@ -22,6 +22,9 @@ class Triangle(shapes.Shape):  ## def class Triangle; ref Shape; impl Triangle o
     def area(self) -> float:  ## def method Triangle.area
         return self.base * self.height / 2
 
+    def summary(self) -> str:  ## def method Triangle.summary
+        return self.describe()  ## ref describe; call Triangle.summary -> Shape.describe
+
 
 class Inventory:  ## def class Inventory
     store: Repository[Shape]  ## ref Repository; ref Shape
@@ -59,6 +62,7 @@ def main() -> None:  ## def function main
     inventory.add(Circle(2.0))  ## ref add; ref Circle; call main -> Inventory.add; call main -> Circle
     inventory.add(Square(12.0))  ## ref add; ref Square; call main -> Square
     inventory.add(Triangle(3.0, 4.0))  ## ref add; ref Triangle; call main -> Triangle
+    print(Triangle(1.0, 1.0).summary())  ## ref Triangle; ref summary; call main -> Triangle.summary
     small = Circle.unit()  ## ref Circle; ref unit; call main -> Circle.unit
     print(small.diameter, total_area([small, Square(1.0)]))  ## ref diameter; ref total_area; ref Square; call main -> total_area
     print(asyncio.run(fetch_area(small)), report(inventory))  ## ref fetch_area; ref report; call main -> fetch_area; call main -> report

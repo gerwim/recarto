@@ -118,17 +118,20 @@ UPDATE edges SET dst_node_id = NULL
 
 		// Candidate strategies, highest-confidence first. OR IGNORE keeps the first
 		// (best) confidence for a given (edge, target) pair, so the ORDER — S1 self,
-		// S2 typed, S3 static, S4 iface, S5 name, S6 ctor — is significant and must
-		// be preserved. Each INSERT ... RETURNING yields only the rows it actually
-		// inserted (duplicates ignored by OR IGNORE are omitted), which are exactly
-		// the rows that survive in the candidate table, so folding them reproduces
-		// the full-rescan winner. S2/S4 read recv_types (one bound arg); S1/S3 scope
-		// by (worktree, worktree).
+		// S2 typed, S2b inherited, S3 static, S4 iface, S5 name, S6 ctor — is
+		// significant and must be preserved. Each INSERT ... RETURNING yields only the
+		// rows it actually inserted (duplicates ignored by OR IGNORE are omitted),
+		// which are exactly the rows that survive in the candidate table, so folding
+		// them reproduces the full-rescan winner. S2/S4 read recv_types (one bound
+		// arg); S1/S2b/S3 scope by (worktree, worktree).
 		if err := foldStrategy(ctx, c, m, winners, stratSelf+returningCandidates, worktree, worktree); err != nil {
 			return err
 		}
 		prog.Phase("resolving references (2/8: typed receivers)")
 		if err := foldStrategy(ctx, c, m, winners, stratTypedReceiverShared+returningCandidates, worktree); err != nil {
+			return err
+		}
+		if err := foldStrategy(ctx, c, m, winners, stratInheritedShared+returningCandidates, worktree, worktree); err != nil {
 			return err
 		}
 		prog.Phase("resolving references (3/8: static + interface)")
@@ -240,12 +243,14 @@ func buildReceiverTypes(ctx context.Context, c store.Conn, worktree string, m *r
 	}
 	// Explicit TEXT columns matching the affinities the old CREATE ... AS SELECT
 	// inferred (edges.id, edges.dst_name, files.language, type_bindings.type_name),
-	// so the downstream joins on rt.* behave identically.
+	// so the downstream joins on rt.* behave identically. file_id is the call's
+	// file, which S2b's class lookup prefers.
 	if _, err := c.ExecContext(ctx, `CREATE TEMP TABLE recv_types (
   edge_id     TEXT,
   dst_name    TEXT,
   ef_language TEXT,
-  type_name   TEXT)`); err != nil {
+  type_name   TEXT,
+  file_id     TEXT)`); err != nil {
 		return err
 	}
 
@@ -301,7 +306,7 @@ SELECT ed.id, ed.src_node_id, ed.dst_name, ed.dst_recv, ed.file_id
 	}
 
 	stmt, err := c.PrepareContext(ctx,
-		`INSERT INTO recv_types(edge_id, dst_name, ef_language, type_name) VALUES (?,?,?,?)`)
+		`INSERT INTO recv_types(edge_id, dst_name, ef_language, type_name, file_id) VALUES (?,?,?,?,?)`)
 	if err != nil {
 		return err
 	}
@@ -331,7 +336,7 @@ SELECT ed.id, ed.src_node_id, ed.dst_name, ed.dst_recv, ed.file_id
 					continue
 				}
 				seen[b.typeName] = struct{}{}
-				if _, err := stmt.ExecContext(ctx, e.id, e.dstName, lang, b.typeName); err != nil {
+				if _, err := stmt.ExecContext(ctx, e.id, e.dstName, lang, b.typeName, e.fileID); err != nil {
 					return err
 				}
 			}
@@ -829,6 +834,7 @@ func bareCallNeverMethod(lang string) bool { return lang == "rust" || lang == "p
 var callStrategies = []string{
 	stratSelf,
 	stratTypedReceiver,
+	stratInherited,
 	stratStatic,
 	stratInterface,
 	stratNameFallback,
@@ -913,6 +919,86 @@ SELECT rt.edge_id, m.id, 0.5, 'iface'
   CROSS JOIN nodes m   ON m.id = cm.dst_node_id AND m.kind = 'method' AND m.name = rt.dst_name
   JOIN files mf  ON mf.id = m.file_id
  WHERE mf.worktree = ?`
+
+// stratInherited (S2b, Python): the receiver names a class T — its bound type,
+// as for S2, or the receiver itself, as for S3 — that does not declare the
+// method; bind to the declaration on T's nearest ancestor along the resolved
+// extends edges, the one Python's attribute lookup finds (overrides below T are
+// S4's). Confidence 0.9, as for S2: the type is as certain. A T declared in the
+// call's own file shadows same-named classes elsewhere (self's class always is).
+// The full Resolve reads S2's recv_types; the incremental one binds inline.
+const stratInherited = `
+INSERT OR IGNORE INTO edge_candidates(edge_id, dst_node_id, confidence, method)
+WITH RECURSIVE calls AS MATERIALIZED (
+  SELECT ed.id AS edge_id, ed.dst_name, ed.dst_recv, ed.file_id, src.start_byte, src.end_byte
+  FROM files ef
+  CROSS JOIN edges ed ON ed.file_id = ef.id
+       AND ed.kind = 'calls' AND ed.dst_recv <> ''
+  LEFT JOIN nodes src ON src.id = ed.src_node_id
+ WHERE ef.worktree = ? AND ef.language = 'python'
+), recv AS MATERIALIZED (
+  SELECT c.edge_id, c.dst_name, c.file_id, tb.type_name
+    FROM calls c
+    CROSS JOIN type_bindings tb ON tb.file_id = c.file_id AND tb.name = c.dst_recv
+         AND tb.scope_start_byte <= c.start_byte AND c.end_byte <= tb.scope_end_byte
+  UNION
+  SELECT edge_id, dst_name, file_id, dst_recv FROM calls WHERE dst_recv GLOB '[A-Z]*'` + stratInheritedTail
+
+const stratInheritedShared = `
+INSERT OR IGNORE INTO edge_candidates(edge_id, dst_node_id, confidence, method)
+WITH RECURSIVE recv AS MATERIALIZED (
+  SELECT edge_id, dst_name, file_id, type_name FROM recv_types WHERE ef_language = 'python'
+  UNION
+  SELECT ed.id, ed.dst_name, ed.file_id, ed.dst_recv
+    FROM files ef JOIN edges ed ON ed.file_id = ef.id
+   WHERE ef.worktree = ? AND ef.language = 'python' AND ed.kind = 'calls' AND ed.dst_recv GLOB '[A-Z]*'` + stratInheritedTail
+
+// stratInheritedTail is S2b after recv(edge_id, dst_name, file_id, type_name):
+// the classes each type names (the call file's own, else all), their ancestors,
+// and per class and method name the nearest declaration. Each step runs once
+// per distinct class or name, not per call: a test class's thousand
+// self.assert*() calls climb its hierarchy once.
+const stratInheritedTail = `
+), pairs AS MATERIALIZED (
+  SELECT DISTINCT type_name, file_id FROM recv
+), local AS MATERIALIZED (
+  SELECT p.type_name, p.file_id, t.id AS root_id
+    FROM pairs p
+    CROSS JOIN nodes t ON t.file_id = p.file_id AND t.name = p.type_name AND t.kind = 'class'
+), roots AS MATERIALIZED (
+  SELECT type_name, file_id, root_id FROM local
+  UNION ALL
+  SELECT p.type_name, p.file_id, t.id
+    FROM pairs p
+    CROSS JOIN nodes t ON t.name = p.type_name AND t.kind = 'class'
+   WHERE NOT EXISTS (SELECT 1 FROM local l WHERE l.type_name = p.type_name AND l.file_id = p.file_id)
+), anc(root_id, node_id, depth) AS (
+  SELECT DISTINCT root_id, root_id, 0 FROM roots
+  UNION
+  SELECT anc.root_id, ext.dst_node_id, anc.depth + 1
+    FROM anc
+    CROSS JOIN edges ext ON ext.src_node_id = anc.node_id AND ext.kind = 'extends'
+   WHERE ext.dst_node_id IS NOT NULL AND anc.depth < 8
+), asks AS MATERIALIZED (
+  SELECT DISTINCT ro.root_id, r.dst_name
+    FROM recv r
+    CROSS JOIN roots ro ON ro.type_name = r.type_name AND ro.file_id = r.file_id
+), found AS MATERIALIZED (
+  SELECT a.root_id, a.dst_name, m.id AS dst_node_id, anc.depth,
+         MIN(anc.depth) OVER (PARTITION BY a.root_id, a.dst_name) AS nearest
+    FROM asks a
+    CROSS JOIN anc ON anc.root_id = a.root_id
+    CROSS JOIN nodes cls ON cls.id = anc.node_id
+    CROSS JOIN nodes m ON m.name = a.dst_name AND m.parent_name = cls.name AND m.kind = 'method'
+    CROSS JOIN edges cm ON cm.dst_node_id = m.id AND cm.kind = 'contains' AND cm.src_node_id = anc.node_id
+)
+SELECT r.edge_id, f.dst_node_id, 0.9, 'typed'
+  FROM recv r
+  CROSS JOIN roots ro ON ro.type_name = r.type_name AND ro.file_id = r.file_id
+  CROSS JOIN found f ON f.root_id = ro.root_id AND f.dst_name = r.dst_name
+  JOIN nodes mn ON mn.id = f.dst_node_id
+  JOIN files mf ON mf.id = mn.file_id
+ WHERE f.depth = f.nearest AND f.depth > 0 AND mf.worktree = ?`
 
 // stratStatic (S3): the receiver token is itself a type name T (Foo.Create());
 // bind to T.<method>. Confidence 0.9. A receiver that is a variable (no matching

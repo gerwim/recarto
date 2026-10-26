@@ -45,11 +45,16 @@ class Circle(Shape):
 
 def area(r: float) -> float:
     return 3.14 * r * r
+
+
+class Disc(Circle):
+    def shade(self) -> float:
+        return self.area() + len(self.describe())
 `)
 
 var pythonService = []byte(`from typing import Optional
 
-from geo.shapes import Circle, Shape
+from geo.shapes import Circle, Disc, Shape
 
 
 class Repo:
@@ -79,13 +84,17 @@ def main():
 
 def total(s: Shape | None) -> str:
     return s.describe()
+
+
+def show(c: Circle) -> str:
+    return c.describe() + str(Disc.unit())
 `)
 
 // TestPythonGraph indexes a two-module package and checks what the graph tools
 // see: methods qualify as Class.method; self, cls, typed parameters and locals,
-// and self.x attributes resolve typed; base-typed receivers dispatch to
-// overrides; super() binds the base class's method; a class call binds the
-// class; and a bare call never binds a method.
+// and self.x attributes resolve typed, inherited methods included; base-typed
+// receivers dispatch to overrides; super() binds the base class's method; a
+// class call binds the class; and a bare call never binds a method.
 func TestPythonGraph(t *testing.T) {
 	e := newTestEngine(t)
 	ctx := context.Background()
@@ -124,6 +133,11 @@ func TestPythonGraph(t *testing.T) {
 		"main -> Service.run (typed)", // svc = Service(...)
 		"main -> total (name)",
 		"total -> Shape.describe (typed)", // s: Shape | None
+		// inherited: the nearest ancestor declaring the method
+		"Disc.shade -> Circle.area (typed)",
+		"Disc.shade -> Shape.describe (typed)",
+		"show -> Shape.describe (typed)", // c: Circle
+		"show -> Circle.unit (typed)",    // Disc.unit()
 	} {
 		if !slices.Contains(got, want) {
 			t.Errorf("missing candidate %q", want)
@@ -138,6 +152,9 @@ func TestPythonGraph(t *testing.T) {
 		if strings.HasPrefix(c, "Circle.area -> ") && c != "Circle.area -> area (name)" {
 			t.Errorf("bare area() bound to %q; a bare Python call never names a method", c)
 		}
+	}
+	if slices.Contains(got, "Disc.shade -> Shape.area (typed)") {
+		t.Error("Disc's self.area() bound to Shape.area; Circle.area overrides it")
 	}
 	if t.Failed() {
 		t.Logf("candidates:\n%s", strings.Join(got, "\n"))
