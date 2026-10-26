@@ -14,6 +14,7 @@ import (
 	tscs "github.com/tree-sitter/tree-sitter-c-sharp/bindings/go"
 	tsgo "github.com/tree-sitter/tree-sitter-go/bindings/go"
 	tsjs "github.com/tree-sitter/tree-sitter-javascript/bindings/go"
+	tspy "github.com/tree-sitter/tree-sitter-python/bindings/go"
 	tsrust "github.com/tree-sitter/tree-sitter-rust/bindings/go"
 	tsts "github.com/tree-sitter/tree-sitter-typescript/bindings/go"
 )
@@ -28,7 +29,7 @@ type Registry struct {
 	queries map[string]*sitter.Query
 }
 
-// NewRegistry registers every language. It compiles no query: compiling all six
+// NewRegistry registers every language. It compiles no query: compiling them all
 // costs ~0.25 s of CPU, which every hook and CLI process paid at start-up even
 // when it parsed nothing. A malformed query surfaces on that language's first
 // ParseFile (and in the package tests).
@@ -41,6 +42,7 @@ func NewRegistry() (*Registry, error) {
 			"tsx":        sitter.NewLanguage(tsts.LanguageTSX()),
 			"javascript": sitter.NewLanguage(tsjs.Language()),
 			"rust":       sitter.NewLanguage(tsrust.Language()),
+			"python":     sitter.NewLanguage(tspy.Language()),
 		},
 		queries: map[string]*sitter.Query{},
 	}, nil
@@ -86,6 +88,8 @@ func LangForExt(path string) (string, bool) {
 		return "javascript", true
 	case ".rs":
 		return "rust", true
+	case ".py": // not .pyi: stubs repeat the .py definitions, making every lookup ambiguous
+		return "python", true
 	}
 	return "", false
 }

@@ -153,13 +153,15 @@ func (e *Engine) Reconcile(ctx context.Context, worktree string, src Source, opt
 	incremental := !pending && len(have) > 0 && len(dirtyPaths) > 0 && len(dirtyPaths) <= maxIncrementalDirty
 	// Pre-edit signals, captured BEFORE the rewrite deletes the old rows: the names
 	// a dirty file held (so a removed/renamed symbol still re-resolves the edges
-	// that pointed at it) and its `extends` edges (so a structural change falls back
-	// to a full resolve — see ResolveIncremental).
-	var oldNames []string
+	// that pointed at it), the targets of the bases the rewrite re-creates or
+	// unlinks (so a call inherited through one that moves re-resolves too), and its
+	// `extends` edges (so a structural change falls back to a full resolve — see
+	// ResolveIncremental).
+	var old dirtyState
 	var oldExtends map[string]struct{}
 	if incremental {
 		var err error
-		if oldNames, err = e.namesForPaths(ctx, worktree, dirtyPaths); err != nil {
+		if old, err = e.captureDirty(ctx, worktree, dirtyPaths); err != nil {
 			return err
 		}
 		if oldExtends, err = e.extendsSigForPaths(ctx, worktree, dirtyPaths); err != nil {
@@ -253,14 +255,20 @@ func (e *Engine) Reconcile(ctx context.Context, worktree string, src Source, opt
 		// Incremental resolve is exact only while the worktree's interface/base
 		// structure is unchanged (ResolveIncremental); a dirty file that gained or
 		// lost an `extends` edge can redirect interface dispatch in OTHER files,
-		// which the name-scoped affected set cannot see — so re-resolve fully then.
+		// which the name-scoped affected set cannot see — so re-resolve fully then
+		// (and when a Python module others name appeared or went: see
+		// structureChanged).
 		useIncremental := incremental
 		if useIncremental {
 			newExtends, err := e.extendsSigForPaths(ctx, worktree, dirtyPaths)
 			if err != nil {
 				return err
 			}
-			useIncremental = sameStringSet(oldExtends, newExtends)
+			full, err := e.structureChanged(ctx, worktree, oldExtends, newExtends)
+			if err != nil {
+				return err
+			}
+			useIncremental = !full
 		}
 		if useIncremental {
 			// The incremental path has no sub-phases of its own; announce the base
@@ -268,7 +276,7 @@ func (e *Engine) Reconcile(ctx context.Context, worktree string, src Source, opt
 			// hint, the crash-safety cancel hook) still see the resolve stage begin.
 			// A full Resolve emits the base label (and its sub-phases) itself.
 			o.progress.Phase("resolving references")
-			if err := e.ResolveIncremental(ctx, worktree, dirtyPaths, oldNames); err != nil {
+			if err := e.ResolveIncremental(ctx, worktree, dirtyPaths, old); err != nil {
 				return err
 			}
 		} else if err := e.Resolve(ctx, worktree, o.progress); err != nil {

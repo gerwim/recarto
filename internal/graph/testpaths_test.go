@@ -13,6 +13,7 @@ func TestIsTestPath(t *testing.T) {
 		"frontend/src/app/login.test.ts",
 		"frontend/src/app/login.spec.tsx",
 		"api/Foo/BarTests.cs",
+		"pkg/test_models.py", "pkg/models_test.py", "app/conftest.py", "polls/tests.py",
 	}
 	for _, p := range tests {
 		if !isTestPath(p) {
@@ -26,6 +27,8 @@ func TestIsTestPath(t *testing.T) {
 		"frontend/src/app/login.ts",
 		"api/internal/testing/harness.go", // "testing" segment, not "test"
 		"src/contest/winner.cs",           // "contest" is not the "test" segment
+		"numpy/testing.py",                // a test-helper module, not a test
+		"pkg/attest_policy.py",
 	}
 	for _, p := range human {
 		if isTestPath(p) {

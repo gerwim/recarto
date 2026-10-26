@@ -13,7 +13,7 @@ import (
 // Resolve links reference edges to a defining node within the same worktree.
 // Non-call edges (extends/implements/imports/references) bind dst_node_id by
 // matching dst_name to a node name/qualified_name, scoped to the language FAMILY
-// ({csharp}, {go}, {rust}, web {typescript,tsx,javascript}) so a C# `.Select(...)` can
+// ({csharp}, {go}, {rust}, {python}, web {typescript,tsx,javascript}) so a C# `.Select(...)` can
 // never bind to a React `Select`, preferring same-file then same-directory then a
 // stable id order. Call edges are resolved into a confidence-ranked candidate set
 // (edge_candidates) by the strategy passes in callStrategies; edges.dst_node_id
@@ -118,17 +118,20 @@ UPDATE edges SET dst_node_id = NULL
 
 		// Candidate strategies, highest-confidence first. OR IGNORE keeps the first
 		// (best) confidence for a given (edge, target) pair, so the ORDER — S1 self,
-		// S2 typed, S3 static, S4 iface, S5 name, S6 ctor — is significant and must
-		// be preserved. Each INSERT ... RETURNING yields only the rows it actually
-		// inserted (duplicates ignored by OR IGNORE are omitted), which are exactly
-		// the rows that survive in the candidate table, so folding them reproduces
-		// the full-rescan winner. S2/S4 read recv_types (one bound arg); S1/S3 scope
-		// by (worktree, worktree).
+		// S2 typed, S2b inherited, S3 static, S4 iface, S5 name, S6 ctor — is
+		// significant and must be preserved. Each INSERT ... RETURNING yields only the
+		// rows it actually inserted (duplicates ignored by OR IGNORE are omitted),
+		// which are exactly the rows that survive in the candidate table, so folding
+		// them reproduces the full-rescan winner. S2/S4 read recv_types (one bound
+		// arg); S1/S2b/S3 scope by (worktree, worktree).
 		if err := foldStrategy(ctx, c, m, winners, stratSelf+returningCandidates, worktree, worktree); err != nil {
 			return err
 		}
 		prog.Phase("resolving references (2/8: typed receivers)")
 		if err := foldStrategy(ctx, c, m, winners, stratTypedReceiverShared+returningCandidates, worktree); err != nil {
+			return err
+		}
+		if err := foldStrategy(ctx, c, m, winners, stratInheritedShared+returningCandidates, worktree, worktree); err != nil {
 			return err
 		}
 		prog.Phase("resolving references (3/8: static + interface)")
@@ -185,11 +188,252 @@ UPDATE edges SET dst_node_id = NULL
 }
 
 // resolveNonCallEdges binds dst_node_id for every non-call reference edge by
-// matching dst_name to a node name/qualified_name within the language family,
-// preferring same-file then same-top-level-directory then a stable id order.
+// matching dst_name to a node name/qualified_name within the language family
+// (see nonCallTarget for the preference order).
 func resolveNonCallEdges(ctx context.Context, c store.Conn, worktree string) error {
+	const inWorktree = `file_id IN (SELECT id FROM files WHERE worktree = ?)`
+	if _, err := c.ExecContext(ctx, `
+UPDATE edges SET dst_node_id = (`+nonCallTarget+`)
+WHERE dst_node_id IS NULL
+  AND dst_name <> ''
+  AND dst_recv = ''
+  AND kind <> 'calls'
+  AND `+inWorktree, worktree, worktree); err != nil {
+		return err
+	}
+	// A Python import or base naming its module also hangs on files other than its
+	// target's — a re-export, which modules exist — whose reindex does not unset
+	// it: re-derive them all, resolved or not.
+	return resolvePythonModules(ctx, c, worktree, inWorktree, worktree)
+}
+
+// buildPyModules (re)creates the py_mod temp table resolvePythonModules reads:
+// the module names a Python file of the worktree answers to — its dotted path
+// and each dotted suffix, so an import from under a source root (flask.app, for
+// src/flask/app.py) finds it too; a package's is its __init__.py — that named
+// holds, or holds a package of. "Is file f module m, or under package m?" is a
+// seek on f's few names; "the files of module m" one on the module index.
+func buildPyModules(ctx context.Context, c store.Conn, worktree string, named map[string]bool) error {
+	for _, ddl := range []string{
+		`DROP TABLE IF EXISTS py_mod`,
+		`CREATE TEMP TABLE py_mod (file_id TEXT NOT NULL, module TEXT NOT NULL, PRIMARY KEY (file_id, module)) WITHOUT ROWID`,
+		`CREATE INDEX py_mod_module ON py_mod(module)`,
+	} {
+		if _, err := c.ExecContext(ctx, ddl); err != nil {
+			return err
+		}
+	}
+	type pyFile struct{ id, path string }
+	var files []pyFile
+	if err := scan(ctx, c, `SELECT id, path FROM files WHERE worktree = ? AND language = 'python'`,
+		func(rows *sql.Rows) error {
+			var f pyFile
+			if err := rows.Scan(&f.id, &f.path); err != nil {
+				return err
+			}
+			files = append(files, f)
+			return nil
+		}, worktree); err != nil {
+		return err
+	}
+	stmt, err := c.PrepareContext(ctx, `INSERT OR IGNORE INTO py_mod(file_id, module) VALUES (?,?)`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+	for _, f := range files {
+		for _, m := range pyModuleNames(f.path) {
+			if !pyNamed(named, m) {
+				continue
+			}
+			if _, err := stmt.ExecContext(ctx, f.id, m); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// pyNamed reports whether named holds module m or a package of it.
+func pyNamed(named map[string]bool, m string) bool {
+	for i := range len(m) {
+		if m[i] == '.' && named[m[:i]] {
+			return true
+		}
+	}
+	return named[m]
+}
+
+// pyModuleNames lists the module names a Python file answers to: its dotted
+// path and each dotted suffix (see buildPyModules).
+func pyModuleNames(path string) []string {
+	segs := strings.Split(strings.TrimSuffix(strings.TrimSuffix(path, ".py"), "/__init__"), "/")
+	names := make([]string, len(segs))
+	for i := range segs {
+		names[i] = strings.Join(segs[i:], ".")
+	}
+	return names
+}
+
+// resolvePythonModules resolves the Python imports and bases that name their
+// module (dst_recv) — `from m import X`, `class C(m.X)` — within that module: a
+// module-level X (never a method: `from django import forms` is no
+// InlineAdminFormSet.forms) in m.py, else in a file of package m/ (a star
+// re-export) unless m.X is a submodule (`from django.contrib import messages` is
+// no context_processors.messages), possibly under a source root, never in the
+// importing file; otherwise not at all (wsgiref's ServerHandler is not the
+// worktree's). Candidates are ranked once per (module, name), not per edge:
+// Django has 2.4k `models.Model` bases.
+//
+// If m is in the worktree without X, it re-exports X (`from .base import X` in
+// an __init__, or a module importing it for its users): an import then takes
+// the target of m's own import of X, itself resolved by module — twice, to
+// follow a re-export of a re-export — while a variable m re-exports
+// (django.urls' path) stays unresolved, being no symbol. A base takes the one
+// module-level Python class X outside its file, if there is exactly one — a
+// wrong class would mislead every call it inherits, at full confidence — and
+// does not follow import edges: that would make its inherited calls depend on
+// another file's imports, which neither the incremental resolver's names nor
+// its full-resolve triggers track (which modules exist, they do: see
+// structureChanged). scope selects the edges, which are derived in the py_edges
+// temp table and written back where their target changes: a full Resolve
+// re-derives thousands, and rewriting the unchanged ones would crowd the page
+// cache (it slowed Django's name fallback by 0.9s).
+func resolvePythonModules(ctx context.Context, c store.Conn, worktree, scope string, scopeArgs ...any) error {
+	for _, ddl := range []string{
+		`DROP TABLE IF EXISTS py_edges`, `DROP TABLE IF EXISTS py_pairs`, `DROP TABLE IF EXISTS py_ranked`,
+		`CREATE TEMP TABLE py_edges (id TEXT PRIMARY KEY, kind TEXT, dst_recv TEXT, dst_name TEXT, file_id TEXT, bound TEXT, target TEXT)`,
+	} {
+		if _, err := c.ExecContext(ctx, ddl); err != nil {
+			return err
+		}
+	}
+	if _, err := c.ExecContext(ctx, `
+INSERT INTO py_edges (id, kind, dst_recv, dst_name, file_id, bound)
+SELECT id, kind, dst_recv, dst_name, file_id, dst_node_id FROM edges
+ WHERE dst_recv <> '' AND kind <> 'calls' AND `+scope, scopeArgs...); err != nil {
+		return err
+	}
+	// The (module, name) pairs to resolve, which decide the modules that matter:
+	// those they name, and (as pkg.X) may name. An edit of no Python file has none.
+	if _, err := c.ExecContext(ctx, `CREATE TEMP TABLE py_pairs AS SELECT DISTINCT dst_recv, dst_name FROM py_edges`); err != nil {
+		return err
+	}
+	named := map[string]bool{}
+	if err := scan(ctx, c, `SELECT dst_recv, dst_name FROM py_pairs`, func(rows *sql.Rows) error {
+		var recv, name string
+		if err := rows.Scan(&recv, &name); err != nil {
+			return err
+		}
+		named[recv], named[recv+"."+name] = true, true
+		return nil
+	}); err != nil {
+		return err
+	}
+	if len(named) > 0 {
+		if err := derivePythonModules(ctx, c, worktree, named); err != nil {
+			return err
+		}
+		for _, stmt := range []string{
+			`DELETE FROM py_edges WHERE target IS bound`,
+			`UPDATE edges SET dst_node_id = (SELECT target FROM py_edges pe WHERE pe.id = edges.id)
+			  WHERE id IN (SELECT id FROM py_edges)`,
+		} {
+			if _, err := c.ExecContext(ctx, stmt); err != nil {
+				return err
+			}
+		}
+	}
+	for _, t := range []string{"py_edges", "py_pairs", "py_ranked", "py_mod"} {
+		if _, err := c.ExecContext(ctx, `DROP TABLE IF EXISTS `+t); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// derivePythonModules sets py_edges.target by the rules of resolvePythonModules,
+// over the modules named holds.
+func derivePythonModules(ctx context.Context, c store.Conn, worktree string, named map[string]bool) error {
+	if err := buildPyModules(ctx, c, worktree, named); err != nil {
+		return err
+	}
+	if _, err := c.ExecContext(ctx, `
+CREATE TEMP TABLE py_ranked AS
+SELECT p.dst_recv, p.dst_name, n.id AS node_id, n.file_id, f.path, n.start_byte,
+       MIN(pm.module <> p.dst_recv) AS submodule
+  FROM py_pairs p
+  JOIN nodes n ON n.name = p.dst_name AND n.parent_name = ''
+  JOIN py_mod pm ON pm.file_id = n.file_id
+       AND (pm.module = p.dst_recv
+            OR (pm.module BETWEEN p.dst_recv || '.' AND p.dst_recv || '/'
+                AND NOT EXISTS (SELECT 1 FROM py_mod sm WHERE sm.module = p.dst_recv || '.' || p.dst_name)))
+  JOIN files f ON f.id = n.file_id
+ GROUP BY p.dst_recv, p.dst_name, n.id`); err != nil {
+		return err
+	}
+	if _, err := c.ExecContext(ctx, `CREATE INDEX py_ranked_key ON py_ranked(dst_recv, dst_name)`); err != nil {
+		return err
+	}
+	if _, err := c.ExecContext(ctx, `
+UPDATE py_edges SET target = (
+  SELECT r.node_id FROM py_ranked r
+   WHERE r.dst_recv = py_edges.dst_recv AND r.dst_name = py_edges.dst_name AND r.file_id <> py_edges.file_id
+   ORDER BY r.submodule, r.path, r.start_byte, r.node_id
+   LIMIT 1)`); err != nil {
+		return err
+	}
+	// Re-exports: m's own import of X, as just derived when it is one of py_edges,
+	// else as bound. Only a module of the worktree re-exports: `from typing
+	// import Any` follows none.
+	const imports = `
+WITH pending AS MATERIALIZED (
+  SELECT DISTINCT dst_recv, dst_name FROM py_edges
+   WHERE target IS NULL AND kind = 'imports'
+     AND EXISTS (SELECT 1 FROM py_mod pm WHERE pm.module = py_edges.dst_recv)
+), via AS MATERIALIZED (
+  SELECT p.dst_recv, p.dst_name, (
+    SELECT CASE WHEN pe.id IS NULL THEN re.dst_node_id ELSE pe.target END
+      FROM py_mod pm
+      CROSS JOIN edges re ON re.file_id = pm.file_id
+      LEFT JOIN py_edges pe ON pe.id = re.id
+      JOIN files mf ON mf.id = pm.file_id
+     WHERE pm.module = p.dst_recv AND re.kind = 'imports' AND re.dst_name = p.dst_name
+       AND CASE WHEN pe.id IS NULL THEN re.dst_node_id ELSE pe.target END IS NOT NULL
+     ORDER BY mf.path
+     LIMIT 1) AS target
+    FROM pending p
+)
+UPDATE py_edges SET target = v.target
+  FROM via v
+ WHERE v.target IS NOT NULL AND v.dst_recv = py_edges.dst_recv AND v.dst_name = py_edges.dst_name
+   AND py_edges.target IS NULL AND py_edges.kind = 'imports'`
+	for range 2 {
+		if _, err := c.ExecContext(ctx, imports); err != nil {
+			return err
+		}
+	}
 	_, err := c.ExecContext(ctx, `
-UPDATE edges SET dst_node_id = (
+UPDATE py_edges SET target = (
+  SELECT MIN(n.id)
+    FROM nodes n
+    JOIN files f ON f.id = n.file_id
+   WHERE f.worktree = ? AND f.language = 'python' AND f.id <> py_edges.file_id
+     AND n.name = py_edges.dst_name AND n.kind = 'class' AND n.parent_name = ''
+  HAVING COUNT(*) = 1)
+WHERE target IS NULL AND kind = 'extends'
+  AND EXISTS (SELECT 1 FROM py_mod pm WHERE pm.module = py_edges.dst_recv)`, worktree)
+	return err
+}
+
+// nonCallTarget picks a non-call edge's target (the worktree is its one bound
+// parameter): a node named dst_name in the edge's language family, preferring
+// the edge's own file, its top-level directory, then a stable order. An extends
+// edge never targets its own class. Python imports and bases that name their
+// module (dst_recv, the only non-call edges carrying one) are resolvePythonModules';
+// the rest of Python's imports name a module (`import json`), which is no node,
+// and its bases only a class (`class L(list)` is not BaseFinder.list).
+const nonCallTarget = `
   SELECT n.id
     FROM nodes n
     JOIN files f  ON f.id = n.file_id
@@ -199,6 +443,8 @@ UPDATE edges SET dst_node_id = (
      AND ( ef.language = f.language
            OR ( ef.language IN ('typescript','tsx','javascript')
                 AND f.language IN ('typescript','tsx','javascript') ) )
+     AND NOT (edges.kind = 'extends' AND n.id IS edges.src_node_id)
+     AND NOT (ef.language = 'python' AND (edges.kind = 'imports' OR (edges.kind = 'extends' AND n.kind <> 'class')))
    ORDER BY
      CASE WHEN f.id = edges.file_id THEN 0 ELSE 1 END,
      -- same top-level directory next. instr(path,'/')=0 for a root-level file, and
@@ -208,13 +454,7 @@ UPDATE edges SET dst_node_id = (
           THEN 0 ELSE 1 END,
      -- Stable tiebreak (see the call-edge denormalize): reproducible across indexes.
      f.path, n.start_byte, n.id
-   LIMIT 1)
-WHERE dst_node_id IS NULL
-  AND dst_name <> ''
-  AND kind <> 'calls'
-  AND file_id IN (SELECT id FROM files WHERE worktree = ?)`, worktree, worktree)
-	return err
-}
+   LIMIT 1`
 
 // buildReceiverTypes (re)creates the recv_types temp table: for every receiver
 // call in the worktree, the bound type(s) of its receiver token, resolved via a
@@ -240,12 +480,18 @@ func buildReceiverTypes(ctx context.Context, c store.Conn, worktree string, m *r
 	}
 	// Explicit TEXT columns matching the affinities the old CREATE ... AS SELECT
 	// inferred (edges.id, edges.dst_name, files.language, type_bindings.type_name),
-	// so the downstream joins on rt.* behave identically.
+	// so the downstream joins on rt.* behave identically. file_id is the call's
+	// file, which S2b's class lookup prefers; local_class is 1 when that is a
+	// Python file declaring a class of the type's name, which shadows same-named
+	// ones elsewhere (S2, S4) — known per row here, it costs them no node lookup
+	// per candidate (Django has dozens of classes named Book).
 	if _, err := c.ExecContext(ctx, `CREATE TEMP TABLE recv_types (
   edge_id     TEXT,
   dst_name    TEXT,
   ef_language TEXT,
-  type_name   TEXT)`); err != nil {
+  type_name   TEXT,
+  file_id     TEXT,
+  local_class INTEGER)`); err != nil {
 		return err
 	}
 
@@ -278,6 +524,22 @@ SELECT tb.file_id, tb.name, tb.type_name, tb.scope_start_byte, tb.scope_end_byte
 		return err
 	}
 
+	// The classes each Python file declares, for local_class.
+	classes := map[fileName]bool{}
+	if err := scan(ctx, c, `
+SELECT n.file_id, n.name FROM nodes n JOIN files f ON f.id = n.file_id
+ WHERE f.worktree = ? AND f.language = 'python' AND n.kind = 'class'`,
+		func(rows *sql.Rows) error {
+			var k fileName
+			if err := rows.Scan(&k.file, &k.name); err != nil {
+				return err
+			}
+			classes[k] = true
+			return nil
+		}, worktree); err != nil {
+		return err
+	}
+
 	// Receiver call edges in the worktree, materialized so the cursor is closed
 	// before inserting (one connection cannot read and write concurrently).
 	type recvEdge struct {
@@ -301,7 +563,7 @@ SELECT ed.id, ed.src_node_id, ed.dst_name, ed.dst_recv, ed.file_id
 	}
 
 	stmt, err := c.PrepareContext(ctx,
-		`INSERT INTO recv_types(edge_id, dst_name, ef_language, type_name) VALUES (?,?,?,?)`)
+		`INSERT INTO recv_types(edge_id, dst_name, ef_language, type_name, file_id, local_class) VALUES (?,?,?,?,?,?)`)
 	if err != nil {
 		return err
 	}
@@ -331,7 +593,8 @@ SELECT ed.id, ed.src_node_id, ed.dst_name, ed.dst_recv, ed.file_id
 					continue
 				}
 				seen[b.typeName] = struct{}{}
-				if _, err := stmt.ExecContext(ctx, e.id, e.dstName, lang, b.typeName); err != nil {
+				local := lang == "python" && classes[fileName{e.fileID, b.typeName[strings.LastIndex(b.typeName, ".")+1:]}]
+				if _, err := stmt.ExecContext(ctx, e.id, e.dstName, lang, b.typeName, e.fileID, local); err != nil {
 					return err
 				}
 			}
@@ -359,8 +622,9 @@ func scan(ctx context.Context, c store.Conn, query string, fn func(*sql.Rows) er
 
 // resolveNameFallback is the Go form of stratNameFallback (S5): for every call
 // edge that no higher-confidence strategy matched, bind it to same-name callables
-// in the language family, capped at 10 per edge in locality order, with a
-// confidence that reflects ambiguity (a unique match is 0.45, several are 0.2).
+// in the language family (no method for a bare call where bareCallNeverMethod),
+// capped at 10 per edge in locality order, with a confidence that reflects
+// ambiguity (a unique match is 0.45, several are 0.2).
 //
 // It is the name-only fallback and by far the largest candidate producer, so the
 // SQL form's PARTITION-BY window sort over ~786k rows was the largest resolve step
@@ -414,17 +678,18 @@ SELECT name FROM nodes
 	type matchNode struct {
 		id, fileID string
 		start      int64
+		method     bool
 	}
 	byName := map[string][]matchNode{}
 	if err := scan(ctx, c, `
-SELECT n.id, n.name, n.file_id, n.start_byte
+SELECT n.id, n.name, n.file_id, n.start_byte, n.kind = 'method'
   FROM nodes n JOIN files f ON f.id = n.file_id
  WHERE f.worktree = ?
    AND n.kind IN ('method','property','constructor','function')`,
 		func(rows *sql.Rows) error {
 			var name string
 			var m matchNode
-			if err := rows.Scan(&m.id, &name, &m.fileID, &m.start); err != nil {
+			if err := rows.Scan(&m.id, &name, &m.fileID, &m.start, &m.method); err != nil {
 				return err
 			}
 			byName[name] = append(byName[name], m)
@@ -434,16 +699,21 @@ SELECT n.id, n.name, n.file_id, n.start_byte
 	}
 
 	// Eligible call edges, materialized so the cursor is closed before inserting
-	// (one connection cannot read and write concurrently).
-	type callEdge struct{ id, dstName, fileID string }
+	// (one connection cannot read and write concurrently). A Python super() call
+	// is not one: it binds through its class's bases (S2b) or not at all, never
+	// to a same-named method of the class itself or of an unrelated one.
+	type callEdge struct {
+		id, dstName, fileID string
+		bare                bool // no receiver
+	}
 	var calls []callEdge
 	if err := scan(ctx, c, `
-SELECT ed.id, ed.dst_name, ed.file_id
+SELECT ed.id, ed.dst_name, ed.file_id, ed.dst_recv = ''
   FROM edges ed JOIN files f ON f.id = ed.file_id
- WHERE f.worktree = ? AND ed.kind = 'calls' AND ed.dst_name <> ''`,
+ WHERE f.worktree = ? AND ed.kind = 'calls' AND ed.dst_name <> '' AND ed.dst_recv <> 'super()'`,
 		func(rows *sql.Rows) error {
 			var e callEdge
-			if err := rows.Scan(&e.id, &e.dstName, &e.fileID); err != nil {
+			if err := rows.Scan(&e.id, &e.dstName, &e.fileID, &e.bare); err != nil {
 				return err
 			}
 			calls = append(calls, e)
@@ -478,10 +748,11 @@ SELECT ed.id, ed.dst_name, ed.file_id
 		}
 		ef := files[e.fileID]
 		efTop := topDir(ef.path)
+		noMethods := e.bare && bareCallNeverMethod(ef.lang)
 		cand = cand[:0]
 		for _, m := range byName[e.dstName] {
 			mf := files[m.fileID]
-			if !sameLangFamily(ef.lang, mf.lang) {
+			if !sameLangFamily(ef.lang, mf.lang) || (noMethods && m.method) {
 				continue
 			}
 			cand = append(cand, ranked{
@@ -807,6 +1078,11 @@ func isWebLang(l string) bool {
 	return l == "typescript" || l == "tsx" || l == "javascript"
 }
 
+// bareCallNeverMethod reports whether a call without a receiver can never name a
+// method in lang: Rust and Python methods take self.m() / Self::m(). The SQL
+// strategies spell the same set as ('rust','python').
+func bareCallNeverMethod(lang string) bool { return lang == "rust" || lang == "python" }
+
 // callStrategies are the canonical INSERT OR IGNORE passes into edge_candidates,
 // applied in priority order (highest confidence first); each binds
 // (worktree, worktree). The full Resolve runs S2/S4 from a shared recv_types prefix
@@ -818,6 +1094,7 @@ func isWebLang(l string) bool {
 var callStrategies = []string{
 	stratSelf,
 	stratTypedReceiver,
+	stratInherited,
 	stratStatic,
 	stratInterface,
 	stratNameFallback,
@@ -847,10 +1124,11 @@ SELECT ed.id, m.id, 0.45, 'ctor'
    AND ef.language = mf.language
    AND NOT EXISTS (SELECT 1 FROM edge_candidates ec0 WHERE ec0.edge_id = ed.id)`
 
-// stratInterface (S4, C#/Rust): the receiver's bound type T is an interface, base
+// stratInterface (S4, C#/Rust/Python): the receiver's bound type T is an interface, base
 // class or trait; expand to <method> on each implementing/deriving type (a Rust
 // impl block), found via the extends edges (X extends/implements T) and X's
-// contained methods. Confidence 0.5 — a set of possible dispatch targets. Go interfaces are structural (no
+// contained methods, in the call's language family (a C# T is never a Python
+// call's). Confidence 0.5 — a set of possible dispatch targets. Go interfaces are structural (no
 // extends edge), so this yields nothing for Go (intended: Go stays S5).
 const stratInterface = `
 INSERT OR IGNORE INTO edge_candidates(edge_id, dst_node_id, confidence, method)
@@ -868,7 +1146,13 @@ SELECT ed.id, m.id, 0.5, 'iface'
   CROSS JOIN edges cm  ON cm.kind = 'contains' AND cm.src_node_id = ext.src_node_id
   CROSS JOIN nodes m   ON m.id = cm.dst_node_id AND m.kind = 'method' AND m.name = ed.dst_name
   JOIN files mf  ON mf.id = m.file_id
- WHERE ef.worktree = ? AND mf.worktree = ?`
+ WHERE ef.worktree = ? AND mf.worktree = ?
+   AND ( ef.language = mf.language
+         OR ( ef.language IN ('typescript','tsx','javascript')
+              AND mf.language IN ('typescript','tsx','javascript') ) )
+   -- Python: a class the call's own file declares shadows same-named ones elsewhere
+   AND NOT ( ef.language = 'python' AND iface.file_id <> ed.file_id
+             AND EXISTS (SELECT 1 FROM nodes lc WHERE lc.file_id = ed.file_id AND lc.kind = 'class' AND lc.name = iface.name) )`
 
 // stratTypedReceiverShared (S2) and stratInterfaceShared (S4) are the full-Resolve
 // forms of the two receiver strategies. They read the recv_types temp table
@@ -890,7 +1174,9 @@ SELECT rt.edge_id, m.id, 0.9, 'typed'
  WHERE mf.worktree = ?
    AND ( rt.ef_language = mf.language
          OR ( rt.ef_language IN ('typescript','tsx','javascript')
-              AND mf.language IN ('typescript','tsx','javascript') ) )`
+              AND mf.language IN ('typescript','tsx','javascript') ) )
+   -- Python: a class the call's own file declares shadows same-named ones elsewhere
+   AND NOT ( rt.local_class AND m.file_id <> rt.file_id )`
 
 const stratInterfaceShared = `
 INSERT OR IGNORE INTO edge_candidates(edge_id, dst_node_id, confidence, method)
@@ -901,7 +1187,119 @@ SELECT rt.edge_id, m.id, 0.5, 'iface'
   CROSS JOIN edges cm  ON cm.kind = 'contains' AND cm.src_node_id = ext.src_node_id
   CROSS JOIN nodes m   ON m.id = cm.dst_node_id AND m.kind = 'method' AND m.name = rt.dst_name
   JOIN files mf  ON mf.id = m.file_id
- WHERE mf.worktree = ?`
+ WHERE mf.worktree = ?
+   AND ( rt.ef_language = mf.language
+         OR ( rt.ef_language IN ('typescript','tsx','javascript')
+              AND mf.language IN ('typescript','tsx','javascript') ) )
+   -- Python: a class the call's own file declares shadows same-named ones elsewhere
+   AND NOT ( rt.local_class AND iface.file_id <> rt.file_id )`
+
+// stratInherited (S2b, Python): the receiver names a class T — its bound type,
+// as for S2, or the receiver itself, as for S3 — that does not declare the
+// method; bind to the declaration on T's nearest ancestor along the resolved
+// extends edges, the one Python's attribute lookup finds (overrides below T are
+// S4's). super().m() binds the same way from the class the call is written in,
+// skipping that class's own m. Confidence 0.9, as for S2: the type is as
+// certain. T is a Python class of the call's worktree, and one declared in the
+// call's own file shadows same-named classes elsewhere (self's class always is)
+// — the rule S2, S3 and S4 apply to Python calls too. The full Resolve reads
+// S2's recv_types; the incremental one binds inline.
+const stratInherited = `
+INSERT OR IGNORE INTO edge_candidates(edge_id, dst_node_id, confidence, method)
+WITH RECURSIVE calls AS MATERIALIZED (
+  SELECT ed.id AS edge_id, ed.dst_name, ed.dst_recv, ed.file_id, src.start_byte, src.end_byte
+  FROM files ef
+  CROSS JOIN edges ed ON ed.file_id = ef.id
+       AND ed.kind = 'calls' AND ed.dst_recv <> ''
+  LEFT JOIN nodes src ON src.id = ed.src_node_id
+ WHERE ef.worktree = ? AND ef.language = 'python'
+), recv AS MATERIALIZED (
+  SELECT c.edge_id, c.dst_name, c.file_id, tb.type_name
+    FROM calls c
+    CROSS JOIN type_bindings tb ON tb.file_id = c.file_id AND tb.name = c.dst_recv
+         AND tb.scope_start_byte <= c.start_byte AND c.end_byte <= tb.scope_end_byte
+  UNION
+  SELECT edge_id, dst_name, file_id, dst_recv FROM calls WHERE dst_recv GLOB '[A-Z]*'` + stratInheritedTail
+
+const stratInheritedShared = `
+INSERT OR IGNORE INTO edge_candidates(edge_id, dst_node_id, confidence, method)
+WITH RECURSIVE calls AS MATERIALIZED (
+  SELECT ed.id AS edge_id, ed.dst_name, ed.dst_recv, ed.file_id, src.start_byte, src.end_byte
+    FROM files ef JOIN edges ed ON ed.file_id = ef.id
+    LEFT JOIN nodes src ON src.id = ed.src_node_id
+   WHERE ef.worktree = ? AND ef.language = 'python' AND ed.kind = 'calls'
+     AND (ed.dst_recv GLOB '[A-Z]*' OR ed.dst_recv = 'super()')
+), recv AS MATERIALIZED (
+  SELECT edge_id, dst_name, file_id, type_name FROM recv_types WHERE ef_language = 'python'
+  UNION
+  SELECT edge_id, dst_name, file_id, dst_recv FROM calls WHERE dst_recv GLOB '[A-Z]*'` + stratInheritedTail
+
+// stratInheritedTail is S2b after calls (with each caller's span) and
+// recv(edge_id, dst_name, file_id, type_name): the classes each type names (the
+// call file's own, else all), the class each super() call is written in, their
+// ancestors, and per class and method name the nearest declaration at or above
+// the floor (0, or 1 for super(), which skips the class itself). Each step runs
+// once per distinct class or name, not per call: a test class's thousand
+// self.assert*() calls climb its hierarchy once.
+const stratInheritedTail = `
+), supers AS MATERIALIZED (
+  SELECT edge_id, dst_name, root_id FROM (
+    SELECT c.edge_id, c.dst_name, k.id AS root_id,
+           ROW_NUMBER() OVER (PARTITION BY c.edge_id ORDER BY k.end_byte - k.start_byte) AS innermost
+      FROM calls c
+      CROSS JOIN nodes k ON k.file_id = c.file_id AND k.kind = 'class'
+           AND k.start_byte <= c.start_byte AND c.end_byte <= k.end_byte
+     WHERE c.dst_recv = 'super()')
+   WHERE innermost = 1
+), pairs AS MATERIALIZED (
+  SELECT DISTINCT type_name, file_id FROM recv
+), local AS MATERIALIZED (
+  SELECT p.type_name, p.file_id, t.id AS root_id
+    FROM pairs p
+    CROSS JOIN nodes t ON t.file_id = p.file_id AND t.name = p.type_name AND t.kind = 'class'
+), roots AS MATERIALIZED (
+  SELECT type_name, file_id, root_id FROM local
+  UNION ALL
+  SELECT p.type_name, p.file_id, t.id
+    FROM pairs p
+    JOIN files pf ON pf.id = p.file_id
+    CROSS JOIN nodes t ON t.name = p.type_name AND t.kind = 'class'
+    JOIN files tf ON tf.id = t.file_id AND tf.language = 'python' AND tf.worktree = pf.worktree
+   WHERE NOT EXISTS (SELECT 1 FROM local l WHERE l.type_name = p.type_name AND l.file_id = p.file_id)
+), anc(root_id, node_id, depth) AS (
+  SELECT root_id, root_id, 0 FROM (SELECT root_id FROM roots UNION SELECT root_id FROM supers)
+  UNION
+  SELECT anc.root_id, ext.dst_node_id, anc.depth + 1
+    FROM anc
+    CROSS JOIN edges ext ON ext.src_node_id = anc.node_id AND ext.kind = 'extends'
+   WHERE ext.dst_node_id IS NOT NULL AND anc.depth < 8
+), asks AS MATERIALIZED (
+  SELECT DISTINCT ro.root_id, r.dst_name, 0 AS floor
+    FROM recv r
+    CROSS JOIN roots ro ON ro.type_name = r.type_name AND ro.file_id = r.file_id
+  UNION
+  SELECT DISTINCT root_id, dst_name, 1 FROM supers
+), found AS MATERIALIZED (
+  SELECT a.root_id, a.dst_name, a.floor, m.id AS dst_node_id, anc.depth,
+         MIN(anc.depth) OVER (PARTITION BY a.root_id, a.dst_name, a.floor) AS nearest
+    FROM asks a
+    CROSS JOIN anc ON anc.root_id = a.root_id AND anc.depth >= a.floor
+    CROSS JOIN nodes cls ON cls.id = anc.node_id
+    CROSS JOIN nodes m ON m.name = a.dst_name AND m.parent_name = cls.name AND m.kind = 'method'
+    CROSS JOIN edges cm ON cm.dst_node_id = m.id AND cm.kind = 'contains' AND cm.src_node_id = anc.node_id
+    JOIN files mf ON mf.id = m.file_id
+   WHERE mf.worktree = ?
+)
+SELECT r.edge_id, f.dst_node_id, 0.9, 'typed'
+  FROM recv r
+  CROSS JOIN roots ro ON ro.type_name = r.type_name AND ro.file_id = r.file_id
+  CROSS JOIN found f ON f.root_id = ro.root_id AND f.dst_name = r.dst_name AND f.floor = 0
+ WHERE f.depth = f.nearest AND f.depth > 0
+UNION ALL
+SELECT s.edge_id, f.dst_node_id, 0.9, 'typed'
+  FROM supers s
+  CROSS JOIN found f ON f.root_id = s.root_id AND f.dst_name = s.dst_name AND f.floor = 1
+ WHERE f.depth = f.nearest`
 
 // stratStatic (S3): the receiver token is itself a type name T (Foo.Create());
 // bind to T.<method>. Confidence 0.9. A receiver that is a variable (no matching
@@ -935,13 +1333,16 @@ SELECT ed.id, m.id, 0.9, 'static'
  WHERE ef.worktree = ? AND mf.worktree = ?
    AND ( ef.language = mf.language
          OR ( ef.language IN ('typescript','tsx','javascript')
-              AND mf.language IN ('typescript','tsx','javascript') ) )`
+              AND mf.language IN ('typescript','tsx','javascript') ) )
+   -- Python: a class the call's own file declares shadows same-named ones elsewhere
+   AND NOT ( ef.language = 'python' AND m.file_id <> ed.file_id
+             AND EXISTS (SELECT 1 FROM nodes lc WHERE lc.file_id = ed.file_id AND lc.kind = 'class' AND lc.name = m.parent_name) )`
 
 // stratSelf (S1): a bare M() or this.M() inside a class binds to a sibling method
 // of the same class, linked via contains edges (class -> caller, class -> target).
 // Confidence 0.95. (C#; Go self-calls use an explicit receiver and go via S2.)
-// Rust is excluded for bare calls: a bare f() there can never name a method (that
-// takes self.f() / Self::f(), resolved by S2 via the impl's self/Self bindings).
+// Rust and Python are excluded for bare calls: a bare f() there can never name a
+// method (that takes self.f() / Self::f(), resolved by S2 via the self bindings).
 // The second bound parameter is unused here but kept so every callStrategies
 // entry has the same (worktree, worktree) arity; "? IS NOT NULL" is always true.
 const stratSelf = `
@@ -949,7 +1350,7 @@ INSERT OR IGNORE INTO edge_candidates(edge_id, dst_node_id, confidence, method)
 SELECT ed.id, m.id, 0.95, 'self'
   FROM files ef
   CROSS JOIN edges ed ON ed.file_id = ef.id
-       AND ed.kind = 'calls' AND (ed.dst_recv = 'this' OR (ed.dst_recv = '' AND ef.language <> 'rust'))
+       AND ed.kind = 'calls' AND (ed.dst_recv = 'this' OR (ed.dst_recv = '' AND ef.language NOT IN ('rust','python')))
   CROSS JOIN edges pc ON pc.kind = 'contains' AND pc.dst_node_id = ed.src_node_id
   CROSS JOIN edges cm ON cm.kind = 'contains' AND cm.src_node_id = pc.src_node_id
   CROSS JOIN nodes m ON m.id = cm.dst_node_id
@@ -985,10 +1386,14 @@ SELECT ed.id, m.id, 0.9, 'typed'
  WHERE ef.worktree = ? AND mf.worktree = ?
    AND ( ef.language = mf.language
          OR ( ef.language IN ('typescript','tsx','javascript')
-              AND mf.language IN ('typescript','tsx','javascript') ) )`
+              AND mf.language IN ('typescript','tsx','javascript') ) )
+   -- Python: a class the call's own file declares shadows same-named ones elsewhere
+   AND NOT ( ef.language = 'python' AND m.file_id <> ed.file_id
+             AND EXISTS (SELECT 1 FROM nodes lc WHERE lc.file_id = ed.file_id AND lc.kind = 'class' AND lc.name = m.parent_name) )`
 
 // stratNameFallback (S5): name-only fallback — any same-name callable in the
-// language family, capped per edge (locality-ordered). Confidence reflects
+// language family (no method for a bare Rust/Python call), capped per edge
+// (locality-ordered). Confidence reflects
 // AMBIGUITY: a UNIQUE same-name match is reasonably reliable (the only thing the
 // call could lexically be — e.g. a Go package function) → 0.45 (medium); several
 // same-name matches are genuinely ambiguous → 0.2 (low). Only fires for edges
@@ -1008,6 +1413,7 @@ SELECT edge_id, dst_node_id, CASE WHEN cnt = 1 THEN 0.45 ELSE 0.2 END, 'name' FR
   FROM files ef
   CROSS JOIN edges ed ON ed.file_id = ef.id
                 AND ed.kind = 'calls' AND ed.dst_name <> ''
+                AND ed.dst_recv <> 'super()' -- see resolveNameFallback
                 -- Skip the name-only fallback for hyper-common names (ToString,
                 -- Equals, Id, ...) that match more than 50 callables: it would pick
                 -- 10 arbitrary 0.2-confidence targets (pure noise), and the full
@@ -1019,6 +1425,8 @@ SELECT edge_id, dst_node_id, CASE WHEN cnt = 1 THEN 0.45 ELSE 0.2 END, 'name' FR
                        GROUP BY name HAVING COUNT(*) > 50 )
   CROSS JOIN nodes m ON m.kind IN ('method','property','constructor','function')
                AND m.name = ed.dst_name
+               -- see bareCallNeverMethod
+               AND NOT (m.kind = 'method' AND ed.dst_recv = '' AND ef.language IN ('rust','python'))
   JOIN files mf ON mf.id = m.file_id
   WHERE ef.worktree = ? AND mf.worktree = ?
     AND ( ef.language = mf.language

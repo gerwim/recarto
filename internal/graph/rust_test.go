@@ -65,8 +65,8 @@ mod tests {
 }
 `)
 
-// rustCandidates lists every resolved call as "caller -> target (method)".
-func rustCandidates(t *testing.T, e *Engine) []string {
+// callCandidates lists every resolved call as "caller -> target (method)".
+func callCandidates(t *testing.T, e *Engine) []string {
 	t.Helper()
 	rows, err := e.st.DB.Query(`
 SELECT sn.qualified_name, dn.qualified_name, ec.method
@@ -122,7 +122,7 @@ func TestRustGraph(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got := rustCandidates(t, e)
+	got := callCandidates(t, e)
 	for _, want := range []string{
 		"Circle.new -> Circle.make (typed)",   // Self::make via the impl's Self binding
 		"Circle.len -> len (name)",            // bare len(...) is the free function
@@ -141,8 +141,10 @@ func TestRustGraph(t *testing.T) {
 			t.Errorf("missing candidate %q", want)
 		}
 	}
-	if slices.Contains(got, "Circle.len -> Circle.len (self)") {
-		t.Error("bare len(...) bound to the sibling method via S1; a bare Rust call never names a method")
+	for _, method := range []string{"self", "name"} {
+		if slices.Contains(got, "Circle.len -> Circle.len ("+method+")") {
+			t.Errorf("bare len(...) bound to the method Circle.len (%s); a bare Rust call never names a method", method)
+		}
 	}
 	if t.Failed() {
 		t.Logf("candidates:\n%s", strings.Join(got, "\n"))
@@ -152,7 +154,7 @@ func TestRustGraph(t *testing.T) {
 	if err := e.ReindexFileIncremental(ctx, wt, "src/main.rs", rustMain, 2, int64(len(rustMain))); err != nil {
 		t.Fatal(err)
 	}
-	if again := rustCandidates(t, e); !slices.Equal(again, got) {
+	if again := callCandidates(t, e); !slices.Equal(again, got) {
 		t.Errorf("incremental re-resolve diverged:\n got %v\nwant %v", again, got)
 	}
 

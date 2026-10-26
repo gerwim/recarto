@@ -1,0 +1,3 @@
+# Running the fixture (done ad hoc to validate it) must never commit bytecode.
+# The harness also excludes __pycache__/ at runtime via manifest.json exclude_dirs.
+__pycache__/

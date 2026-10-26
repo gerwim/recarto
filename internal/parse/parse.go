@@ -3,6 +3,7 @@ package parse
 import (
 	"fmt"
 	"strings"
+	"unicode"
 
 	sitter "github.com/tree-sitter/go-tree-sitter"
 )
@@ -184,15 +185,19 @@ func (r *Registry) ParseFile(lang, path string, src []byte) (Result, error) {
 
 	captureNames := q.CaptureNames()
 	var res Result
+	py := pyFile{names: map[string][]pyBinding{}, types: map[pyName]string{}}
 	matches := cur.Matches(q, tree.RootNode(), src)
 	for m := matches.Next(); m != nil; m = matches.Next() {
 		var name, recv, recvType, recvName, bindName, bindType string
+		var bindAttr, bindFrom, importFrom, importAlias string
 		var defKind, refKind string
 		var sb, eb, sl, el uint
 		var nameByte, nameLine uint
-		var recvNameByte, bindByte, selfByte uint
-		var isSelf bool
+		var recvNameByte, bindByte, selfByte, bindClass uint
+		var bindDef uintptr
+		var isSelf, onLiteral, isImportFrom bool
 		var defNode *sitter.Node
+		var refNode sitter.Node
 		for _, c := range m.Captures {
 			cn := captureNames[c.Index]
 			switch {
@@ -202,6 +207,10 @@ func (r *Registry) ParseFile(lang, path string, src []byte) (Result, error) {
 				nameLine = c.Node.StartPosition().Row + 1
 			case cn == "recv":
 				recv = c.Node.Utf8Text(src)
+				if lang == "python" {
+					onLiteral = pyLiterals[c.Node.Kind()]
+					recv = pyRecv(c.Node, src, recv)
+				}
 			case cn == "recv.type":
 				recvType = strings.TrimPrefix(c.Node.Utf8Text(src), "*")
 			case cn == "recv.name":
@@ -210,10 +219,37 @@ func (r *Registry) ParseFile(lang, path string, src []byte) (Result, error) {
 			case cn == "bind.name":
 				bindName = c.Node.Utf8Text(src)
 				bindByte = c.Node.StartByte()
+				if lang == "python" {
+					// A `x: T` / `x = T()` in a class body, outside any def, is what
+					// methods read as self.x.
+					if bindClass, bindDef = pyScope(&c.Node); bindClass != 0 && bindDef == 0 {
+						bindAttr, bindName = bindName, ""
+					}
+				}
+			case cn == "bind.attr":
+				bindAttr = c.Node.Utf8Text(src)
+				bindClass, bindDef = pyScope(&c.Node)
+			case cn == "bind.from":
+				bindFrom = c.Node.Utf8Text(src)
 			case cn == "bind.type":
 				bindType = strings.TrimPrefix(c.Node.Utf8Text(src), "*")
 			case cn == "bind.self":
 				isSelf, selfByte = true, c.Node.StartByte()
+			case cn == "bind.recv": // Python self/cls: the class of the def it opens
+				def := c.Node.Parent()
+				for def != nil && def.Kind() != "function_definition" {
+					def = def.Parent()
+				}
+				if cls := pyMethodClass(def); cls != nil {
+					if nm := cls.ChildByFieldName("name"); nm != nil {
+						bindName, bindByte, bindType = c.Node.Utf8Text(src), c.Node.StartByte(), nm.Utf8Text(src)
+						bindClass, bindDef = pyScope(&c.Node)
+					}
+				}
+			case cn == "import.from":
+				importFrom, isImportFrom = c.Node.Utf8Text(src), true
+			case cn == "import.alias":
+				importAlias = c.Node.Utf8Text(src)
 			case cn == "macro.args":
 				res.Edges = append(res.Edges, macroCalls(c.Node, walker, src, false)...)
 			case strings.HasPrefix(cn, "definition."):
@@ -224,6 +260,7 @@ func (r *Registry) ParseFile(lang, path string, src []byte) (Result, error) {
 				sl, el = c.Node.StartPosition().Row+1, c.Node.EndPosition().Row+1
 			case strings.HasPrefix(cn, "reference."):
 				refKind = strings.TrimPrefix(cn, "reference.")
+				refNode = c.Node
 				sb = c.Node.StartByte()
 				sl = c.Node.StartPosition().Row + 1
 			}
@@ -255,6 +292,19 @@ func (r *Registry) ParseFile(lang, path string, src []byte) (Result, error) {
 					}
 				}
 			}
+			if lang == "python" && defNode != nil {
+				// Decorators wrap the def/class in a decorated_definition instead of
+				// nesting in it; widen the span over them for the same reason as Rust's.
+				if p := defNode.Parent(); p != nil && p.Kind() == "decorated_definition" {
+					sb, sl = p.StartByte(), p.StartPosition().Row+1
+				}
+				if defKind == "function" && pyMethodClass(defNode) != nil {
+					defKind = "method"
+				}
+				if defKind == "class" { // a base named after it means this class, once its statement ran
+					py.names[name] = append(py.names[name], pyBinding{scope: pyBindScope(defNode), at: defNode.EndByte(), class: true})
+				}
+			}
 			res.Symbols = append(res.Symbols, Symbol{
 				Kind: defKind, Name: name, QualifiedName: name, RecvType: recvType,
 				StartByte: sb, EndByte: eb, StartLine: sl, EndLine: el,
@@ -264,7 +314,23 @@ func (r *Registry) ParseFile(lang, path string, src []byte) (Result, error) {
 				res.Bindings = append(res.Bindings,
 					TypeBinding{Name: recvName, TypeName: recvType, StartByte: recvNameByte})
 			}
-		case refKind != "" && name != "":
+		case refKind != "" && name != "" && !onLiteral:
+			if lang == "python" {
+				switch refKind {
+				case "import":
+					recv = py.addImport(path, name, importFrom, importAlias, isImportFrom, pyBindScope(&refNode), sb)
+				case "extends":
+					cls := refNode.Parent()
+					for cls != nil && cls.Kind() != "class_definition" {
+						cls = cls.Parent()
+					}
+					if cls != nil {
+						scopes, defBody := pyLookupScopes(cls)
+						py.bases = append(py.bases, pyBase{edge: len(res.Edges), qualifier: pyBaseQualifier(refNode, src),
+							at: cls.StartByte(), scopes: scopes, defBody: defBody})
+					}
+				}
+			}
 			res.Edges = append(res.Edges, Edge{
 				Kind: edgeKind(refKind), DstName: name, Recv: recv, StartByte: sb, Line: sl,
 			})
@@ -274,13 +340,276 @@ func (r *Registry) ParseFile(lang, path string, src []byte) (Result, error) {
 			res.Bindings = append(res.Bindings,
 				TypeBinding{Name: "self", TypeName: bindType, StartByte: selfByte},
 				TypeBinding{Name: "Self", TypeName: bindType, StartByte: selfByte})
+		case bindAttr != "" && (bindType != "" || bindFrom != "") && bindClass != 0:
+			py.attrs = append(py.attrs, pyAttr{name: bindAttr, typ: bindType, from: bindFrom, class: bindClass, def: bindDef})
 		case bindName != "" && bindType != "" && bindType != "var":
 			// C# `var x = …` yields an implicit_type "var"; skip it — the real type
 			// comes from the object-creation binding pattern. ("var" is a contextual
 			// keyword in C# and not a valid type name in Go either, so this is safe.)
 			res.Bindings = append(res.Bindings,
 				TypeBinding{Name: bindName, TypeName: bindType, StartByte: bindByte})
+			if lang == "python" {
+				py.types[pyName{bindDef, bindName}] = bindType
+			}
 		}
 	}
+	if lang == "python" {
+		py.finish(&res)
+	}
 	return res, nil
+}
+
+// pyFile collects what the Python passes need from every match: what imports and
+// class statements bind each name, and each def's parameter and local types, for
+// the bases and self.x bindings found along the way.
+type pyFile struct {
+	names map[string][]pyBinding
+	types map[pyName]string
+	bases []pyBase
+	attrs []pyAttr
+}
+
+// pyBinding is what binds a name in a scope (the def or class whose body holds
+// the statement, 0 for the module) from byte at on: `from M import X [as name]`
+// (module M, name X), `import a.b [as name]` (module a.b, or a), or a class
+// statement of the file.
+type pyBinding struct {
+	scope        uintptr
+	at           uint
+	module, name string
+	class        bool
+}
+
+// pyBase is an extends edge, what qualifies its base ("m" for m.Base), and where
+// its class statement reads that name: at byte at, in scopes (see
+// pyLookupScopes), the first of them a def's body when defBody.
+type pyBase struct {
+	edge      int
+	qualifier string
+	at        uint
+	scopes    []uintptr
+	defBody   bool
+}
+
+// pyName is a name bound in a def (identified by its node id; 0 is module level).
+type pyName struct {
+	def  uintptr
+	name string
+}
+
+// pyAttr is a self.x binding of a class (its name byte), typed by a type
+// expression (typ) or by the def's parameter or local it is assigned (from).
+type pyAttr struct {
+	name, typ, from string
+	class           uint
+	def             uintptr
+}
+
+// addImport records the name an import binds in scope from byte at on, and
+// returns the module a from-import reads (a relative one resolved against
+// path's package), which the edge carries so it resolves to that module's X
+// rather than any X.
+func (py *pyFile) addImport(path, name, from, alias string, isFrom bool, scope uintptr, at uint) string {
+	b := pyBinding{scope: scope, at: at}
+	if !isFrom { // import a.b [as m]: m, or else a, is a module
+		if alias == "" {
+			name, _, _ = strings.Cut(name, ".")
+			alias = name
+		}
+		b.module = name
+		py.names[alias] = append(py.names[alias], b)
+		return ""
+	}
+	b.module, b.name = pyModule(path, from), name
+	if alias == "" {
+		alias = name
+	}
+	py.names[alias] = append(py.names[alias], b)
+	return b.module
+}
+
+// lookup returns what name denotes in base b's class statement, as Python
+// finds it: the innermost of b's scopes that binds it, by its last binding
+// before the statement — or by its last binding at all in a scope that reaches
+// the statement through a def, which runs once that scope has.
+func (py *pyFile) lookup(name string, b pyBase) (pyBinding, bool) {
+	for i, s := range b.scopes {
+		late := i >= 2 || (i == 1 && b.defBody)
+		var best pyBinding
+		found := false
+		for _, d := range py.names[name] {
+			if d.scope == s && (late || d.at < b.at) && (!found || d.at > best.at) {
+				best, found = d, true
+			}
+		}
+		if found {
+			return best, true
+		}
+	}
+	return pyBinding{}, false
+}
+
+// finish names each base after the class it denotes — an imported alias's real
+// name, with the module the class comes from — and adds the self.x bindings,
+// anchored at the class name so their scope is the whole class.
+func (py *pyFile) finish(res *Result) {
+	for _, b := range py.bases {
+		e := &res.Edges[b.edge]
+		if b.qualifier == "" { // `class C(Base)`: Base may be imported, maybe as an alias
+			if imp, ok := py.lookup(e.DstName, b); ok && imp.name != "" {
+				e.DstName, e.Recv = imp.name, imp.module
+			}
+			continue
+		}
+		// `class C(m.Base)`: m is an imported module, or a from-imported submodule
+		first, rest, dotted := strings.Cut(b.qualifier, ".")
+		imp, ok := py.lookup(first, b)
+		if !ok || imp.class {
+			continue
+		}
+		module := imp.module
+		if imp.name != "" {
+			module = strings.TrimPrefix(imp.module+"."+imp.name, ".")
+		}
+		if module != "" && dotted {
+			module += "." + rest
+		}
+		e.Recv = module
+	}
+	for _, a := range py.attrs {
+		typ := a.typ
+		if a.from != "" {
+			typ = py.types[pyName{a.def, a.from}]
+		}
+		if typ != "" {
+			res.Bindings = append(res.Bindings, TypeBinding{Name: "self." + a.name, TypeName: typ, StartByte: a.class})
+		}
+	}
+}
+
+// pyModule returns the absolute module a from-import reads: a relative one (.m,
+// ..m) is resolved against the package of the importing file at path.
+func pyModule(path, from string) string {
+	rel := strings.TrimLeft(from, ".")
+	level := len(from) - len(rel)
+	if level == 0 {
+		return from
+	}
+	pkg := strings.Split(path, "/")
+	pkg = pkg[:len(pkg)-1] // the file's directory is its package
+	pkg = pkg[:max(0, len(pkg)-(level-1))]
+	if rel != "" {
+		pkg = append(pkg, rel)
+	}
+	return strings.Join(pkg, ".")
+}
+
+// pyBaseQualifier returns what qualifies a base class expression: "m" for
+// m.Base, "a.b" for a.b.Base[T], "" for a bare Base.
+func pyBaseQualifier(n sitter.Node, src []byte) string {
+	if n.Kind() == "subscript" {
+		if v := n.ChildByFieldName("value"); v != nil {
+			n = *v
+		}
+	}
+	if n.Kind() == "attribute" {
+		if o := n.ChildByFieldName("object"); o != nil {
+			return o.Utf8Text(src)
+		}
+	}
+	return ""
+}
+
+// pyBindScope returns the scope n's statement binds names in: the node id of the
+// def or class whose body holds it, 0 for the module.
+func pyBindScope(n *sitter.Node) uintptr {
+	for p := n.Parent(); p != nil; p = p.Parent() {
+		if k := p.Kind(); k == "function_definition" || k == "class_definition" {
+			return p.Id()
+		}
+	}
+	return 0
+}
+
+// pyLookupScopes returns the scopes a name in n's statement is looked up in,
+// innermost first: n's own (pyBindScope), the defs around it — a class body is no
+// scope for what nests in it — and the module, 0. defBody reports whether the
+// first is a def.
+func pyLookupScopes(n *sitter.Node) (scopes []uintptr, defBody bool) {
+	for p := n.Parent(); p != nil; p = p.Parent() {
+		switch p.Kind() {
+		case "function_definition":
+			defBody = defBody || len(scopes) == 0
+			scopes = append(scopes, p.Id())
+		case "class_definition":
+			if len(scopes) == 0 {
+				scopes = append(scopes, p.Id())
+			}
+		}
+	}
+	return append(scopes, 0), defBody
+}
+
+// pyScope returns the name byte of n's innermost enclosing class and the node id
+// of its innermost def within that class (0 when there is none).
+func pyScope(n *sitter.Node) (class uint, def uintptr) {
+	for p := n.Parent(); p != nil; p = p.Parent() {
+		switch p.Kind() {
+		case "class_definition":
+			if nm := p.ChildByFieldName("name"); nm != nil {
+				return nm.StartByte(), def
+			}
+		case "function_definition":
+			if def == 0 {
+				def = p.Id()
+			}
+		}
+	}
+	return 0, def
+}
+
+// pyMethodClass returns the class a def is a method of: its nearest enclosing
+// def or class, when that is a class. Nil for a function, or a nil def.
+func pyMethodClass(def *sitter.Node) *sitter.Node {
+	if def == nil {
+		return nil
+	}
+	for p := def.Parent(); p != nil; p = p.Parent() {
+		switch p.Kind() {
+		case "class_definition":
+			return p
+		case "function_definition":
+			return nil
+		}
+	}
+	return nil
+}
+
+// pyLiterals are the receiver kinds whose methods are the builtins' (", ".join,
+// [].append): a call on one gets no edge, which name matching would otherwise
+// bind to any same-named method of the worktree.
+var pyLiterals = map[string]bool{
+	"string": true, "concatenated_string": true, "integer": true, "float": true,
+	"list": true, "dictionary": true, "set": true, "tuple": true,
+	"list_comprehension": true, "dictionary_comprehension": true, "set_comprehension": true,
+}
+
+// pyRecv normalizes a Python call receiver: super() and super(C, self) become
+// "super()", which the resolver binds through the enclosing class's bases, and
+// m.Type (a CapWords last segment is a class, by PEP 8) becomes Type, the
+// receiver static resolution binds, as for Rust's module::Type::f().
+func pyRecv(n sitter.Node, src []byte, text string) string {
+	switch n.Kind() {
+	case "call":
+		if f := n.ChildByFieldName("function"); f != nil && f.Kind() == "identifier" && f.Utf8Text(src) == "super" {
+			return "super()"
+		}
+	case "attribute":
+		if a := n.ChildByFieldName("attribute"); a != nil {
+			if name := a.Utf8Text(src); name != "" && unicode.IsUpper(rune(name[0])) {
+				return name
+			}
+		}
+	}
+	return text
 }

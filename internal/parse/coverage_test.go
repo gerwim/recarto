@@ -68,6 +68,10 @@ func TestUpstreamTagsCoverage(t *testing.T) {
 			"export_statement":     "upstream's exported-constant defs; constants are not in our symbol taxonomy (search_content finds them)",
 			"binary_expression":    "value position of the exported-constant pattern; see export_statement",
 		},
+		"python": {
+			"module":               "upstream's module-level constant defs; constants are not in our symbol taxonomy (search_content finds them)",
+			"expression_statement": "see module",
+		},
 	}
 
 	// Which upstream files feed which of our queries. TypeScript's grammar
@@ -79,6 +83,7 @@ func TestUpstreamTagsCoverage(t *testing.T) {
 		"typescript": {"typescript-tags.scm", "javascript-tags.scm"},
 		"javascript": {"javascript-tags.scm"},
 		"rust":       {"rust-tags.scm"},
+		"python":     {"python-tags.scm"},
 	}
 
 	for lang, files := range upstreamFor {
