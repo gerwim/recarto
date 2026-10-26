@@ -331,7 +331,7 @@ Measure-Command { recarto recall "auth flow" }
   event needs; one with nothing to act on exits at about the cost of a bare process
   start. The git identity is remembered in `<cache>/gitctx/` and re-resolved when the
   checkout's HEAD changes. Measurements: `docs/validation/2026-10-22-hook-startup.md`.
-- **Languages:** Go, C#, TypeScript (+TSX), JavaScript (+JSX), Rust via tree-sitter.
+- **Languages:** Go, C#, TypeScript (+TSX), JavaScript (+JSX), Rust, Python via tree-sitter.
 
 ## If the store gets corrupted
 

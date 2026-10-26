@@ -13,7 +13,7 @@ import (
 // Resolve links reference edges to a defining node within the same worktree.
 // Non-call edges (extends/implements/imports/references) bind dst_node_id by
 // matching dst_name to a node name/qualified_name, scoped to the language FAMILY
-// ({csharp}, {go}, {rust}, web {typescript,tsx,javascript}) so a C# `.Select(...)` can
+// ({csharp}, {go}, {rust}, {python}, web {typescript,tsx,javascript}) so a C# `.Select(...)` can
 // never bind to a React `Select`, preferring same-file then same-directory then a
 // stable id order. Call edges are resolved into a confidence-ranked candidate set
 // (edge_candidates) by the strategy passes in callStrategies; edges.dst_node_id
@@ -359,8 +359,9 @@ func scan(ctx context.Context, c store.Conn, query string, fn func(*sql.Rows) er
 
 // resolveNameFallback is the Go form of stratNameFallback (S5): for every call
 // edge that no higher-confidence strategy matched, bind it to same-name callables
-// in the language family, capped at 10 per edge in locality order, with a
-// confidence that reflects ambiguity (a unique match is 0.45, several are 0.2).
+// in the language family (no method for a bare call where bareCallNeverMethod),
+// capped at 10 per edge in locality order, with a confidence that reflects
+// ambiguity (a unique match is 0.45, several are 0.2).
 //
 // It is the name-only fallback and by far the largest candidate producer, so the
 // SQL form's PARTITION-BY window sort over ~786k rows was the largest resolve step
@@ -414,17 +415,18 @@ SELECT name FROM nodes
 	type matchNode struct {
 		id, fileID string
 		start      int64
+		method     bool
 	}
 	byName := map[string][]matchNode{}
 	if err := scan(ctx, c, `
-SELECT n.id, n.name, n.file_id, n.start_byte
+SELECT n.id, n.name, n.file_id, n.start_byte, n.kind = 'method'
   FROM nodes n JOIN files f ON f.id = n.file_id
  WHERE f.worktree = ?
    AND n.kind IN ('method','property','constructor','function')`,
 		func(rows *sql.Rows) error {
 			var name string
 			var m matchNode
-			if err := rows.Scan(&m.id, &name, &m.fileID, &m.start); err != nil {
+			if err := rows.Scan(&m.id, &name, &m.fileID, &m.start, &m.method); err != nil {
 				return err
 			}
 			byName[name] = append(byName[name], m)
@@ -435,15 +437,18 @@ SELECT n.id, n.name, n.file_id, n.start_byte
 
 	// Eligible call edges, materialized so the cursor is closed before inserting
 	// (one connection cannot read and write concurrently).
-	type callEdge struct{ id, dstName, fileID string }
+	type callEdge struct {
+		id, dstName, fileID string
+		bare                bool // no receiver
+	}
 	var calls []callEdge
 	if err := scan(ctx, c, `
-SELECT ed.id, ed.dst_name, ed.file_id
+SELECT ed.id, ed.dst_name, ed.file_id, ed.dst_recv = ''
   FROM edges ed JOIN files f ON f.id = ed.file_id
  WHERE f.worktree = ? AND ed.kind = 'calls' AND ed.dst_name <> ''`,
 		func(rows *sql.Rows) error {
 			var e callEdge
-			if err := rows.Scan(&e.id, &e.dstName, &e.fileID); err != nil {
+			if err := rows.Scan(&e.id, &e.dstName, &e.fileID, &e.bare); err != nil {
 				return err
 			}
 			calls = append(calls, e)
@@ -478,10 +483,11 @@ SELECT ed.id, ed.dst_name, ed.file_id
 		}
 		ef := files[e.fileID]
 		efTop := topDir(ef.path)
+		noMethods := e.bare && bareCallNeverMethod(ef.lang)
 		cand = cand[:0]
 		for _, m := range byName[e.dstName] {
 			mf := files[m.fileID]
-			if !sameLangFamily(ef.lang, mf.lang) {
+			if !sameLangFamily(ef.lang, mf.lang) || (noMethods && m.method) {
 				continue
 			}
 			cand = append(cand, ranked{
@@ -807,6 +813,11 @@ func isWebLang(l string) bool {
 	return l == "typescript" || l == "tsx" || l == "javascript"
 }
 
+// bareCallNeverMethod reports whether a call without a receiver can never name a
+// method in lang: Rust and Python methods take self.m() / Self::m(). The SQL
+// strategies spell the same set as ('rust','python').
+func bareCallNeverMethod(lang string) bool { return lang == "rust" || lang == "python" }
+
 // callStrategies are the canonical INSERT OR IGNORE passes into edge_candidates,
 // applied in priority order (highest confidence first); each binds
 // (worktree, worktree). The full Resolve runs S2/S4 from a shared recv_types prefix
@@ -847,7 +858,7 @@ SELECT ed.id, m.id, 0.45, 'ctor'
    AND ef.language = mf.language
    AND NOT EXISTS (SELECT 1 FROM edge_candidates ec0 WHERE ec0.edge_id = ed.id)`
 
-// stratInterface (S4, C#/Rust): the receiver's bound type T is an interface, base
+// stratInterface (S4, C#/Rust/Python): the receiver's bound type T is an interface, base
 // class or trait; expand to <method> on each implementing/deriving type (a Rust
 // impl block), found via the extends edges (X extends/implements T) and X's
 // contained methods. Confidence 0.5 — a set of possible dispatch targets. Go interfaces are structural (no
@@ -940,8 +951,8 @@ SELECT ed.id, m.id, 0.9, 'static'
 // stratSelf (S1): a bare M() or this.M() inside a class binds to a sibling method
 // of the same class, linked via contains edges (class -> caller, class -> target).
 // Confidence 0.95. (C#; Go self-calls use an explicit receiver and go via S2.)
-// Rust is excluded for bare calls: a bare f() there can never name a method (that
-// takes self.f() / Self::f(), resolved by S2 via the impl's self/Self bindings).
+// Rust and Python are excluded for bare calls: a bare f() there can never name a
+// method (that takes self.f() / Self::f(), resolved by S2 via the self bindings).
 // The second bound parameter is unused here but kept so every callStrategies
 // entry has the same (worktree, worktree) arity; "? IS NOT NULL" is always true.
 const stratSelf = `
@@ -949,7 +960,7 @@ INSERT OR IGNORE INTO edge_candidates(edge_id, dst_node_id, confidence, method)
 SELECT ed.id, m.id, 0.95, 'self'
   FROM files ef
   CROSS JOIN edges ed ON ed.file_id = ef.id
-       AND ed.kind = 'calls' AND (ed.dst_recv = 'this' OR (ed.dst_recv = '' AND ef.language <> 'rust'))
+       AND ed.kind = 'calls' AND (ed.dst_recv = 'this' OR (ed.dst_recv = '' AND ef.language NOT IN ('rust','python')))
   CROSS JOIN edges pc ON pc.kind = 'contains' AND pc.dst_node_id = ed.src_node_id
   CROSS JOIN edges cm ON cm.kind = 'contains' AND cm.src_node_id = pc.src_node_id
   CROSS JOIN nodes m ON m.id = cm.dst_node_id
@@ -988,7 +999,8 @@ SELECT ed.id, m.id, 0.9, 'typed'
               AND mf.language IN ('typescript','tsx','javascript') ) )`
 
 // stratNameFallback (S5): name-only fallback — any same-name callable in the
-// language family, capped per edge (locality-ordered). Confidence reflects
+// language family (no method for a bare Rust/Python call), capped per edge
+// (locality-ordered). Confidence reflects
 // AMBIGUITY: a UNIQUE same-name match is reasonably reliable (the only thing the
 // call could lexically be — e.g. a Go package function) → 0.45 (medium); several
 // same-name matches are genuinely ambiguous → 0.2 (low). Only fires for edges
@@ -1019,6 +1031,8 @@ SELECT edge_id, dst_node_id, CASE WHEN cnt = 1 THEN 0.45 ELSE 0.2 END, 'name' FR
                        GROUP BY name HAVING COUNT(*) > 50 )
   CROSS JOIN nodes m ON m.kind IN ('method','property','constructor','function')
                AND m.name = ed.dst_name
+               -- see bareCallNeverMethod
+               AND NOT (m.kind = 'method' AND ed.dst_recv = '' AND ef.language IN ('rust','python'))
   JOIN files mf ON mf.id = m.file_id
   WHERE ef.worktree = ? AND mf.worktree = ?
     AND ( ef.language = mf.language

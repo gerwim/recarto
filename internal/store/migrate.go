@@ -8,7 +8,7 @@ import (
 )
 
 // schemaVersion is the number of applied migrations.
-const schemaVersion = 23
+const schemaVersion = 24
 
 // migrations are applied in order; index+1 becomes user_version.
 var migrations = []string{
@@ -565,6 +565,11 @@ CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts_vocab USING fts5vocab(memories_f
 	// binary upgrade, so ReconcileIfStale would never look. Clearing the tokens
 	// forces one reconcile, which indexes the never-seen .rs files and skips every
 	// unchanged file by mtime/size. No wipe: no existing language's output changed.
+	`
+DELETE FROM meta WHERE key LIKE 'graph_token:%';
+`,
+	// v24 (Python support): the same token reset as v23, so the next reconcile
+	// indexes the .py files already on disk.
 	`
 DELETE FROM meta WHERE key LIKE 'graph_token:%';
 `,

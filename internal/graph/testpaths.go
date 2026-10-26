@@ -8,11 +8,11 @@ import (
 
 // testFileSuffixes are unambiguous test-file naming conventions across ecosystems
 // (Go, xUnit/NUnit C#, Jest/Vitest TS/JS, Rust — whose tests/ dir is a segment
-// match below). Like the generated-file list these are deliberately narrow: a
-// false positive demotes hand-written product code, which would be a quality
-// regression.
+// match below — and pytest, whose test_*.py prefix isTestPath checks). Like the
+// generated-file list these are deliberately narrow: a false positive demotes
+// hand-written product code, which would be a quality regression.
 var testFileSuffixes = []string{
-	"_test.go", "_test.rs", "_tests.rs",
+	"_test.go", "_test.rs", "_tests.rs", "_test.py",
 	"tests.cs", "test.cs",
 	".test.ts", ".test.tsx", ".test.js", ".test.jsx",
 	".spec.ts", ".spec.tsx", ".spec.js", ".spec.jsx",
@@ -34,6 +34,9 @@ func isTestPath(p string) bool {
 		}
 	}
 	base := path.Base(p)
+	if (strings.HasPrefix(base, "test_") && strings.HasSuffix(base, ".py")) || base == "conftest.py" || base == "tests.py" {
+		return true
+	}
 	return slices.ContainsFunc(testFileSuffixes, func(suf string) bool {
 		return strings.HasSuffix(base, suf)
 	})

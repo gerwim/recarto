@@ -332,12 +332,12 @@ func TestLatestCheckMigrationPreservesMemoriesAndColumns(t *testing.T) {
 		VALUES('t2','todo','done',1,1)`)
 }
 
-func TestSchemaVersionIs23(t *testing.T) {
-	if schemaVersion != 23 {
-		t.Fatalf("schemaVersion = %d, want 23", schemaVersion)
+func TestSchemaVersionIs24(t *testing.T) {
+	if schemaVersion != 24 {
+		t.Fatalf("schemaVersion = %d, want 24", schemaVersion)
 	}
-	if len(migrations) != 23 {
-		t.Fatalf("len(migrations) = %d, want 23", len(migrations))
+	if len(migrations) != 24 {
+		t.Fatalf("len(migrations) = %d, want 24", len(migrations))
 	}
 	st, err := Open(filepath.Join(t.TempDir(), "store.db"))
 	if err != nil {
@@ -348,15 +348,22 @@ func TestSchemaVersionIs23(t *testing.T) {
 	if err := st.DB.QueryRow("PRAGMA user_version").Scan(&v); err != nil {
 		t.Fatal(err)
 	}
-	if v != 23 {
-		t.Fatalf("user_version = %d, want 23", v)
+	if v != 24 {
+		t.Fatalf("user_version = %d, want 24", v)
 	}
 }
 
-// TestV23ResetsGraphTokensOnly pins the Rust-support migration: it clears the
-// graph freshness tokens (so the next reconcile indexes .rs files already on
-// disk) but keeps the indexed graph, which no existing language's output changed.
-func TestV23ResetsGraphTokensOnly(t *testing.T) {
+// TestNewLanguageMigrationsResetGraphTokensOnly pins the Rust- and
+// Python-support migrations (v23, v24): each clears the graph freshness tokens
+// (so the next reconcile indexes the .rs / .py files already on disk) but keeps
+// the indexed graph, which no existing language's output changed.
+func TestNewLanguageMigrationsResetGraphTokensOnly(t *testing.T) {
+	for _, from := range []int{22, 23} {
+		t.Run(fmt.Sprintf("from v%d", from), func(t *testing.T) { checkGraphTokenReset(t, from) })
+	}
+}
+
+func checkGraphTokenReset(t *testing.T, from int) {
 	p := filepath.Join(t.TempDir(), "store.db")
 	st, err := Open(p)
 	if err != nil {
@@ -367,7 +374,7 @@ func TestV23ResetsGraphTokensOnly(t *testing.T) {
 	mustExec(t, st, `INSERT INTO nodes(id,file_id,kind,name,qualified_name,signature,start_byte,end_byte,start_line,end_line)
 		VALUES('n1','f1','function','F','F','',0,1,1,1)`)
 	mustExec(t, st, `INSERT INTO meta(key,value) VALUES('graph_token:/wt','tok'),('keep','1')`)
-	mustExec(t, st, `PRAGMA user_version = 22`)
+	mustExec(t, st, fmt.Sprintf(`PRAGMA user_version = %d`, from))
 	st.Close()
 
 	st2, err := Open(p)
@@ -386,7 +393,7 @@ func TestV23ResetsGraphTokensOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	if tokens != 0 || nodes != 1 || kept != 1 {
-		t.Errorf("after v23: graph tokens=%d (want 0), nodes=%d (want 1), other meta=%d (want 1)", tokens, nodes, kept)
+		t.Errorf("after migrating from v%d: graph tokens=%d (want 0), nodes=%d (want 1), other meta=%d (want 1)", from, tokens, nodes, kept)
 	}
 }
 

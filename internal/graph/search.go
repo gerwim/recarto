@@ -257,19 +257,21 @@ func mergeHybrid(lex, vec []SearchResult, limit int) []SearchResult {
 // definitions of X" lookup surfaces every one instead of collapsing to a single
 // entry. The path component keeps distinct top-level symbols apart when the
 // language gives no qualifier (qualified name == bare name); overloads within one
-// type (same qualified name, same file) still fold to one navigable target.
+// type (same qualified name, same file) still fold to one navigable target. Keys
+// are case-sensitive, like the names: Python's Grid.cell method and Grid.Cell
+// class are two symbols.
 func symbolKey(r SearchResult) string {
 	// A container (namespace) is one logical scope re-declared once per file. Its
 	// QualifiedName == Name, so it would otherwise fall to the path-keyed branch
 	// and survive as N distinct rows. Key it by name alone so the per-file
 	// declarations fold to a single entry (see containerKinds / demoteNamespaces).
 	if containerKinds[r.Kind] {
-		return "c\x00" + strings.ToLower(r.Name)
+		return "c\x00" + r.Name
 	}
 	if r.QualifiedName != "" && r.QualifiedName != r.Name {
-		return "q\x00" + strings.ToLower(r.QualifiedName)
+		return "q\x00" + r.QualifiedName
 	}
-	return "n\x00" + strings.ToLower(r.Name) + "\x00" + r.Path
+	return "n\x00" + r.Name + "\x00" + r.Path
 }
 
 // dedupBySymbol collapses results that point at the same symbol (see symbolKey),

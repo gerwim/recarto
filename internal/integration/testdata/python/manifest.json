@@ -1,0 +1,7 @@
+{
+  "language": "python",
+  "comment": "#",
+  "source_exts": [".py"],
+  "exclude_dirs": ["__pycache__"],
+  "lsp_command": ["pyright-langserver", "--stdio"]
+}

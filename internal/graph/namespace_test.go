@@ -50,6 +50,16 @@ func TestSymbolKeyCollapsesNamespacesAcrossFiles(t *testing.T) {
 	if symbolKey(c) == symbolKey(d) {
 		t.Fatalf("distinct concrete symbols collapsed: %q", symbolKey(c))
 	}
+	// Names differing only in case are distinct symbols too (a Python method
+	// Grid.cell next to its nested class Grid.Cell, a def config next to class Config).
+	for _, pair := range [][2]SearchResult{
+		{{Name: "cell", QualifiedName: "Grid.cell", Kind: "method"}, {Name: "Cell", QualifiedName: "Grid.Cell", Kind: "class"}},
+		{{Name: "config", QualifiedName: "config", Kind: "function", Path: "app.py"}, {Name: "Config", QualifiedName: "Config", Kind: "class", Path: "app.py"}},
+	} {
+		if symbolKey(pair[0]) == symbolKey(pair[1]) {
+			t.Errorf("%s and %s share the key %q", pair[0].QualifiedName, pair[1].QualifiedName, symbolKey(pair[0]))
+		}
+	}
 }
 
 // TestSearchNamespaceFloodCollapsed is the end-to-end guarantee: when a concept

@@ -12,8 +12,8 @@ import (
 )
 
 // Module is a project-level grouping (the nearest ancestor directory holding a
-// project marker — .csproj / package.json / go.mod / Cargo.toml — else the first
-// path segment) with rollup counts.
+// project marker — .csproj / package.json / go.mod / Cargo.toml / pyproject.toml /
+// setup.py — else the first path segment) with rollup counts.
 type Module struct {
 	Name    string
 	Files   int
@@ -180,7 +180,7 @@ func genDominatedEdge(e ModuleEdge) bool {
 
 // projectRoots returns directories (relative to worktree, slash-separated,
 // longest-first) that hold a project marker (.csproj / package.json / go.mod /
-// Cargo.toml).
+// Cargo.toml / pyproject.toml / setup.py).
 // They let a monorepo be grouped at project granularity instead of collapsing
 // every nested project under one top-level directory. A non-existent worktree
 // (e.g. a synthetic test path) yields no roots, so moduleOf falls back to the
@@ -193,13 +193,14 @@ func projectRoots(worktree string) []string {
 		}
 		if d.IsDir() {
 			switch d.Name() {
-			case "node_modules", "bin", "obj", ".git", "target":
+			case "node_modules", "bin", "obj", ".git", "target", ".venv", "venv", ".tox", "__pycache__", "site-packages":
 				return filepath.SkipDir
 			}
 			return nil
 		}
 		name := d.Name()
-		if name == "package.json" || name == "go.mod" || name == "Cargo.toml" || strings.HasSuffix(name, ".csproj") {
+		if name == "package.json" || name == "go.mod" || name == "Cargo.toml" || name == "pyproject.toml" ||
+			name == "setup.py" || strings.HasSuffix(name, ".csproj") {
 			if rel, relErr := filepath.Rel(worktree, filepath.Dir(p)); relErr == nil {
 				roots = append(roots, filepath.ToSlash(rel))
 			}
@@ -329,7 +330,7 @@ func moduleOf(roots []string, names map[string]string, path string) string {
 
 // archCacheVersion stamps the cached architecture payload so a binary with a
 // different computation never serves a predecessor's cache.
-const archCacheVersion = 2
+const archCacheVersion = 3
 
 // archCachePayload is the meta-table cache entry: the full architecture, valid
 // exactly while the worktree's graph token equals Token.

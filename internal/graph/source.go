@@ -22,10 +22,12 @@ type Source interface {
 	Read(path string) ([]byte, error)
 }
 
-// skipDir is the directory denylist (build output, deps, VCS, IDE metadata).
+// skipDir is the directory denylist (build output, deps, VCS, IDE metadata,
+// Python virtualenvs and caches).
 var skipDir = map[string]bool{
 	".git": true, "node_modules": true, "bin": true, "obj": true,
 	"dist": true, "build": true, "vendor": true, ".vs": true, ".idea": true,
+	".venv": true, "venv": true, ".tox": true, "__pycache__": true, "site-packages": true,
 }
 
 // FSSource walks the filesystem under Root, selecting files by supported

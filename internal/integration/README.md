@@ -4,8 +4,9 @@ Correctness of the extraction queries (`internal/parse/queries/*.scm`) rests on
 three independent, machine-checked layers — provenance alone is none of them:
 
 1. **Compiler-validated fixtures, LSP-semantics expectations** (this suite):
-   the C# fixture builds with `dotnet build` and the Rust one with
-   `cargo build`, and every `def`/`ref` marker encodes what a language server
+   the C# fixture builds with `dotnet build`, the Rust one with
+   `cargo build` and the Python one type-checks clean with `pyright`, and
+   every `def`/`ref` marker encodes what a language server
    reports; results are asserted exactly, in both directions.
 2. **Upstream cross-check** (`internal/parse/coverage_test.go`): every
    definition/reference construct in the grammar's own `tags.scm` (the query
@@ -57,7 +58,7 @@ filesystem-walk fallback); all comparisons are set/multiset-based.
 
 Expectations live INLINE in the fixture sources (the technique Roslyn's own
 find-references tests use), so line numbers can never drift from the code.
-After the language's line comment + `#` (C#: `//#`), semicolon-separated:
+After the language's line comment + `#` (C#: `//#`, Python: `##`), semicolon-separated:
 
 ```
 def <kind> <qualified.name>   a symbol the graph must index, declared on this line
@@ -87,7 +88,7 @@ Authoring rules (the `fixture-hygiene` subtest enforces them mechanically):
 - Dotted names (namespaces) are exempt from hygiene: `\bA\.B\b` also matches
   `A.B.C` — textual-search semantics, not a fixture defect.
 - Keep the fixture COMPILABLE (`dotnet build` for C#, `cargo build` for Rust,
-  in a scratch copy of `src/`): ground truth for `ref`
+  `pyright` with no errors for Python, in a scratch copy of `src/`): ground truth for `ref`
   markers is what the language's LSP would report, and that is only
   well-defined for valid code.
 

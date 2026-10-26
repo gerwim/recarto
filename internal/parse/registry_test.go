@@ -7,6 +7,7 @@ func TestLangForExt(t *testing.T) {
 		"a/b/main.go": "go", "x.cs": "csharp", "x.ts": "typescript",
 		"x.tsx": "tsx", "x.js": "javascript", "x.jsx": "javascript",
 		"x.mjs": "javascript", "x.cjs": "javascript", "src/lib.rs": "rust",
+		"pkg/mod.py": "python",
 	}
 	for path, want := range cases {
 		got, ok := LangForExt(path)
@@ -25,7 +26,7 @@ func TestNewRegistryCompilesAllQueries(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer r.Close()
-	for _, lang := range []string{"go", "csharp", "typescript", "tsx", "javascript", "rust"} {
+	for _, lang := range []string{"go", "csharp", "typescript", "tsx", "javascript", "rust", "python"} {
 		if r.langs[lang] == nil {
 			t.Errorf("%s language not registered", lang)
 		}
