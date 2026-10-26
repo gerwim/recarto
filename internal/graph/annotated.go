@@ -33,7 +33,10 @@ func (e *Engine) Annotated(ctx context.Context, worktree, attr string, limit int
 	if limit <= 0 {
 		limit = 50
 	}
-	attr = strings.TrimSpace(attr)
+	// A use is recorded by its last name segment (@pytest.fixture as fixture,
+	// #[tokio::main] as main), so the qualified form written at the site matches.
+	attr = strings.TrimPrefix(strings.TrimSpace(attr), "@")
+	attr = attr[strings.LastIndexAny(attr, ".:")+1:]
 	if attr == "" {
 		return nil, nil
 	}

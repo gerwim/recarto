@@ -194,12 +194,14 @@ func TestPythonGraph(t *testing.T) {
 		t.Errorf("SnippetByName(Circle.unit) = %+v, candidates %+v; want the decorated method", snip, cands)
 	}
 
-	ann, err := e.Annotated(ctx, wt, "abstractmethod", 10)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(ann) != 1 || ann[0].QualifiedName != "Shape.area" {
-		t.Errorf("Annotated(abstractmethod) = %+v, want Shape.area", ann)
+	for _, attr := range []string{"abstractmethod", "@abstractmethod", "abc.abstractmethod"} {
+		ann, err := e.Annotated(ctx, wt, attr, 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(ann) != 1 || ann[0].QualifiedName != "Shape.area" {
+			t.Errorf("Annotated(%s) = %+v, want Shape.area", attr, ann)
+		}
 	}
 
 	res, err := e.Search(ctx, wt, "area", "", "python", 10)
