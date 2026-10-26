@@ -586,7 +586,11 @@ func handleAugment(ctx context.Context, a *app.App, ev Event) (Result, error) {
 			if b.Len() > 0 {
 				b.WriteString("\n")
 			}
-			b.WriteString("Related bugs (search_bugs for detail):\n")
+			b.WriteString("Related bugs")
+			if a.Features.On(features.MemoryTools) {
+				b.WriteString(" (search_bugs for detail)")
+			}
+			b.WriteString(":\n")
 			b.WriteString(strings.Join(bugLines, "\n"))
 		}
 	}

@@ -67,7 +67,7 @@ func TestSessionStartTiersFollowFeatures(t *testing.T) {
 		nudge   = "Record new learnings"
 	)
 	all := start("all", nil)
-	for _, want := range []string{header, learned, todo, codeMap, query, bugs, nudge} {
+	for _, want := range []string{header, learned, todo, codeMap, query, bugs, nudge, "search_bugs"} {
 		if !strings.Contains(all, want) {
 			t.Fatalf("all features on: missing %q:\n%s", want, all)
 		}
@@ -82,7 +82,7 @@ func TestSessionStartTiersFollowFeatures(t *testing.T) {
 		{off(features.RecentBugs), []string{bugs}, []string{learned, codeMap}},
 		{off(features.Todos), []string{todo}, []string{learned}},
 		{off(features.GraphTools), []string{query}, []string{codeMap}},
-		{off(features.MemoryTools), []string{nudge}, []string{learned}},
+		{off(features.MemoryTools), []string{nudge, "search_bugs"}, []string{learned, "Recent bugs:\n- reindex drops edges"}},
 	} {
 		got := start(fmt.Sprint(tc.f), tc.f)
 		for _, s := range tc.gone {
@@ -250,7 +250,8 @@ func TestSearchHintsFollowFeatures(t *testing.T) {
 		}
 		return res.Context
 	}
-	if got := grep("on", nil); !strings.Contains(got, "widget.go:3") || !strings.Contains(got, "get_code_snippet") {
+	if got := grep("on", nil); !strings.Contains(got, "widget.go:3") || !strings.Contains(got, "get_code_snippet") ||
+		!strings.Contains(got, "Related bugs (search_bugs for detail):") {
 		t.Fatalf("all on:\n%s", got)
 	}
 	if got := grep("off", off(features.SearchHints)); got != "" {
@@ -258,6 +259,11 @@ func TestSearchHintsFollowFeatures(t *testing.T) {
 	}
 	if got := grep("tools", off(features.GraphTools)); !strings.Contains(got, "widget.go:3") || strings.Contains(got, "get_code_snippet") {
 		t.Errorf("graph-tools off must keep the symbols, drop the tool pointer:\n%s", got)
+	}
+	// memory-tools off unregisters search_bugs, but the bug titles stay.
+	if got := grep("memory", off(features.MemoryTools)); !strings.Contains(got, "Related bugs:\n") ||
+		!strings.Contains(got, "Widget overflow") || strings.Contains(got, "search_bugs") {
+		t.Errorf("memory-tools off must keep the bugs, drop the search_bugs pointer:\n%s", got)
 	}
 
 	a.Features = off(features.ShellHints)

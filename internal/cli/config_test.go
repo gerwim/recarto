@@ -60,14 +60,22 @@ func TestConfigEnableDisable(t *testing.T) {
 	if err := Run([]string{"config", "disable", "stop-nudge", "todos"}, &out); err != nil {
 		t.Fatal(err)
 	}
-	if out.String() != "todos: off\nstop-nudge: off\n" {
+	if out.String() != "todos: off\nstop-nudge: off\n"+initHint+"\n" {
 		t.Errorf("output %q", out.String())
 	}
 	out.Reset()
 	if err := Run([]string{"config", "enable", "todos"}, &out); err != nil {
 		t.Fatal(err)
 	}
-	if out.String() != "todos: on\n" {
+	if out.String() != "todos: on\n"+initHint+"\n" {
+		t.Errorf("output %q", out.String())
+	}
+	out.Reset()
+	// A feature the instructions never name leaves the block as it was: no hint.
+	if err := Run([]string{"config", "disable", "code-map"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.String() != "code-map: off\n" {
 		t.Errorf("output %q", out.String())
 	}
 	s, err := features.Read(p)

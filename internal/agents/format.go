@@ -176,12 +176,16 @@ func formatSessionContext(results []memory.RecallResult, wsName string, wsResult
 		}
 	}
 
-	if tier := formatDeltaTier(deltas, deltaTotal, deltaBaselineMs); tier != "" {
+	if tier := formatDeltaTier(deltas, deltaTotal, deltaBaselineMs, f.On(features.GraphTools)); tier != "" {
 		b.WriteString(tier)
 	}
 
 	if len(bugs) > 0 {
-		b.WriteString("\nRecent bugs (search_bugs for detail):\n")
+		b.WriteString("\nRecent bugs")
+		if f.On(features.MemoryTools) {
+			b.WriteString(" (search_bugs for detail)")
+		}
+		b.WriteString(":\n")
 		for _, r := range bugs {
 			t := r.Title
 			if t == "" {
@@ -272,15 +276,16 @@ func nullable(s string) any {
 // formatDeltaTier renders the budgeted "changed since your last working
 // session" block: per-module +added ~changed -removed counts (module = the
 // file's directory, so internal/mcp and internal/parse stay distinct entries),
-// symbol names for the heaviest module only, and the drill-down pointer. Empty
-// input renders nothing — a no-op session must not produce an empty list.
+// symbol names for the heaviest module only, and, when pointer is set, the
+// get_graph_delta drill-down pointer. Empty input renders nothing — a no-op
+// session must not produce an empty list.
 //
 // Budget degradation drops names first, then trims module lines (5→3→1), then
 // falls back to a header-only pointer. The header date is never stripped.
 // Every stage is re-measured so the invariant "output ≤ deltaTierBudget" is
 // guaranteed by construction, not by a post-hoc truncation that can corrupt the
 // header (the old approach hit the date's " (" before the names list).
-func formatDeltaTier(deltas []graph.Delta, total int, baselineMs int64) string {
+func formatDeltaTier(deltas []graph.Delta, total int, baselineMs int64, pointer bool) string {
 	if len(deltas) == 0 {
 		return ""
 	}
@@ -360,7 +365,9 @@ func formatDeltaTier(deltas []graph.Delta, total int, baselineMs int64) string {
 			}
 			b.WriteString(line + "\n")
 		}
-		fmt.Fprintf(&b, "(get_graph_delta lists all %d)\n", total)
+		if pointer {
+			fmt.Fprintf(&b, "(get_graph_delta lists all %d)\n", total)
+		}
 		return b.String()
 	}
 
@@ -380,8 +387,11 @@ func formatDeltaTier(deltas []graph.Delta, total int, baselineMs int64) string {
 	}
 	if ledger.EstimateTokens(out) > deltaTierBudget {
 		// Last resort: orientation header + drill-down pointer only.
-		out = fmt.Sprintf("\nChanged since your last working session here (%s): %d symbols.\n(get_graph_delta lists them)\n",
+		out = fmt.Sprintf("\nChanged since your last working session here (%s): %d symbols.\n",
 			date, total)
+		if pointer {
+			out += "(get_graph_delta lists them)\n"
+		}
 	}
 	return out
 }

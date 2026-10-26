@@ -7,8 +7,28 @@ import (
 
 	"github.com/mattn/go-isatty"
 
+	"git.gerwim.nl/gerwim/recarto/internal/agents"
 	"git.gerwim.nl/gerwim/recarto/internal/features"
 )
+
+// initHint asks for a re-run of recarto init, the only writer of the agent
+// instructions: config cannot find every file init wrote.
+const initHint = "Re-run recarto init (same --agent and --scope) to update the agent instructions."
+
+// hintInit runs change, then prints initHint if it changed the agent
+// instructions that the features in the file at path give.
+func hintInit(out io.Writer, path string, change func() error) error {
+	instructions := func() string {
+		s, _ := features.Read(path) // a bad file is reported by change itself
+		return agents.Instructions(s)
+	}
+	before := instructions()
+	err := change()
+	if instructions() != before {
+		fmt.Fprintln(out, initHint)
+	}
+	return err
+}
 
 // Config is `recarto config`: the interactive feature list on a terminal,
 // else the plain list. list, enable, disable and path work anywhere.
@@ -19,7 +39,7 @@ func Config(out io.Writer, args []string) error {
 	}
 	if len(args) == 0 {
 		if out == io.Writer(os.Stdout) && isatty.IsTerminal(os.Stdin.Fd()) && isatty.IsTerminal(os.Stdout.Fd()) {
-			return features.Edit(path, os.Stdin, os.Stdout)
+			return hintInit(os.Stdout, path, func() error { return features.Edit(path, os.Stdin, os.Stdout) })
 		}
 		args = []string{"list"}
 	}
@@ -41,15 +61,17 @@ func Config(out io.Writer, args []string) error {
 			}
 			changes[f] = sub == "enable"
 		}
-		if err := features.Save(path, changes); err != nil {
-			return err
-		}
-		for _, f := range features.All() {
-			if on, ok := changes[f]; ok {
-				fmt.Fprintf(out, "%s: %s\n", f.Key, features.OnOff(on))
+		return hintInit(out, path, func() error {
+			if err := features.Save(path, changes); err != nil {
+				return err
 			}
-		}
-		return nil
+			for _, f := range features.All() {
+				if on, ok := changes[f]; ok {
+					fmt.Fprintf(out, "%s: %s\n", f.Key, features.OnOff(on))
+				}
+			}
+			return nil
+		})
 	}
 	return fmt.Errorf("config: unknown subcommand %q (list|enable|disable|path)", args[0])
 }

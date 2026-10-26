@@ -8,9 +8,11 @@ import (
 	"testing"
 
 	"git.gerwim.nl/gerwim/recarto/internal/agents"
+	"git.gerwim.nl/gerwim/recarto/internal/features"
 )
 
 func TestInstallRepoScopeWritesConfigAndIsIdempotent(t *testing.T) {
+	t.Setenv("RECARTO_CONFIG", filepath.Join(t.TempDir(), "config.toml"))
 	dir := t.TempDir()
 	home := t.TempDir()
 
@@ -66,6 +68,30 @@ func TestInstallRepoScopeWritesConfigAndIsIdempotent(t *testing.T) {
 	}
 	if res2.Hooks != "already present" || res2.MCP != "already present" {
 		t.Errorf("second install not idempotent: %+v", res2)
+	}
+}
+
+// TestInstallInstructionsFollowConfig: the block init writes names only the MCP
+// tools the user's config leaves on.
+func TestInstallInstructionsFollowConfig(t *testing.T) {
+	cfg := filepath.Join(t.TempDir(), "config.toml")
+	if err := features.Save(cfg, features.Set{features.GraphTools: false}); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("RECARTO_CONFIG", cfg)
+	dir := t.TempDir()
+	if _, err := Install(agents.Paths{Scope: agents.ScopeRepo, Dir: dir, Home: t.TempDir()}, "recarto"); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(filepath.Join(dir, "AGENTS.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), "record_memory") {
+		t.Errorf("AGENTS.md missing the memory tools that are on:\n%s", b)
+	}
+	if strings.Contains(string(b), "search_graph") {
+		t.Errorf("AGENTS.md names graph tools that are off:\n%s", b)
 	}
 }
 
