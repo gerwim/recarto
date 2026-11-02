@@ -122,4 +122,15 @@ func TestReconcileSkipsUnchangedContentOnMtimeChange(t *testing.T) {
 	if id1 != id2 {
 		t.Errorf("node re-indexed on mtime-only change (id %s -> %s); hash fast-path failed", id1, id2)
 	}
+	var mtime int64
+	if err := e.st.DB.QueryRow(`SELECT mtime FROM files WHERE path='a.go'`).Scan(&mtime); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := src.List()
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("list: %v %v", entries, err)
+	}
+	if mtime != entries[0].Mtime {
+		t.Errorf("stored mtime %d not refreshed to %d; the next reconcile re-hashes the file", mtime, entries[0].Mtime)
+	}
 }

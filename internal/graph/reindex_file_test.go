@@ -90,10 +90,10 @@ func TestReindexFileIncrementalKeepsUnrelatedCandidates(t *testing.T) {
 	}
 }
 
-// TestReindexFileIncrementalFallsBackOnExtendsChange proves a structural edit
-// (gaining/losing an extends edge) takes the full-resolve path, mirroring
-// Reconcile's guard: interface dispatch in OTHER files can change.
-func TestReindexFileIncrementalFallsBackOnExtendsChange(t *testing.T) {
+// TestReindexFileIncrementalRescopesOnExtendsChange proves a structural edit
+// (gaining/losing an extends edge) re-resolves interface dispatch in OTHER
+// files: the call named after the class's method is back in scope.
+func TestReindexFileIncrementalRescopesOnExtendsChange(t *testing.T) {
 	e := newTestEngine(t)
 	ctx := context.Background()
 	wt := t.TempDir()
@@ -104,7 +104,7 @@ func TestReindexFileIncrementalFallsBackOnExtendsChange(t *testing.T) {
 	}
 
 	// Plant the sentinel on c.cs's edge; the structural edit of i.cs must wipe it
-	// via the full-resolve fallback.
+	// by re-resolving the edge.
 	var edgeID, anchor string
 	if err := e.st.DB.QueryRow(`SELECT e.id FROM edges e JOIN files f ON f.id=e.file_id
 		WHERE f.worktree=? AND f.path='c.cs' AND e.kind='calls' LIMIT 1`, wt).Scan(&edgeID); err != nil {
@@ -142,6 +142,6 @@ func TestReindexFileIncrementalFallsBackOnExtendsChange(t *testing.T) {
 		t.Fatal(err)
 	}
 	if sentinel != 0 {
-		t.Fatal("extends change must fall back to a full resolve (sentinel survived)")
+		t.Fatal("extends change must re-resolve the dispatching call (sentinel survived)")
 	}
 }

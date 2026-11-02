@@ -951,7 +951,7 @@ func foldCandidate(m *resolveMaps, winners map[string]denormWinner, edgeID, dstI
 // Preserved exactly: the strict ef.language = mf.language equality (S6 has no
 // TS/JS-family widening, unlike S2/S3/S5), the class/record/struct kind set,
 // confidence 0.45, and S6's position last. Its inserted rows are folded like every
-// other strategy. The incremental stratImplicitCtor constant is left untouched.
+// other strategy.
 func stratImplicitCtorFold(ctx context.Context, c store.Conn, worktree string,
 	m *resolveMaps, winners map[string]denormWinner) error {
 	if _, err := c.ExecContext(ctx, `DROP TABLE IF EXISTS unresolved_calls`); err != nil {
@@ -962,6 +962,7 @@ CREATE TEMP TABLE unresolved_calls AS
   SELECT ed.id AS edge_id, ed.dst_name AS dst_name, ed.file_id AS file_id
     FROM files ef JOIN edges ed ON ed.file_id = ef.id
    WHERE ef.worktree = ? AND ed.kind = 'calls' AND ed.dst_name <> ''
+     AND `+ctorCallSite+`
      AND NOT EXISTS (SELECT 1 FROM edge_candidates ec0 WHERE ec0.edge_id = ed.id)`, worktree); err != nil {
 		return err
 	}
@@ -1122,7 +1123,13 @@ SELECT ed.id, m.id, 0.45, 'ctor'
   JOIN files mf ON mf.id = m.file_id
  WHERE ef.worktree = ? AND mf.worktree = ?
    AND ef.language = mf.language
+   AND ` + ctorCallSite + `
    AND NOT EXISTS (SELECT 1 FROM edge_candidates ec0 WHERE ec0.edge_id = ed.id)`
+
+// ctorCallSite drops C# member calls: C# constructs only via `new` (no receiver),
+// so `list.Add(x)` is never `class Add`. Python `mod.Cls()`, Rust `m::Point(..)`
+// and Go `pkg.T(x)` do construct through a receiver and keep matching.
+const ctorCallSite = `NOT (ef.language = 'csharp' AND ed.dst_recv <> '')`
 
 // stratInterface (S4, C#/Rust/Python): the receiver's bound type T is an interface, base
 // class or trait; expand to <method> on each implementing/deriving type (a Rust
@@ -1471,20 +1478,23 @@ SELECT n.qualified_name, n.kind FROM nodes n JOIN files f ON f.id = n.file_id
 			}
 		}
 		if _, err := c.ExecContext(ctx, `
-DELETE FROM nodes_fts WHERE node_id IN (
-  SELECT n.id FROM nodes n JOIN files f ON f.id = n.file_id
+DELETE FROM nodes_fts WHERE rowid IN (
+  SELECT r.fts_rowid FROM node_fts_rows r
+  JOIN nodes n ON n.id = r.node_id JOIN files f ON f.id = n.file_id
   WHERE f.worktree = ? AND f.path = ?)`, worktree, path); err != nil {
 			return err
 		}
 		if _, err := c.ExecContext(ctx, `
-DELETE FROM nodes_fts_stem WHERE node_id IN (
-  SELECT n.id FROM nodes n JOIN files f ON f.id = n.file_id
+DELETE FROM nodes_fts_stem WHERE rowid IN (
+  SELECT r.fts_rowid FROM node_fts_rows r
+  JOIN nodes n ON n.id = r.node_id JOIN files f ON f.id = n.file_id
   WHERE f.worktree = ? AND f.path = ?)`, worktree, path); err != nil {
 			return err
 		}
 		if _, err := c.ExecContext(ctx, `
-DELETE FROM nodes_fts_tri WHERE node_id IN (
-  SELECT n.id FROM nodes n JOIN files f ON f.id = n.file_id
+DELETE FROM nodes_fts_tri WHERE rowid IN (
+  SELECT r.fts_rowid FROM node_fts_rows r
+  JOIN nodes n ON n.id = r.node_id JOIN files f ON f.id = n.file_id
   WHERE f.worktree = ? AND f.path = ?)`, worktree, path); err != nil {
 			return err
 		}

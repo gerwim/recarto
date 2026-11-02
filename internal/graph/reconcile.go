@@ -151,12 +151,12 @@ func (e *Engine) Reconcile(ctx context.Context, worktree string, src Source, opt
 	// a pending recovery means that baseline is incomplete (Resolve nulls call
 	// edges before rebuilding them), so recovery always takes the full path.
 	incremental := !pending && len(have) > 0 && len(dirtyPaths) > 0 && len(dirtyPaths) <= maxIncrementalDirty
-	// Pre-edit signals, captured BEFORE the rewrite deletes the old rows: the names
-	// a dirty file held (so a removed/renamed symbol still re-resolves the edges
-	// that pointed at it), the targets of the bases the rewrite re-creates or
+	// Pre-edit signals, captured BEFORE the rewrite deletes the old rows: the name
+	// sequences of a dirty file (so a removed/renamed symbol still re-resolves the
+	// edges that pointed at it), the targets of the bases the rewrite re-creates or
 	// unlinks (so a call inherited through one that moves re-resolves too), and its
-	// `extends` edges (so a structural change falls back to a full resolve — see
-	// ResolveIncremental).
+	// `extends` edges (so structureChanged can re-scope a changed base's methods or
+	// resolve fully — see ResolveIncremental).
 	var old dirtyState
 	var oldExtends map[string]struct{}
 	if incremental {
@@ -252,23 +252,23 @@ func (e *Engine) Reconcile(ctx context.Context, worktree string, src Source, opt
 		if err := e.createGraphSecondaryIndexes(ctx); err != nil {
 			return err
 		}
-		// Incremental resolve is exact only while the worktree's interface/base
-		// structure is unchanged (ResolveIncremental); a dirty file that gained or
-		// lost an `extends` edge can redirect interface dispatch in OTHER files,
-		// which the name-scoped affected set cannot see — so re-resolve fully then
-		// (and when a Python module others name appeared or went: see
-		// structureChanged).
+		// Incremental resolve is exact while a dirty file's interface/base structure
+		// is unchanged (ResolveIncremental); a changed non-Python `extends` edge
+		// re-scopes the dispatch through that class by its methods (structureChanged's
+		// derived), and a changed Python base or a Python module others name resolves
+		// fully.
 		useIncremental := incremental
+		var derived []string
 		if useIncremental {
 			newExtends, err := e.extendsSigForPaths(ctx, worktree, dirtyPaths)
 			if err != nil {
 				return err
 			}
-			full, err := e.structureChanged(ctx, worktree, oldExtends, newExtends)
+			full, d, err := e.structureChanged(ctx, worktree, oldExtends, newExtends)
 			if err != nil {
 				return err
 			}
-			useIncremental = !full
+			useIncremental, derived = !full, d
 		}
 		if useIncremental {
 			// The incremental path has no sub-phases of its own; announce the base
@@ -276,7 +276,7 @@ func (e *Engine) Reconcile(ctx context.Context, worktree string, src Source, opt
 			// hint, the crash-safety cancel hook) still see the resolve stage begin.
 			// A full Resolve emits the base label (and its sub-phases) itself.
 			o.progress.Phase("resolving references")
-			if err := e.ResolveIncremental(ctx, worktree, dirtyPaths, old); err != nil {
+			if err := e.ResolveIncremental(ctx, worktree, dirtyPaths, old, derived); err != nil {
 				return err
 			}
 		} else if err := e.Resolve(ctx, worktree, o.progress); err != nil {
@@ -321,9 +321,10 @@ func (e *Engine) indexWorklist(ctx context.Context, worktree string, src Source,
 	// outcome is a worker's result for one file: a parsed graph to write, a skip
 	// (content unchanged / unparseable), or an error.
 	type outcome struct {
-		pf   parsedFile
-		skip bool
-		err  error
+		pf    parsedFile
+		skip  bool
+		touch *FileEntry
+		err   error
 	}
 	readParse := func(fe FileEntry) outcome {
 		content, err := src.Read(fe.Path)
@@ -332,7 +333,10 @@ func (e *Engine) indexWorklist(ctx context.Context, worktree string, src Source,
 		}
 		hash := sha256hex(content)
 		if prev, known := prevHash(fe.Path); known && prev == hash {
-			return outcome{skip: true} // mtime moved but content identical
+			// mtime moved but content identical: refresh the stored stat so the
+			// next reconcile's cheap pre-check skips it instead of re-hashing it
+			// (and counting it as dirty).
+			return outcome{skip: true, touch: &fe}
 		}
 		lang, ok := parse.LangForExt(fe.Path)
 		if !ok {
@@ -434,6 +438,7 @@ func (e *Engine) indexWorklist(ctx context.Context, worktree string, src Source,
 
 	wrote := false
 	var indexErr error
+	var touched []*FileEntry
 	for out := range results {
 		if out.err != nil {
 			if indexErr == nil {
@@ -444,6 +449,9 @@ func (e *Engine) indexWorklist(ctx context.Context, worktree string, src Source,
 		}
 		prog.Inc()
 		if out.skip {
+			if out.touch != nil {
+				touched = append(touched, out.touch)
+			}
 			continue
 		}
 		batch = append(batch, out.pf)
@@ -463,6 +471,20 @@ func (e *Engine) indexWorklist(ctx context.Context, worktree string, src Source,
 	}
 	if err := flush(); err != nil {
 		return false, err
+	}
+	if len(touched) > 0 {
+		if err := e.st.WriteTx(ctx, func(c store.Conn) error {
+			for _, fe := range touched {
+				if _, err := c.ExecContext(ctx,
+					`UPDATE files SET mtime=?, size=? WHERE worktree=? AND path=?`,
+					fe.Mtime, fe.Size, worktree, fe.Path); err != nil {
+					return err
+				}
+			}
+			return nil
+		}); err != nil {
+			return false, err
+		}
 	}
 	return wrote, nil
 }

@@ -75,7 +75,8 @@ func (e *Engine) embedWorktree(ctx context.Context, worktree string) error {
 	if err := e.ensureVectorTable(ctx); err != nil {
 		return err
 	}
-	// Drop vectors whose node disappeared (re-index assigns fresh node ids).
+	// Drop vectors whose node disappeared (a reindex replaces only the nodes whose
+	// identity changed; the rest keep their ids).
 	if err := e.st.WriteTx(ctx, func(c store.Conn) error {
 		_, err := c.ExecContext(ctx, `
 DELETE FROM node_vectors

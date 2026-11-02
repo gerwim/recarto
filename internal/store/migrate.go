@@ -8,7 +8,7 @@ import (
 )
 
 // schemaVersion is the number of applied migrations.
-const schemaVersion = 24
+const schemaVersion = 27
 
 // migrations are applied in order; index+1 becomes user_version.
 var migrations = []string{
@@ -572,6 +572,37 @@ DELETE FROM meta WHERE key LIKE 'graph_token:%';
 	// indexes the .py files already on disk.
 	`
 DELETE FROM meta WHERE key LIKE 'graph_token:%';
+`,
+	// v25: map node ids to FTS rowids so per-file FTS cleanup can seek by rowid
+	// instead of scanning every symbol in every worktree.
+	`
+CREATE TABLE IF NOT EXISTS node_fts_rows (
+  fts_rowid INTEGER PRIMARY KEY,
+  node_id   TEXT NOT NULL UNIQUE REFERENCES nodes(id) ON DELETE CASCADE
+);
+INSERT OR IGNORE INTO node_fts_rows(fts_rowid, node_id)
+SELECT rowid, node_id FROM nodes_fts
+WHERE node_id IN (SELECT id FROM nodes);
+`,
+	// v26: name lookups that filter by kind (the name-fallback and implicit-ctor
+	// strategies) test it in the index instead of fetching every same-name node.
+	`
+DROP INDEX IF EXISTS idx_nodes_name;
+CREATE INDEX idx_nodes_name ON nodes(name, kind);
+`,
+	// v27: the implicit-ctor strategy no longer binds C# member calls
+	// (list.Add(x) is never class Add; see graph.ctorCallSite). Drop the stale
+	// candidates; ctor only fires for otherwise-unresolved calls, so those edges
+	// become unresolved, exactly as a fresh resolve leaves them.
+	`
+CREATE TEMP TABLE _v27 AS
+  SELECT DISTINCT ec.edge_id FROM edge_candidates ec
+    JOIN edges e ON e.id = ec.edge_id
+    JOIN files f ON f.id = e.file_id
+   WHERE ec.method = 'ctor' AND f.language = 'csharp' AND e.dst_recv <> '';
+DELETE FROM edge_candidates WHERE method = 'ctor' AND edge_id IN (SELECT edge_id FROM _v27);
+UPDATE edges SET dst_node_id = NULL WHERE id IN (SELECT edge_id FROM _v27);
+DROP TABLE _v27;
 `,
 }
 

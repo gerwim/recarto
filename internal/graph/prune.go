@@ -54,8 +54,9 @@ func (e *Engine) PruneWorktree(ctx context.Context, worktree string) error {
 		in := strings.Join(ph, ",")
 		if err := e.st.WriteTx(ctx, func(c store.Conn) error {
 			for _, fts := range []string{"nodes_fts", "nodes_fts_stem", "nodes_fts_tri"} {
-				if _, err := c.ExecContext(ctx, `DELETE FROM `+fts+` WHERE node_id IN (
-					SELECT id FROM nodes WHERE file_id IN (`+in+`))`, args...); err != nil {
+				if _, err := c.ExecContext(ctx, `DELETE FROM `+fts+` WHERE rowid IN (
+					SELECT fts_rowid FROM node_fts_rows
+					WHERE node_id IN (SELECT id FROM nodes WHERE file_id IN (`+in+`)))`, args...); err != nil {
 					return err
 				}
 			}
