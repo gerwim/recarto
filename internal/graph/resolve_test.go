@@ -176,11 +176,14 @@ SELECT n.qualified_name, ec.method FROM edges ed
 }
 
 // TestResolveS6SkipsCSharpMemberCall: C# constructs only via `new`, so
-// items.Add(x) is never a constructor call of a class named Add.
+// items.Add(x) is never a constructor call of a class named Add, while every
+// `new` form — bare, namespace-qualified, generic and both — still binds.
 func TestResolveS6SkipsCSharpMemberCall(t *testing.T) {
 	e := newTestEngine(t)
 	ctx := context.Background()
-	src := []byte("namespace N;\nclass Add { }\nclass Svc { void M() { items.Add(1); var a = new Add(); } }")
+	src := []byte("namespace N;\nclass Add { }\nclass Rep<T> { }\n" +
+		"class Svc { void M() { items.Add(1); var a = new Add(); var b = new N.Add(); " +
+		"var c = new Rep<int>(); var d = new N.Rep<int>(); } }")
 	if err := e.IndexFile(ctx, "/wt", "Svc.cs", src, 1, int64(len(src))); err != nil {
 		t.Fatal(err)
 	}
@@ -190,8 +193,49 @@ func TestResolveS6SkipsCSharpMemberCall(t *testing.T) {
 	if got := candidateTargets(t, e, "Add", "items"); len(got) != 0 {
 		t.Errorf("items.Add(1) should not bind to class Add; got %v", got)
 	}
-	if got := candidateTargets(t, e, "Add", ""); got["N.Add"] != "ctor" {
-		t.Errorf("new Add() should still bind ctor to N.Add; got %v", got)
+	// Count the creation edges themselves: two Add and two Rep calls, each
+	// receiverless and bound to its type with method ctor. A map keyed by target
+	// can't tell the two same-named edges apart.
+	for name, want := range map[string]int{"Add": 2, "Rep": 2} {
+		var got int
+		if err := e.st.DB.QueryRow(`
+SELECT COUNT(*) FROM edges ed
+  JOIN edge_candidates ec ON ec.edge_id = ed.id
+  JOIN nodes n ON n.id = ec.dst_node_id
+ WHERE ed.kind = 'calls' AND ed.dst_name = ? AND ed.dst_recv = ''
+   AND ec.method = 'ctor' AND n.qualified_name = 'N.' || ?`, name, name).Scan(&got); err != nil {
+			t.Fatal(err)
+		}
+		if got != want {
+			t.Errorf("%d of %d new %s() edges bind ctor to N.%s", got, want, name, name)
+		}
+	}
+}
+
+// TestResolveS6ReceiverConstructsOutsideCSharp: the `new` rule is C#-only. These
+// languages construct through a receiver, so S6 still binds them.
+func TestResolveS6ReceiverConstructsOutsideCSharp(t *testing.T) {
+	e := newTestEngine(t)
+	ctx := context.Background()
+	files := map[string]string{
+		"m.py": "class Cls:\n    pass\n\ndef go(mod):\n    mod.Cls()\n",
+		"m.rs": "struct Point(i32);\nfn make() -> Point { m::Point(1) }\n",
+	}
+	for path, src := range files {
+		if err := e.IndexFile(ctx, "/wt", path, []byte(src), 1, int64(len(src))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := e.Resolve(ctx, "/wt", noopProgress{}); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ name, recv, target string }{
+		{"Cls", "mod", "Cls"},
+		{"Point", "m", "Point"},
+	} {
+		if got := candidateTargets(t, e, tc.name, tc.recv); got[tc.target] != "ctor" {
+			t.Errorf("%s.%s should bind ctor to %s; got %v", tc.recv, tc.name, tc.target, got)
+		}
 	}
 }
 

@@ -211,6 +211,83 @@ func TestFTSRowIDMigrationBackfillsExistingRows(t *testing.T) {
 	}
 }
 
+// TestConstructorLinkMigration pins v27: opening a store built before it drops
+// the ctor candidates a C# member call wrongly earned, leaves a real `new` and a
+// Python module call alone, and touches no memory.
+func TestConstructorLinkMigration(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "store.db")
+	st, err := Open(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustExec(t, st, `INSERT INTO files(id,worktree,path,language,content_hash,mtime,size,last_indexed_at)
+		VALUES('f1','/wt','A.cs','csharp','h',1,1,1),('f2','/wt','m.py','python','h',1,1,1)`)
+	mustExec(t, st, `INSERT INTO nodes(id,file_id,kind,name,qualified_name,signature,start_byte,end_byte,start_line,end_line)
+		VALUES('n1','f1','class','Add','N.Add','',0,1,1,1),('n2','f2','class','Cls','Cls','',0,1,1,1)`)
+	for _, e := range []struct{ id, file, src, dst, name, recv string }{
+		{"member", "f1", "n1", "n1", "Add", "items"},
+		{"new", "f1", "n1", "n1", "Add", ""},
+		{"pymod", "f2", "n2", "n2", "Cls", "mod"},
+	} {
+		mustExec(t, st, fmt.Sprintf(`INSERT INTO edges(id,src_node_id,dst_node_id,dst_name,dst_recv,kind,file_id,line)
+			VALUES('%s','%s','%s','%s','%s','calls','%s',1)`, e.id, e.src, e.dst, e.name, e.recv, e.file))
+		mustExec(t, st, fmt.Sprintf(`INSERT INTO edge_candidates(edge_id,dst_node_id,confidence,method)
+			VALUES('%s','%s',0.45,'ctor')`, e.id, e.dst))
+	}
+	mustExec(t, st, `INSERT INTO memories(id,kind,title,body,created_at,updated_at)
+		VALUES('m1','learning','keep me','memory body',1,1)`)
+	mustExec(t, st, `DROP TABLE node_fts_rows`)
+	mustExec(t, st, `PRAGMA user_version = 24`)
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	st, err = Open(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	for _, tc := range []struct {
+		edge     string
+		cands    int
+		bound    bool
+		wantWhat string
+	}{
+		{"member", 0, false, "a C# member call"},
+		{"new", 1, true, "a C# new"},
+		{"pymod", 1, true, "a Python module call"},
+	} {
+		var cands int
+		if err := st.DB.QueryRow(`SELECT COUNT(*) FROM edge_candidates WHERE edge_id=?`, tc.edge).Scan(&cands); err != nil {
+			t.Fatal(err)
+		}
+		if cands != tc.cands {
+			t.Errorf("%s keeps %d ctor candidates, want %d", tc.wantWhat, cands, tc.cands)
+		}
+		var bound bool
+		if err := st.DB.QueryRow(`SELECT dst_node_id IS NOT NULL FROM edges WHERE id=?`, tc.edge).Scan(&bound); err != nil {
+			t.Fatal(err)
+		}
+		if bound != tc.bound {
+			t.Errorf("%s binding kept = %v, want %v", tc.wantWhat, bound, tc.bound)
+		}
+	}
+	var title, body string
+	if err := st.DB.QueryRow(`SELECT title, body FROM memories WHERE id='m1'`).Scan(&title, &body); err != nil {
+		t.Fatal(err)
+	}
+	if title != "keep me" || body != "memory body" {
+		t.Errorf("memory = %q/%q, want it untouched", title, body)
+	}
+	var v int
+	if err := st.DB.QueryRow("PRAGMA user_version").Scan(&v); err != nil {
+		t.Fatal(err)
+	}
+	if v != 27 {
+		t.Errorf("user_version = %d, want 27", v)
+	}
+}
+
 func mustExec(t *testing.T, st *Store, q string) {
 	t.Helper()
 	if _, err := st.DB.Exec(q); err != nil {

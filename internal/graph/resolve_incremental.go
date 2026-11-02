@@ -2,7 +2,6 @@ package graph
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"maps"
 	"slices"
@@ -40,9 +39,11 @@ import (
 // order a resolver reads it by is unchanged; additions and removals change the
 // sequence (so a now-stale S5 candidate count is recomputed, not left stale).
 // Case (b): interface dispatch reaches a method only through the contains edges
-// of the very node that carries the extends edge, one level deep — so when a
-// dirty file's non-Python class gained or lost an extends edge, every edge named
-// after that class's methods is re-resolved too (structureChanged's derived).
+// of the very node that carries the extends edge, one level deep — so when the
+// extends edges of a dirty declaration changed (it gained or lost a base, or a
+// base moved onto or off it, even between two declarations of one class), every
+// edge named after that declaration's methods is re-resolved too
+// (structureChanged's derived).
 // Python's inherited lookup climbs the hierarchy transitively, which names
 // cannot bound, so a changed Python extends edge falls back to a full Resolve
 // (see extendsSigForPaths). When it has NOT changed, only a base's target can move,
@@ -102,7 +103,10 @@ func (e *Engine) ResolveIncremental(ctx context.Context, worktree string, dirtyP
 		// changes which calls its methods answer by interface dispatch. Methods it
 		// dropped changed their sequence above; these are the ones it still has.
 		if len(derived) > 0 {
-			derivedJSON, _ := json.Marshal(derived)
+			derivedJSON, err := json.Marshal(derived)
+			if err != nil {
+				return err
+			}
 			if _, err := c.ExecContext(ctx, `
 INSERT OR IGNORE INTO _affected_names(name)
   SELECT m.name FROM files f
@@ -266,8 +270,8 @@ const scopedBest = `
    LIMIT 1`
 
 // dirtyState is what the dirty files held before a reconcile rewrote them, which
-// ResolveIncremental scopes by: their node names and qualified names, the names
-// they imported by module (namesForPaths), and the extends edges the rewrite
+// ResolveIncremental scopes by: their name sequences (nameSeqs), the names they
+// imported by module (importsForPaths), and the extends edges the rewrite
 // re-creates or unlinks, with their targets (baseTargets).
 type dirtyState struct {
 	seqs    map[string][]seqElem
@@ -392,9 +396,8 @@ SELECT e.id, COALESCE(ob.tpath, tf.path, ''), COALESCE(ob.tname, t.qualified_nam
 // with super(), which climbs the base (stratInherited), and one on a receiver
 // typed as the base's name, which may dispatch to the class's override
 // (stratInterface). A receiver's type is any binding of its name in the call's
-// file, wherever in scope. Their call edges join _resolve_scope, candidates
-// dropped, before the call passes run (which set every scoped call's target
-// afresh).
+// file, wherever in scope. Their call edges join _resolve_scope before the call
+// passes run, which set every scoped call's target afresh.
 func moveBases(ctx context.Context, c store.Conn, worktree string) error {
 	for _, ddl := range []string{`DROP TABLE IF EXISTS _moved`, `DROP TABLE IF EXISTS _moved_calls`} {
 		if _, err := c.ExecContext(ctx, ddl); err != nil {
@@ -468,10 +471,12 @@ SELECT ed.id
 
 // incrementalCallStrategies are the full callStrategies (resolve.go), each
 // mechanically rewritten to drive from the affected-edge scratch table rather than
-// from every call edge in the worktree. The rewrite swaps only the driving table;
-// all join predicates, the worktree/language filters, and the per-edge logic are
-// byte-for-byte the full strategy, so each scoped pass yields exactly the rows the
-// full pass would for those edges.
+// from every call edge in the worktree. The rewrite swaps the driving table, sends
+// the pass's output to _cand (diffed into edge_candidates afterwards) and tests
+// hyper-common names per edge rather than against a whole-store aggregate; all join
+// predicates, the worktree/language filters, and the per-edge logic are otherwise
+// the full strategy, so each scoped pass yields exactly the rows the full pass
+// would for those edges.
 var incrementalCallStrategies = func() []string {
 	out := make([]string, len(callStrategies))
 	for i, s := range callStrategies {
@@ -570,9 +575,7 @@ type seqElem struct{ ident, qn string }
 // its name, identity, contains parent and order among same-named nodes of its
 // file — so where a name's sequence is unchanged across a reindex, every edge
 // elsewhere that may target it resolves exactly as before.
-func nameSeqs(ctx context.Context, q interface {
-	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
-}, worktree string, paths []string) (map[string][]seqElem, error) {
+func nameSeqs(ctx context.Context, q store.Conn, worktree string, paths []string) (map[string][]seqElem, error) {
 	out := map[string][]seqElem{}
 	if len(paths) == 0 {
 		return out, nil
@@ -645,13 +648,18 @@ func changedNames(before, after map[string][]seqElem) []string {
 }
 
 // extendsSigForPaths returns a set identifying the `extends`/`implements` edges
-// the given paths currently contribute, keyed by "<deriving qualified_name>\x00
-// <base name>\x00<base module>" (the module a Python base names; else empty),
-// and the Python files among them, keyed "\x00\x00<path>". structureChanged
-// compares the set before and after a reconcile to tell whether a dirty file
-// changed the interface/base structure or the Python modules others name — the
-// cases the name-scoped incremental resolve cannot bound (see
-// ResolveIncremental), forcing a full Resolve.
+// the given paths currently contribute, keyed by "<deriving qualified_name>\x00<node
+// id>\x00<base name>\x00<base module>" (the module a Python base names; else
+// empty), and the Python files among them, keyed "\x00\x00<path>".
+// structureChanged compares the set before and after a reconcile to tell whether
+// a dirty file changed the interface/base structure or the Python modules others
+// name — the cases the name-scoped incremental resolve cannot bound (see
+// ResolveIncremental). The key names the DECLARATION that carries the edge,
+// because that is what interface dispatch reads: a base moved between two
+// declarations of one class or between two Rust impls leaves the class and base
+// names equal while dispatch changes. The node id survives a reindex exactly
+// when the declaration's identity and ordinal do (reuseNodeIDs), so an edit that
+// merely moves code keeps the key and re-scopes nothing.
 func (e *Engine) extendsSigForPaths(ctx context.Context, worktree string, paths []string) (map[string]struct{}, error) {
 	sig := map[string]struct{}{}
 	if len(paths) == 0 {
@@ -663,14 +671,14 @@ func (e *Engine) extendsSigForPaths(ctx context.Context, worktree string, paths 
 		args = append(args, p)
 	}
 	rows, err := e.st.DB.QueryContext(ctx, `
-SELECT COALESCE(src.qualified_name, ''), e.dst_name, e.dst_recv, f.language = 'python'
+SELECT COALESCE(src.qualified_name, ''), COALESCE(src.id, ''), e.dst_name, e.dst_recv, f.language = 'python'
   FROM edges e
   JOIN files f   ON f.id = e.file_id
   LEFT JOIN nodes src ON src.id = e.src_node_id
  WHERE f.worktree = ? AND e.kind = 'extends'
    AND f.path IN (`+placeholders(len(paths))+`)
 UNION ALL
-SELECT '', '', path, 1 FROM files
+SELECT '', '', '', path, 1 FROM files
  WHERE worktree = ? AND language = 'python' AND path IN (`+placeholders(len(paths))+`)`,
 		append(args, args...)...)
 	if err != nil {
@@ -678,10 +686,13 @@ SELECT '', '', path, 1 FROM files
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var s, d, m string
+		var s, id, d, m string
 		var py bool
-		if err := rows.Scan(&s, &d, &m, &py); err != nil {
+		if err := rows.Scan(&s, &id, &d, &m, &py); err != nil {
 			return nil, err
+		}
+		if s != "" {
+			s += "\x00" + id
 		}
 		if !py && s != "" {
 			// Only interface dispatch (stratInterface) reads a non-Python extends

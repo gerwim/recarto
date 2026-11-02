@@ -40,11 +40,12 @@ func (e *Engine) IndexFile(ctx context.Context, worktree, path string, src []byt
 }
 
 // ReindexFileIncremental rewrites one file's graph and re-resolves only what
-// that edit can affect, with the same guards Reconcile applies: the names the
-// file held before and after scope the affected edge set, and a change to its
-// `extends` edges (which can redirect interface dispatch in OTHER files) falls
-// back to a full resolve. This is the post-edit hook path — a full Resolve per
-// keystroke cost ~14s on a large repo for a one-file change.
+// that edit can affect, with the same guards Reconcile applies: the names whose
+// nodes in the file changed scope the affected edge set, and a change to its
+// `extends` edges re-scopes the methods of the class that carries it, since
+// interface dispatch in OTHER files reads them (structureChanged). Only a
+// Python base change resolves fully. This is the post-edit hook path — a full
+// Resolve per keystroke cost ~14s on a large repo for a one-file change.
 func (e *Engine) ReindexFileIncremental(ctx context.Context, worktree, path string, src []byte, mtime, size int64) error {
 	dirty := []string{path}
 	old, err := e.captureDirty(ctx, worktree, dirty)
@@ -326,10 +327,12 @@ func buildFileGraph(src []byte, res parse.Result) fileGraph {
 	return g
 }
 
-// writeFileGraph upserts the files row and inserts the pre-built graph g for it.
-// It runs on the single serial writer and does only the upsert and the prepared
-// INSERTs — all per-row computation already happened in buildFileGraph — so the
-// writer is no longer the place the index spends CPU.
+// writeFileGraph upserts the files row and writes the pre-built graph g for it.
+// It runs on the single serial writer and does only the upsert, the prepared
+// INSERTs and one UPDATE per surviving node — all per-row computation already
+// happened in buildFileGraph — so the writer is no longer the place the index
+// spends CPU. A node whose identity and ordinal survived the edit keeps its id
+// and gets its position and signature refreshed; only the rest are replaced.
 func (e *Engine) writeFileGraph(ctx context.Context, c store.Conn, st *writeStmts, worktree, path, lang string,
 	g fileGraph, hash string, mtime, size, now int64) error {
 	var kept map[string]bool

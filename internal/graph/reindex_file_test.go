@@ -90,10 +90,10 @@ func TestReindexFileIncrementalKeepsUnrelatedCandidates(t *testing.T) {
 	}
 }
 
-// TestReindexFileIncrementalFallsBackOnExtendsChange proves a structural edit
+// TestReindexFileIncrementalRescopesOnExtendsChange proves a structural edit
 // (gaining/losing an extends edge) re-resolves interface dispatch in OTHER
 // files: the call named after the class's method is back in scope.
-func TestReindexFileIncrementalFallsBackOnExtendsChange(t *testing.T) {
+func TestReindexFileIncrementalRescopesOnExtendsChange(t *testing.T) {
 	e := newTestEngine(t)
 	ctx := context.Background()
 	wt := t.TempDir()

@@ -470,9 +470,9 @@ func handlePostEdit(ctx context.Context, a *app.App, ev Event) (Result, error) {
 		return res, nil
 	}
 	// Incremental: rewrite this file's graph and re-resolve only the edges the
-	// edit can affect (full resolve only on a structural `extends` change). The
-	// previous unconditional full Resolve cost ~14s per edit on a large repo —
-	// paid inside the agent's edit hook.
+	// edit can affect (a full resolve only when a Python base or a module others
+	// name changes). The previous unconditional full Resolve cost ~14s per edit on
+	// a large repo — paid inside the agent's edit hook.
 	return res, target.Graph.ReindexFileIncremental(ctx, target.Git.Worktree, rel, content, info.ModTime().UnixMilli(), info.Size())
 }
 
