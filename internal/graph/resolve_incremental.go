@@ -2,6 +2,11 @@ package graph
 
 import (
 	"context"
+	"database/sql"
+	"encoding/json"
+	"maps"
+	"slices"
+	"strconv"
 	"strings"
 
 	"git.gerwim.nl/gerwim/recarto/internal/store"
@@ -27,14 +32,20 @@ import (
 //	    import edge of the same dst_name, so every module-naming import of a
 //	    name a dirty file imports so, before or after the edit, is re-resolved.
 //
-// Case (a) is covered by re-resolving every edge whose dst_name matches a node
-// name (or qualified_name) that was present in a dirty file BEFORE or AFTER the
-// edit — additions land in the post-state names, removals/renames in the
-// pre-state names (so a now-stale S5 candidate count is recomputed, not left
-// stale). Case (b) cannot be bounded by names alone (a partial class can declare
-// `: IFoo` and the method in different files), so the caller falls back to a full
-// Resolve whenever a dirty file's `extends` edge set changed (see
-// extendsSigForPaths). When it has NOT changed, only a base's target can move,
+// Case (a) is covered by re-resolving every edge whose dst_name matches a name
+// (or a qualified name of a node bearing it) whose nodes in a dirty file changed
+// across the edit: their identity, ordinal, contains parent or same-file order
+// (nameSeqs). A node whose identity survived keeps its id (reuseNodeIDs), so no
+// edge or candidate elsewhere was unlinked from it, and every attribute and the
+// order a resolver reads it by is unchanged; additions and removals change the
+// sequence (so a now-stale S5 candidate count is recomputed, not left stale).
+// Case (b): interface dispatch reaches a method only through the contains edges
+// of the very node that carries the extends edge, one level deep — so when a
+// dirty file's non-Python class gained or lost an extends edge, every edge named
+// after that class's methods is re-resolved too (structureChanged's derived).
+// Python's inherited lookup climbs the hierarchy transitively, which names
+// cannot bound, so a changed Python extends edge falls back to a full Resolve
+// (see extendsSigForPaths). When it has NOT changed, only a base's target can move,
 // as a dirty file adds or drops a class of its name: a second class Base fails
 // Python's unique-class fallback, a nearer one takes a plain base over. Such an
 // edge is in scope by (a), and the calls that may resolve through it re-resolve
@@ -49,7 +60,7 @@ import (
 // dirtyPaths is the worktree-relative paths re-indexed or deleted this reconcile;
 // old is what they held BEFORE the edit (captured by the caller pre-reindex, see
 // captureDirty). The post-edit state is read here.
-func (e *Engine) ResolveIncremental(ctx context.Context, worktree string, dirtyPaths []string, old dirtyState) error {
+func (e *Engine) ResolveIncremental(ctx context.Context, worktree string, dirtyPaths []string, old dirtyState, derived []string) error {
 	if len(dirtyPaths) == 0 {
 		return nil
 	}
@@ -65,6 +76,9 @@ func (e *Engine) ResolveIncremental(ctx context.Context, worktree string, dirtyP
 			`CREATE TEMP TABLE _affected_imports(name TEXT PRIMARY KEY)`,
 			`DROP TABLE IF EXISTS _resolve_scope`,
 			`CREATE TEMP TABLE _resolve_scope(edge_id TEXT PRIMARY KEY)`,
+			`DROP TABLE IF EXISTS _cand`,
+			`CREATE TEMP TABLE _cand(edge_id TEXT NOT NULL, dst_node_id TEXT NOT NULL, confidence REAL NOT NULL,
+			   method TEXT NOT NULL, PRIMARY KEY (edge_id, dst_node_id)) WITHOUT ROWID`,
 		} {
 			if _, err := c.ExecContext(ctx, ddl); err != nil {
 				return err
@@ -74,23 +88,33 @@ func (e *Engine) ResolveIncremental(ctx context.Context, worktree string, dirtyP
 		if err := insertValues(ctx, c, `INSERT OR IGNORE INTO _dirty_paths(path) VALUES (?)`, dirtyPaths); err != nil {
 			return err
 		}
-		if err := insertValues(ctx, c, `INSERT OR IGNORE INTO _affected_names(name) VALUES (?)`, old.names); err != nil {
+		// Names whose nodes changed identity, parent or same-name order (see
+		// nameSeqs), with their qualified names; every other name kept its node
+		// ids, so its edges elsewhere still resolve exactly as before.
+		newSeqs, err := nameSeqs(ctx, c, worktree, dirtyPaths)
+		if err != nil {
 			return err
+		}
+		if err := insertValues(ctx, c, `INSERT OR IGNORE INTO _affected_names(name) VALUES (?)`, changedNames(old.seqs, newSeqs)); err != nil {
+			return err
+		}
+		// A dirty class that gained or lost an extends edge (structureChanged)
+		// changes which calls its methods answer by interface dispatch. Methods it
+		// dropped changed their sequence above; these are the ones it still has.
+		if len(derived) > 0 {
+			derivedJSON, _ := json.Marshal(derived)
+			if _, err := c.ExecContext(ctx, `
+INSERT OR IGNORE INTO _affected_names(name)
+  SELECT m.name FROM files f
+    JOIN nodes x  ON x.file_id = f.id
+    JOIN edges cm ON cm.src_node_id = x.id AND cm.kind = 'contains'
+    JOIN nodes m  ON m.id = cm.dst_node_id AND m.kind = 'method'
+   WHERE f.worktree = ? AND f.path IN (SELECT path FROM _dirty_paths)
+     AND x.qualified_name IN (SELECT value FROM json_each(?))`, worktree, string(derivedJSON)); err != nil {
+				return err
+			}
 		}
 		if err := insertValues(ctx, c, `INSERT OR IGNORE INTO _affected_imports(name) VALUES (?)`, old.imports); err != nil {
-			return err
-		}
-		// Post-edit names (and qualified names) of nodes now in the dirty files.
-		if _, err := c.ExecContext(ctx, `
-INSERT OR IGNORE INTO _affected_names(name)
-  SELECT n.name FROM nodes n JOIN files f ON f.id = n.file_id
-   WHERE f.worktree = ? AND f.path IN (SELECT path FROM _dirty_paths)`, worktree); err != nil {
-			return err
-		}
-		if _, err := c.ExecContext(ctx, `
-INSERT OR IGNORE INTO _affected_names(name)
-  SELECT n.qualified_name FROM nodes n JOIN files f ON f.id = n.file_id
-   WHERE f.worktree = ? AND f.path IN (SELECT path FROM _dirty_paths)`, worktree); err != nil {
 			return err
 		}
 		// ... and the names they import by module, which an import elsewhere may
@@ -112,19 +136,23 @@ INSERT OR IGNORE INTO _resolve_scope(edge_id)
    WHERE f.worktree = ? AND f.path IN (SELECT path FROM _dirty_paths)`, worktree); err != nil {
 			return err
 		}
+		// Driven from the name tables (idx_edges_dstname), not the worktree's files.
 		if _, err := c.ExecContext(ctx, `
 INSERT OR IGNORE INTO _resolve_scope(edge_id)
-  SELECT e.id FROM edges e JOIN files f ON f.id = e.file_id
-   WHERE f.worktree = ? AND e.dst_name IN (SELECT name FROM _affected_names)`, worktree); err != nil {
+  SELECT e.id FROM _affected_names a
+  CROSS JOIN edges e ON e.dst_name = a.name
+  JOIN files f ON f.id = e.file_id
+   WHERE f.worktree = ?`, worktree); err != nil {
 			return err
 		}
 		// ... and (c) every module-naming import of a name a dirty file imports so:
 		// only imports follow a re-export, so no call or base re-resolves for it
 		if _, err := c.ExecContext(ctx, `
 INSERT OR IGNORE INTO _resolve_scope(edge_id)
-  SELECT e.id FROM edges e JOIN files f ON f.id = e.file_id
-   WHERE f.worktree = ? AND e.kind = 'imports' AND e.dst_recv <> ''
-     AND e.dst_name IN (SELECT name FROM _affected_imports)`, worktree); err != nil {
+  SELECT e.id FROM _affected_imports a
+  CROSS JOIN edges e ON e.dst_name = a.name
+  JOIN files f ON f.id = e.file_id
+   WHERE f.worktree = ? AND e.kind = 'imports' AND e.dst_recv <> ''`, worktree); err != nil {
 			return err
 		}
 
@@ -132,30 +160,31 @@ INSERT OR IGNORE INTO _resolve_scope(edge_id)
 			return err
 		}
 
-		// Reset only the affected edges, then re-resolve exactly them — the same
-		// passes as full Resolve, scoped to _resolve_scope.
-		if _, err := c.ExecContext(ctx,
-			`DELETE FROM edge_candidates WHERE edge_id IN (SELECT edge_id FROM _resolve_scope)`); err != nil {
-			return err
-		}
+		// Re-resolve exactly the affected edges — the same passes as full Resolve,
+		// scoped to _resolve_scope. Their candidates are derived afresh into _cand
+		// and only the difference applied (after the call passes): most survive an
+		// edit unchanged, and rewriting them all is most of a scoped resolve's I/O.
 		// Reset the affected edges' bindings before re-deriving them — but NOT the
 		// structural `contains` edges (dst_name = ''), which are bound at write time
 		// from the file's own nesting and are never recomputed by name (full Resolve
 		// leaves them untouched too). Nulling them would orphan every self-call,
-		// whose strategy walks class→method via contains.
+		// whose strategy walks class→method via contains. Call edges are left as
+		// they are: no strategy reads their binding, and the denormalize below
+		// rewrites only those whose best candidate moved.
 		if _, err := c.ExecContext(ctx,
 			`UPDATE edges SET dst_node_id = NULL
 			  WHERE id IN (SELECT edge_id FROM _resolve_scope)
-			    AND (kind = 'calls' OR dst_name <> '')`); err != nil {
+			    AND kind <> 'calls' AND dst_name <> ''`); err != nil {
 			return err
 		}
 
 		// Non-call edges (scoped): same name-match bind as resolveNonCallEdges, but
 		// only over affected edges (which were just nulled, so the IS NULL guard
-		// selects exactly them).
+		// selects exactly them). The unary + keeps SQLite off idx_edges_dst, which
+		// would walk every unresolved edge in the store.
 		if _, err := c.ExecContext(ctx, `
 UPDATE edges SET dst_node_id = (`+nonCallTarget+`)
-WHERE dst_node_id IS NULL
+WHERE +dst_node_id IS NULL
   AND dst_name <> ''
   AND dst_recv = ''
   AND kind <> 'calls'
@@ -177,28 +206,36 @@ WHERE dst_node_id IS NULL
 				return err
 			}
 		}
+		for _, stmt := range []string{`
+DELETE FROM edge_candidates
+ WHERE edge_id IN (SELECT edge_id FROM _resolve_scope)
+   AND NOT EXISTS (SELECT 1 FROM _cand n
+                    WHERE n.edge_id = edge_candidates.edge_id AND n.dst_node_id = edge_candidates.dst_node_id
+                      AND n.confidence = edge_candidates.confidence AND n.method = edge_candidates.method)`, `
+INSERT OR REPLACE INTO edge_candidates(edge_id, dst_node_id, confidence, method)
+SELECT n.edge_id, n.dst_node_id, n.confidence, n.method FROM _cand n
+ WHERE NOT EXISTS (SELECT 1 FROM edge_candidates ec
+                    WHERE ec.edge_id = n.edge_id AND ec.dst_node_id = n.dst_node_id
+                      AND ec.confidence = n.confidence AND ec.method = n.method)`,
+		} {
+			if _, err := c.ExecContext(ctx, stmt); err != nil {
+				return err
+			}
+		}
 
-		// Denormalize the best candidate onto edges.dst_node_id (scoped).
-		_, err := c.ExecContext(ctx, `
-UPDATE edges SET dst_node_id = (
-  SELECT ec.dst_node_id FROM edge_candidates ec
-    JOIN nodes n  ON n.id = ec.dst_node_id
-    JOIN files mf ON mf.id = n.file_id
-    JOIN files ef ON ef.id = edges.file_id
-   WHERE ec.edge_id = edges.id
-   ORDER BY ec.confidence DESC,
-     CASE WHEN mf.id = edges.file_id THEN 0 ELSE 1 END,
-     CASE WHEN substr(mf.path,1,instr(mf.path,'/')) = substr(ef.path,1,instr(ef.path,'/'))
-          THEN 0 ELSE 1 END,
-     mf.path, n.start_byte, ec.dst_node_id
-   LIMIT 1)
- WHERE kind = 'calls' AND id IN (SELECT edge_id FROM _resolve_scope)`)
+		// Denormalize the best candidate onto edges.dst_node_id (scoped), writing
+		// only the edges whose winner changed.
+		_, err = c.ExecContext(ctx, `
+UPDATE edges SET dst_node_id = (`+scopedBest+`)
+ WHERE kind = 'calls' AND id IN (SELECT edge_id FROM _resolve_scope)
+   AND dst_node_id IS NOT (`+scopedBest+`)`)
 		if err != nil {
 			return err
 		}
 
 		for _, ddl := range []string{
 			`DROP TABLE IF EXISTS _resolve_scope`,
+			`DROP TABLE IF EXISTS _cand`,
 			`DROP TABLE IF EXISTS _affected_names`,
 			`DROP TABLE IF EXISTS _affected_imports`,
 			`DROP TABLE IF EXISTS _dirty_paths`,
@@ -213,13 +250,29 @@ UPDATE edges SET dst_node_id = (
 	})
 }
 
+// scopedBest is the denormalize pick for one call edge (correlated on edges):
+// highest confidence, then same file, same top-level directory, stable order.
+const scopedBest = `
+  SELECT ec.dst_node_id FROM edge_candidates ec
+    JOIN nodes n  ON n.id = ec.dst_node_id
+    JOIN files mf ON mf.id = n.file_id
+    JOIN files ef ON ef.id = edges.file_id
+   WHERE ec.edge_id = edges.id
+   ORDER BY ec.confidence DESC,
+     CASE WHEN mf.id = edges.file_id THEN 0 ELSE 1 END,
+     CASE WHEN substr(mf.path,1,instr(mf.path,'/')) = substr(ef.path,1,instr(ef.path,'/'))
+          THEN 0 ELSE 1 END,
+     mf.path, n.start_byte, ec.dst_node_id
+   LIMIT 1`
+
 // dirtyState is what the dirty files held before a reconcile rewrote them, which
 // ResolveIncremental scopes by: their node names and qualified names, the names
 // they imported by module (namesForPaths), and the extends edges the rewrite
 // re-creates or unlinks, with their targets (baseTargets).
 type dirtyState struct {
-	names, imports []string
-	bases          map[baseKey]baseTarget
+	seqs    map[string][]seqElem
+	imports []string
+	bases   map[baseKey]baseTarget
 }
 
 // baseKey identifies an extends edge across a reindex: its file, its class's
@@ -235,7 +288,10 @@ type baseTarget struct{ path, name string }
 func (e *Engine) captureDirty(ctx context.Context, worktree string, paths []string) (dirtyState, error) {
 	var d dirtyState
 	var err error
-	if d.names, d.imports, err = e.namesForPaths(ctx, worktree, paths); err != nil {
+	if d.seqs, err = nameSeqs(ctx, e.st.DB, worktree, paths); err != nil {
+		return d, err
+	}
+	if d.imports, err = e.importsForPaths(ctx, worktree, paths); err != nil {
 		return d, err
 	}
 	d.bases, err = e.baseTargets(ctx, worktree, paths)
@@ -289,7 +345,9 @@ SELECT sf.path, COALESCE(src.qualified_name, ''), e.dst_name, e.dst_recv, tf.pat
 
 // noteBases records in _base_before the target each extends edge in
 // _resolve_scope had before this resolve: old's, for one the reindex re-created
-// or unlinked, else its own.
+// or unlinked, else its own. An edge a dirty file did not have before is no
+// move: a new non-Python extends edge is structureChanged's derived scope, a
+// Python one a full Resolve.
 func noteBases(ctx context.Context, c store.Conn, old map[baseKey]baseTarget) error {
 	for _, ddl := range []string{
 		`DROP TABLE IF EXISTS _old_bases`,
@@ -324,7 +382,8 @@ SELECT e.id, COALESCE(ob.tpath, tf.path, ''), COALESCE(ob.tname, t.qualified_nam
   LEFT JOIN nodes t ON t.id = e.dst_node_id
   LEFT JOIN files tf ON tf.id = t.file_id
   LEFT JOIN _old_bases ob ON ob.path = sf.path AND ob.class = COALESCE(src.qualified_name, '')
-       AND ob.name = e.dst_name AND ob.module = e.dst_recv`)
+       AND ob.name = e.dst_name AND ob.module = e.dst_recv
+ WHERE ob.path IS NOT NULL OR sf.path NOT IN (SELECT path FROM _dirty_paths)`)
 	return err
 }
 
@@ -398,7 +457,6 @@ SELECT ed.id
 	for _, stmt := range []string{
 		`DELETE FROM _moved_calls WHERE edge_id IN (SELECT edge_id FROM _resolve_scope)`,
 		`INSERT OR IGNORE INTO _resolve_scope(edge_id) SELECT edge_id FROM _moved_calls`,
-		`DELETE FROM edge_candidates WHERE edge_id IN (SELECT edge_id FROM _moved_calls)`,
 		`DROP TABLE _moved`, `DROP TABLE _moved_calls`,
 	} {
 		if _, err := c.ExecContext(ctx, stmt); err != nil {
@@ -418,6 +476,9 @@ var incrementalCallStrategies = func() []string {
 	out := make([]string, len(callStrategies))
 	for i, s := range callStrategies {
 		out[i] = scopeStrategy(s)
+	}
+	if !strings.Contains(strings.Join(out, ""), hyperCommonPerEdge) {
+		panic("graph: hyper-common-name filter not found — incremental resolve out of sync with stratNameFallback")
 	}
 	return out
 }()
@@ -443,8 +504,21 @@ func scopeStrategy(full string) string {
 		// init rather than under-resolve at runtime.
 		panic("graph: scopeStrategy anchor not found — incremental resolve out of sync with callStrategies")
 	}
-	return scoped
+	// The hyper-common-name set aggregates every node in the store; for a handful
+	// of scoped edges a per-edge indexed count is the same test, minus the scan.
+	// Candidates go to _cand, which ResolveIncremental diffs into edge_candidates.
+	scoped = strings.ReplaceAll(scoped, "edge_candidates", "_cand")
+	return strings.Replace(scoped, hyperCommonAll, hyperCommonPerEdge, 1)
 }
+
+const hyperCommonAll = `AND ed.dst_name NOT IN (
+                      SELECT name FROM nodes
+                       WHERE kind IN ('method','property','constructor','function')
+                       GROUP BY name HAVING COUNT(*) > 50 )`
+
+const hyperCommonPerEdge = `AND (SELECT COUNT(*) FROM nodes
+                       WHERE name = ed.dst_name
+                         AND kind IN ('method','property','constructor','function')) <= 50`
 
 // maxIncrementalDirty caps how many changed files still take the incremental
 // resolve path. Above it, a reconcile is treated as a sweeping change (a branch
@@ -453,16 +527,14 @@ func scopeStrategy(full string) string {
 // pre-state capture's parametrized IN lists small.
 const maxIncrementalDirty = 200
 
-// namesForPaths returns the distinct node names AND qualified names held by the
-// given worktree-relative paths in the CURRENT index and, separately, the names
-// they import by module (which an import elsewhere may resolve through, as a
-// re-export). Called pre-reindex to record what a dirty file contained, so
-// edges that resolved INTO a since-removed symbol are still re-resolved (see
+// importsForPaths returns the names the given worktree-relative paths import by
+// module in the CURRENT index (which an import elsewhere may resolve through, as
+// a re-export). Called pre-reindex to record what a dirty file imported (see
 // ResolveIncremental). Paths are bounded by maxIncrementalDirty, so a single
 // parametrized IN is fine.
-func (e *Engine) namesForPaths(ctx context.Context, worktree string, paths []string) (names, imports []string, err error) {
+func (e *Engine) importsForPaths(ctx context.Context, worktree string, paths []string) ([]string, error) {
 	if len(paths) == 0 {
-		return nil, nil, nil
+		return nil, nil
 	}
 	args := make([]any, 0, len(paths)+1)
 	args = append(args, worktree)
@@ -470,35 +542,106 @@ func (e *Engine) namesForPaths(ctx context.Context, worktree string, paths []str
 		args = append(args, p)
 	}
 	rows, err := e.st.DB.QueryContext(ctx, `
-SELECT 0, n.name FROM nodes n JOIN files f ON f.id = n.file_id
+SELECT DISTINCT e.dst_name FROM edges e JOIN files f ON f.id = e.file_id
  WHERE f.worktree = ? AND f.path IN (`+placeholders(len(paths))+`)
-UNION
-SELECT 0, n.qualified_name FROM nodes n JOIN files f ON f.id = n.file_id
- WHERE f.worktree = ? AND f.path IN (`+placeholders(len(paths))+`)
-UNION
-SELECT 1, e.dst_name FROM edges e JOIN files f ON f.id = e.file_id
- WHERE f.worktree = ? AND f.path IN (`+placeholders(len(paths))+`)
-   AND e.kind = 'imports' AND e.dst_recv <> ''`,
-		append(append(append([]any{}, args...), args...), args...)...)
+   AND e.kind = 'imports' AND e.dst_recv <> '' AND e.dst_name <> ''`, args...)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	defer rows.Close()
+	var imports []string
 	for rows.Next() {
-		var imported bool
 		var s string
-		if err := rows.Scan(&imported, &s); err != nil {
-			return nil, nil, err
+		if err := rows.Scan(&s); err != nil {
+			return nil, err
 		}
-		switch {
-		case s == "":
-		case imported:
-			imports = append(imports, s)
-		default:
-			names = append(names, s)
+		imports = append(imports, s)
+	}
+	return imports, rows.Err()
+}
+
+// seqElem is one node in a nameSeqs sequence: its identity, ordinal and contains
+// parent (compared), and its qualified name (scoped by when it changed).
+type seqElem struct{ ident, qn string }
+
+// nameSeqs returns, per "path\x00name", the nodes bearing that name in paths, in
+// nodeOrderSQL order. writeFileGraph keeps a node's id exactly when its identity
+// and ordinal survive (reuseNodeIDs), and a resolver reads a target node only by
+// its name, identity, contains parent and order among same-named nodes of its
+// file — so where a name's sequence is unchanged across a reindex, every edge
+// elsewhere that may target it resolves exactly as before.
+func nameSeqs(ctx context.Context, q interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}, worktree string, paths []string) (map[string][]seqElem, error) {
+	out := map[string][]seqElem{}
+	if len(paths) == 0 {
+		return out, nil
+	}
+	args := make([]any, 0, len(paths)+1)
+	args = append(args, worktree)
+	for _, p := range paths {
+		args = append(args, p)
+	}
+	rows, err := q.QueryContext(ctx, `
+SELECT f.path, n.id, n.kind, n.qualified_name, n.name,
+       COALESCE((SELECT cm.src_node_id FROM edges cm
+                  WHERE cm.dst_node_id = n.id AND cm.kind = 'contains' LIMIT 1), '')
+  FROM files f JOIN nodes n ON n.file_id = f.id
+ WHERE f.worktree = ? AND f.path IN (`+placeholders(len(paths))+`)
+ ORDER BY f.path, `+nodeOrderSQL, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	type row struct{ path, name, parent string }
+	var all []row
+	var elems []seqElem
+	idents := map[string]string{} // node id -> identity + ordinal
+	seen := map[string]int{}      // path + identity -> nodes numbered so far
+	for rows.Next() {
+		var r row
+		var id, kind, qn string
+		if err := rows.Scan(&r.path, &id, &kind, &qn, &r.name, &r.parent); err != nil {
+			return nil, err
+		}
+		ident := nodeIdentity(kind, qn, r.name)
+		k := r.path + "\x00" + ident
+		idents[id] = ident + "\x00" + strconv.Itoa(seen[k])
+		seen[k]++
+		all = append(all, r)
+		elems = append(elems, seqElem{ident: idents[id], qn: qn})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for i, r := range all {
+		el := elems[i]
+		el.ident += "\x01" + idents[r.parent]
+		key := r.path + "\x00" + r.name
+		out[key] = append(out[key], el)
+	}
+	return out, nil
+}
+
+// changedNames returns the names whose nameSeqs sequence differs between before
+// and after, plus every qualified name those sequences hold.
+func changedNames(before, after map[string][]seqElem) []string {
+	set := map[string]struct{}{}
+	for _, d := range [2][2]map[string][]seqElem{{before, after}, {after, before}} {
+		for k, a := range d[0] {
+			b := d[1][k]
+			if slices.EqualFunc(a, b, func(x, y seqElem) bool { return x.ident == y.ident }) {
+				continue
+			}
+			_, name, _ := strings.Cut(k, "\x00")
+			set[name] = struct{}{}
+			for _, el := range slices.Concat(a, b) {
+				set[el.qn] = struct{}{}
+			}
 		}
 	}
-	return names, imports, rows.Err()
+	delete(set, "")
+	return slices.Collect(maps.Keys(set))
 }
 
 // extendsSigForPaths returns a set identifying the `extends`/`implements` edges
@@ -520,14 +663,14 @@ func (e *Engine) extendsSigForPaths(ctx context.Context, worktree string, paths 
 		args = append(args, p)
 	}
 	rows, err := e.st.DB.QueryContext(ctx, `
-SELECT COALESCE(src.qualified_name, ''), e.dst_name, e.dst_recv
+SELECT COALESCE(src.qualified_name, ''), e.dst_name, e.dst_recv, f.language = 'python'
   FROM edges e
   JOIN files f   ON f.id = e.file_id
   LEFT JOIN nodes src ON src.id = e.src_node_id
  WHERE f.worktree = ? AND e.kind = 'extends'
    AND f.path IN (`+placeholders(len(paths))+`)
 UNION ALL
-SELECT '', '', path FROM files
+SELECT '', '', path, 1 FROM files
  WHERE worktree = ? AND language = 'python' AND path IN (`+placeholders(len(paths))+`)`,
 		append(args, args...)...)
 	if err != nil {
@@ -536,13 +679,23 @@ SELECT '', '', path FROM files
 	defer rows.Close()
 	for rows.Next() {
 		var s, d, m string
-		if err := rows.Scan(&s, &d, &m); err != nil {
+		var py bool
+		if err := rows.Scan(&s, &d, &m, &py); err != nil {
 			return nil, err
+		}
+		if !py && s != "" {
+			// Only interface dispatch (stratInterface) reads a non-Python extends
+			// edge, one level deep, from the deriving node's own methods: keyed
+			// so structureChanged can scope it instead of resolving fully.
+			sig[derivedKey+s+"\x00"+d] = struct{}{}
+			continue
 		}
 		sig[s+"\x00"+d+"\x00"+m] = struct{}{}
 	}
 	return sig, rows.Err()
 }
+
+const derivedKey = "\x01"
 
 // structureChanged reports whether a reconcile must resolve fully, given the
 // dirty files' extendsSigForPaths before and after: an `extends` edge of theirs
@@ -550,23 +703,30 @@ SELECT '', '', path FROM files
 // names (the unique-class fallback of resolvePythonModules) or anything names
 // as pkg.X (its submodule rule) — which modules exist is no name the
 // incremental resolve could scope by. A module nothing names yet, as a new one,
-// stays incremental.
-func (e *Engine) structureChanged(ctx context.Context, worktree string, before, after map[string]struct{}) (bool, error) {
+// stays incremental. A changed non-Python extends edge stays incremental too:
+// derived returns its deriving classes' qualified names, whose methods the
+// incremental resolve then re-scopes (see ResolveIncremental).
+func (e *Engine) structureChanged(ctx context.Context, worktree string, before, after map[string]struct{}) (full bool, derived []string, err error) {
 	var mods []string
 	for _, d := range [][2]map[string]struct{}{{before, after}, {after, before}} {
 		for k := range d[0] {
 			if _, ok := d[1][k]; ok {
 				continue
 			}
+			if qn, ok := strings.CutPrefix(k, derivedKey); ok {
+				qn, _, _ = strings.Cut(qn, "\x00")
+				derived = append(derived, qn)
+				continue
+			}
 			path, ok := strings.CutPrefix(k, "\x00\x00")
 			if !ok {
-				return true, nil
+				return true, nil, nil
 			}
 			mods = append(mods, pyModuleNames(path)...)
 		}
 	}
 	if len(mods) == 0 {
-		return false, nil
+		return false, derived, nil
 	}
 	args := []any{worktree}
 	for range 2 {
@@ -575,12 +735,12 @@ func (e *Engine) structureChanged(ctx context.Context, worktree string, before, 
 		}
 	}
 	var named bool
-	err := e.st.DB.QueryRowContext(ctx, `
+	err = e.st.DB.QueryRowContext(ctx, `
 SELECT EXISTS (SELECT 1 FROM edges e JOIN files f ON f.id = e.file_id
  WHERE f.worktree = ? AND e.kind <> 'calls' AND e.dst_recv <> ''
    AND ( (e.kind = 'extends' AND e.dst_recv IN (`+placeholders(len(mods))+`))
          OR e.dst_recv || '.' || e.dst_name IN (`+placeholders(len(mods))+`) ))`, args...).Scan(&named)
-	return named, err
+	return named, derived, err
 }
 
 // placeholders returns "?,?,…" with n marks for a parametrized IN clause.

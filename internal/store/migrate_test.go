@@ -173,6 +173,44 @@ func TestLatestGraphMigrationRebuildsIndex(t *testing.T) {
 	}
 }
 
+func TestFTSRowIDMigrationBackfillsExistingRows(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "store.db")
+	st, err := Open(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustExec(t, st, `INSERT INTO files(id,worktree,path,language,content_hash,mtime,size,last_indexed_at)
+		VALUES('f1','/wt','A.go','go','h',1,1,1)`)
+	mustExec(t, st, `INSERT INTO nodes(id,file_id,kind,name,qualified_name,signature,start_byte,end_byte,start_line,end_line)
+		VALUES('n1','f1','function','Foo','Foo','',0,1,1,1)`)
+	for _, table := range []string{"nodes_fts", "nodes_fts_stem"} {
+		mustExec(t, st, `INSERT INTO `+table+`(node_id,name,qualified_name) VALUES('n1','Foo','Foo')`)
+	}
+	mustExec(t, st, `INSERT INTO nodes_fts_tri(node_id,content) VALUES('n1','Foo')`)
+	mustExec(t, st, `DROP TABLE node_fts_rows`)
+	mustExec(t, st, `PRAGMA user_version = 24`)
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	st, err = Open(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	for _, table := range []string{"nodes_fts", "nodes_fts_stem", "nodes_fts_tri"} {
+		var mapped, indexed int64
+		if err := st.DB.QueryRow(`SELECT r.fts_rowid, f.rowid FROM node_fts_rows r
+			JOIN `+table+` f ON f.node_id=r.node_id WHERE r.node_id='n1'`).
+			Scan(&mapped, &indexed); err != nil {
+			t.Fatalf("%s mapping not backfilled: %v", table, err)
+		}
+		if mapped != indexed {
+			t.Errorf("%s rowid = %d, mapping = %d", table, indexed, mapped)
+		}
+	}
+}
+
 func mustExec(t *testing.T, st *Store, q string) {
 	t.Helper()
 	if _, err := st.DB.Exec(q); err != nil {
@@ -332,12 +370,12 @@ func TestLatestCheckMigrationPreservesMemoriesAndColumns(t *testing.T) {
 		VALUES('t2','todo','done',1,1)`)
 }
 
-func TestSchemaVersionIs24(t *testing.T) {
-	if schemaVersion != 24 {
-		t.Fatalf("schemaVersion = %d, want 24", schemaVersion)
+func TestSchemaVersionIs27(t *testing.T) {
+	if schemaVersion != 27 {
+		t.Fatalf("schemaVersion = %d, want 27", schemaVersion)
 	}
-	if len(migrations) != 24 {
-		t.Fatalf("len(migrations) = %d, want 24", len(migrations))
+	if len(migrations) != 27 {
+		t.Fatalf("len(migrations) = %d, want 27", len(migrations))
 	}
 	st, err := Open(filepath.Join(t.TempDir(), "store.db"))
 	if err != nil {
@@ -348,8 +386,8 @@ func TestSchemaVersionIs24(t *testing.T) {
 	if err := st.DB.QueryRow("PRAGMA user_version").Scan(&v); err != nil {
 		t.Fatal(err)
 	}
-	if v != 24 {
-		t.Fatalf("user_version = %d, want 24", v)
+	if v != 27 {
+		t.Fatalf("user_version = %d, want 27", v)
 	}
 }
 

@@ -175,6 +175,26 @@ SELECT n.qualified_name, ec.method FROM edges ed
 	}
 }
 
+// TestResolveS6SkipsCSharpMemberCall: C# constructs only via `new`, so
+// items.Add(x) is never a constructor call of a class named Add.
+func TestResolveS6SkipsCSharpMemberCall(t *testing.T) {
+	e := newTestEngine(t)
+	ctx := context.Background()
+	src := []byte("namespace N;\nclass Add { }\nclass Svc { void M() { items.Add(1); var a = new Add(); } }")
+	if err := e.IndexFile(ctx, "/wt", "Svc.cs", src, 1, int64(len(src))); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.Resolve(ctx, "/wt", noopProgress{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := candidateTargets(t, e, "Add", "items"); len(got) != 0 {
+		t.Errorf("items.Add(1) should not bind to class Add; got %v", got)
+	}
+	if got := candidateTargets(t, e, "Add", ""); got["N.Add"] != "ctor" {
+		t.Errorf("new Add() should still bind ctor to N.Add; got %v", got)
+	}
+}
+
 // TestResolveS6SuppressedByEarlierCandidate: S6's NOT EXISTS keeps it strictly a
 // fallback — an edge that already earned a candidate (here an S5 name match to a
 // same-named method) must NOT also gain a 'ctor' candidate to the same-named type.

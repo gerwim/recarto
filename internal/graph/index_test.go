@@ -117,6 +117,138 @@ func TestIndexFileReplacesOnReindex(t *testing.T) {
 	if got := countRows(t, e, "nodes", "/wt"); got != 1 {
 		t.Errorf("nodes = %d, want 1 after reindex", got)
 	}
+	for _, table := range []string{"nodes_fts", "nodes_fts_stem", "nodes_fts_tri"} {
+		var got int
+		if err := e.st.DB.QueryRow(`SELECT COUNT(*) FROM ` + table).Scan(&got); err != nil {
+			t.Fatal(err)
+		}
+		if got != 1 {
+			t.Errorf("%s rows = %d, want 1 after reindex", table, got)
+		}
+	}
+	var mapped int
+	if err := e.st.DB.QueryRow(`SELECT COUNT(*) FROM node_fts_rows`).Scan(&mapped); err != nil {
+		t.Fatal(err)
+	}
+	if mapped != 1 {
+		t.Errorf("node_fts_rows = %d, want 1 after reindex", mapped)
+	}
+}
+
+func TestReindexKeepsNodeIDsAndBindings(t *testing.T) {
+	e := newTestEngine(t)
+	ctx := context.Background()
+	src := "package p\ntype Saga struct{}\nfunc (s *Saga) Handle() { s.step() }\nfunc (s *Saga) step() {}\n"
+	ids := func() map[string]string {
+		m := map[string]string{}
+		rows, err := e.st.DB.Query(`SELECT qualified_name, id FROM nodes`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var qn, id string
+			if err := rows.Scan(&qn, &id); err != nil {
+				t.Fatal(err)
+			}
+			m[qn] = id
+		}
+		return m
+	}
+	if err := e.IndexFile(ctx, "/wt", "saga.go", []byte(src), 1, int64(len(src))); err != nil {
+		t.Fatal(err)
+	}
+	before := ids()
+	bindings := countRows(t, e, "type_bindings", "/wt")
+	edited := "// moved\n" + src
+	if err := e.IndexFile(ctx, "/wt", "saga.go", []byte(edited), 2, int64(len(edited))); err != nil {
+		t.Fatal(err)
+	}
+	after := ids()
+	if len(after) != len(before) {
+		t.Fatalf("nodes after = %v, before = %v", after, before)
+	}
+	for qn, id := range before {
+		if after[qn] != id {
+			t.Errorf("%s id changed %s -> %s", qn, id, after[qn])
+		}
+	}
+	var start int
+	if err := e.st.DB.QueryRow(`SELECT start_line FROM nodes WHERE qualified_name='Saga.Handle'`).Scan(&start); err != nil {
+		t.Fatal(err)
+	}
+	if start != 4 {
+		t.Errorf("Handle start_line = %d, want 4 (position refreshed)", start)
+	}
+	if got := countRows(t, e, "type_bindings", "/wt"); got != bindings {
+		t.Errorf("type_bindings = %d after reindex, want %d", got, bindings)
+	}
+	var fts int
+	if err := e.st.DB.QueryRow(`SELECT COUNT(*) FROM nodes_fts`).Scan(&fts); err != nil {
+		t.Fatal(err)
+	}
+	if fts != len(after) {
+		t.Errorf("nodes_fts = %d, want %d", fts, len(after))
+	}
+}
+
+func TestIndexFileOverwritesOrphanFTSRowID(t *testing.T) {
+	e := newTestEngine(t)
+	ctx := context.Background()
+	// Orphans from before node_fts_rows existed sit at the rowid the mapping hands out next.
+	for _, q := range []string{
+		`INSERT INTO nodes_fts(rowid,node_id,name,qualified_name) VALUES (1,'gone','X','X')`,
+		`INSERT INTO nodes_fts_stem(rowid,node_id,name,qualified_name) VALUES (1,'gone','X','X')`,
+		`INSERT INTO nodes_fts_tri(rowid,node_id,content) VALUES (1,'gone','X')`,
+	} {
+		if _, err := e.st.DB.Exec(q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := e.IndexFile(ctx, "/wt", "p/a.go", []byte("package p\nfunc A(){}"), 1, 20); err != nil {
+		t.Fatalf("index over orphan FTS rowid: %v", err)
+	}
+}
+
+func TestFTSCleanupUsesRowIDLookup(t *testing.T) {
+	e := newTestEngine(t)
+	ctx := context.Background()
+	src := []byte("package p\nfunc A(){}\nfunc B(){}")
+	if err := e.IndexFile(ctx, "/wt", "p/a.go", src, 1, int64(len(src))); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, table := range []string{"nodes_fts", "nodes_fts_stem", "nodes_fts_tri"} {
+		var fileID string
+		if err := e.st.DB.QueryRow(`SELECT id FROM files WHERE worktree=? AND path=?`, "/wt", "p/a.go").Scan(&fileID); err != nil {
+			t.Fatal(err)
+		}
+		rows, err := e.st.DB.Query(`EXPLAIN QUERY PLAN DELETE FROM `+table+` WHERE rowid IN (
+			SELECT fts_rowid FROM node_fts_rows
+			WHERE node_id IN (SELECT id FROM nodes WHERE file_id=?))`,
+			fileID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		foundRowIDSeek := false
+		for rows.Next() {
+			var id, parent, unused int
+			var detail string
+			if err := rows.Scan(&id, &parent, &unused, &detail); err != nil {
+				rows.Close()
+				t.Fatal(err)
+			}
+			if strings.Contains(detail, table) && strings.Contains(detail, "VIRTUAL TABLE INDEX 0:=") {
+				foundRowIDSeek = true
+			}
+		}
+		if err := rows.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if !foundRowIDSeek {
+			t.Errorf("%s cleanup does not seek by rowid", table)
+		}
+	}
 }
 
 func TestIndexFileSkipsUnsupported(t *testing.T) {

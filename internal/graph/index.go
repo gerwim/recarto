@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"sort"
 	"strings"
@@ -61,12 +62,12 @@ func (e *Engine) ReindexFileIncremental(ctx context.Context, worktree, path stri
 	if err != nil {
 		return err
 	}
-	full, err := e.structureChanged(ctx, worktree, oldExtends, newExtends)
+	full, derived, err := e.structureChanged(ctx, worktree, oldExtends, newExtends)
 	if err != nil {
 		return err
 	}
 	if !full {
-		return e.ResolveIncremental(ctx, worktree, dirty, old)
+		return e.ResolveIncremental(ctx, worktree, dirty, old, derived)
 	}
 	return e.Resolve(ctx, worktree, noopProgress{})
 }
@@ -82,6 +83,8 @@ func (e *Engine) ReindexFileIncremental(ctx context.Context, worktree, path stri
 // driver) — don't reintroduce it.
 type writeStmts struct {
 	node     *sql.Stmt
+	nodeUpd  *sql.Stmt
+	ftsRow   *sql.Stmt
 	fts      *sql.Stmt
 	ftsStem  *sql.Stmt
 	ftsTri   *sql.Stmt
@@ -106,9 +109,14 @@ func prepareWriteStmts(ctx context.Context, c store.Conn) (*writeStmts, error) {
 	s.node = prep(`INSERT INTO nodes(id,file_id,kind,name,qualified_name,parent_name,signature,
 		   start_byte,end_byte,start_line,end_line)
 		 VALUES (?,?,?,?,?,?,?,?,?,?,?)`)
-	s.fts = prep(`INSERT INTO nodes_fts(node_id,name,qualified_name) VALUES (?,?,?)`)
-	s.ftsStem = prep(`INSERT INTO nodes_fts_stem(node_id,name,qualified_name) VALUES (?,?,?)`)
-	s.ftsTri = prep(`INSERT INTO nodes_fts_tri(node_id,content) VALUES (?,?)`)
+	s.nodeUpd = prep(`UPDATE nodes SET parent_name=?,signature=?,start_byte=?,end_byte=?,start_line=?,end_line=?
+		 WHERE id=?`)
+	s.ftsRow = prep(`INSERT INTO node_fts_rows(node_id) VALUES (?)`)
+	// OR REPLACE: a mapping rowid may land on an orphaned FTS row (its node deleted
+	// before node_fts_rows existed); overwrite it instead of failing.
+	s.fts = prep(`INSERT OR REPLACE INTO nodes_fts(rowid,node_id,name,qualified_name) VALUES (?,?,?,?)`)
+	s.ftsStem = prep(`INSERT OR REPLACE INTO nodes_fts_stem(rowid,node_id,name,qualified_name) VALUES (?,?,?,?)`)
+	s.ftsTri = prep(`INSERT OR REPLACE INTO nodes_fts_tri(rowid,node_id,content) VALUES (?,?,?)`)
 	s.edge = prep(`INSERT INTO edges(id,src_node_id,dst_node_id,dst_name,dst_recv,kind,file_id,line)
 		 VALUES (?,?,?,?,?,?,?,?)`)
 	s.binding = prep(`INSERT INTO type_bindings(id,file_id,name,type_name,scope_start_byte,scope_end_byte)
@@ -124,7 +132,7 @@ func prepareWriteStmts(ctx context.Context, c store.Conn) (*writeStmts, error) {
 
 // Close releases the prepared statements (safe on a partially-prepared set).
 func (s *writeStmts) Close() {
-	for _, st := range []*sql.Stmt{s.node, s.fts, s.ftsStem, s.ftsTri, s.edge, s.binding, s.contains} {
+	for _, st := range []*sql.Stmt{s.node, s.nodeUpd, s.ftsRow, s.fts, s.ftsStem, s.ftsTri, s.edge, s.binding, s.contains} {
 		if st != nil {
 			_ = st.Close()
 		}
@@ -324,6 +332,7 @@ func buildFileGraph(src []byte, res parse.Result) fileGraph {
 // writer is no longer the place the index spends CPU.
 func (e *Engine) writeFileGraph(ctx context.Context, c store.Conn, st *writeStmts, worktree, path, lang string,
 	g fileGraph, hash string, mtime, size, now int64) error {
+	var kept map[string]bool
 	// Upsert the files row and obtain its id.
 	var fileID string
 	err := c.QueryRowContext(ctx,
@@ -353,27 +362,39 @@ func (e *Engine) writeFileGraph(ctx context.Context, c store.Conn, st *writeStmt
 		if err := journalFileDeltas(ctx, c, worktree, path, fileID, g.nodes, now); err != nil {
 			return err
 		}
-		// Drop the file's FTS rows before deleting nodes (FTS5 is not linked).
-		if _, err := c.ExecContext(ctx,
-			`DELETE FROM nodes_fts WHERE node_id IN (SELECT id FROM nodes WHERE file_id=?)`,
-			fileID); err != nil {
+		// Keep the ids of nodes whose identity survived the edit, so edges and
+		// candidates elsewhere that point at them stay valid (no ON DELETE SET
+		// NULL / CASCADE) and incremental resolve can skip them (see nameSeqs).
+		if kept, err = reuseNodeIDs(ctx, c, fileID, g); err != nil {
 			return err
 		}
-		if _, err := c.ExecContext(ctx,
-			`DELETE FROM nodes_fts_stem WHERE node_id IN (SELECT id FROM nodes WHERE file_id=?)`,
-			fileID); err != nil {
+		keepIDs := make([]string, 0, len(kept)) // never nil: JSON null would make NOT IN match nothing
+		for id := range kept {
+			keepIDs = append(keepIDs, id)
+		}
+		keepJSON, err := json.Marshal(keepIDs)
+		if err != nil {
 			return err
 		}
-		if _, err := c.ExecContext(ctx,
-			`DELETE FROM nodes_fts_tri WHERE node_id IN (SELECT id FROM nodes WHERE file_id=?)`,
-			fileID); err != nil {
-			return err
+		// Drop the replaced nodes' FTS rows before deleting them (FTS5 is not
+		// linked); kept nodes keep theirs, as their name/qualified name match.
+		for _, q := range []string{
+			`DELETE FROM nodes_fts WHERE rowid IN (SELECT fts_rowid FROM node_fts_rows WHERE node_id IN (` + staleNodes + `))`,
+			`DELETE FROM nodes_fts_stem WHERE rowid IN (SELECT fts_rowid FROM node_fts_rows WHERE node_id IN (` + staleNodes + `))`,
+			`DELETE FROM nodes_fts_tri WHERE rowid IN (SELECT fts_rowid FROM node_fts_rows WHERE node_id IN (` + staleNodes + `))`,
+			`DELETE FROM nodes WHERE id IN (` + staleNodes + `)`,
+		} {
+			if _, err := c.ExecContext(ctx, q, fileID, string(keepJSON)); err != nil {
+				return err
+			}
 		}
-		if _, err := c.ExecContext(ctx, `DELETE FROM nodes WHERE file_id=?`, fileID); err != nil {
-			return err
-		}
-		if _, err := c.ExecContext(ctx, `DELETE FROM edges WHERE file_id=?`, fileID); err != nil {
-			return err
+		for _, q := range []string{
+			`DELETE FROM edges WHERE file_id=?`,
+			`DELETE FROM type_bindings WHERE file_id=?`,
+		} {
+			if _, err := c.ExecContext(ctx, q, fileID); err != nil {
+				return err
+			}
 		}
 		if _, err := c.ExecContext(ctx,
 			`UPDATE files SET language=?,content_hash=?,mtime=?,size=?,last_indexed_at=? WHERE id=?`,
@@ -384,18 +405,33 @@ func (e *Engine) writeFileGraph(ctx context.Context, c store.Conn, st *writeStmt
 
 	for i := range g.nodes {
 		n := &g.nodes[i]
+		if kept[n.id] {
+			if _, err := st.nodeUpd.ExecContext(ctx, n.parentName, n.signature,
+				n.startByte, n.endByte, n.startLine, n.endLine, n.id); err != nil {
+				return err
+			}
+			continue
+		}
 		if _, err := st.node.ExecContext(ctx,
 			n.id, fileID, n.kind, n.name, n.qn, n.parentName, n.signature,
 			n.startByte, n.endByte, n.startLine, n.endLine); err != nil {
 			return err
 		}
-		if _, err := st.fts.ExecContext(ctx, n.id, n.ftsName, n.ftsQN); err != nil {
+		result, err := st.ftsRow.ExecContext(ctx, n.id)
+		if err != nil {
 			return err
 		}
-		if _, err := st.ftsStem.ExecContext(ctx, n.id, n.ftsName, n.ftsQN); err != nil {
+		ftsRowID, err := result.LastInsertId()
+		if err != nil {
 			return err
 		}
-		if _, err := st.ftsTri.ExecContext(ctx, n.id, n.ftsTri); err != nil {
+		if _, err := st.fts.ExecContext(ctx, ftsRowID, n.id, n.ftsName, n.ftsQN); err != nil {
+			return err
+		}
+		if _, err := st.ftsStem.ExecContext(ctx, ftsRowID, n.id, n.ftsName, n.ftsQN); err != nil {
+			return err
+		}
+		if _, err := st.ftsTri.ExecContext(ctx, ftsRowID, n.id, n.ftsTri); err != nil {
 			return err
 		}
 	}
@@ -421,6 +457,93 @@ func (e *Engine) writeFileGraph(ctx context.Context, c store.Conn, st *writeStmt
 		}
 	}
 	return nil
+}
+
+// staleNodes selects a file's nodes (arg 1) except the kept ids (arg 2, a JSON array).
+const staleNodes = `SELECT id FROM nodes WHERE file_id=? AND id NOT IN (SELECT value FROM json_each(?))`
+
+// nodeIdentity is what a node's id is kept by across a reindex, together with
+// its ordinal among the file's nodes of equal identity in nodeLess order. Name,
+// kind and qualified name (hence parent_name) are everything a resolver matches
+// a target node on; the embedding and FTS text derive from them too.
+func nodeIdentity(kind, qn, name string) string { return kind + "\x00" + qn + "\x00" + name }
+
+// nodeOrderSQL / nodeLess are the one canonical node order (span start, outer
+// first, then kind and qualified name) both reuseNodeIDs and nameSeqs number
+// ordinals in.
+const nodeOrderSQL = `n.start_byte, n.end_byte DESC, n.kind, n.qualified_name, n.id`
+
+func nodeLess(a, b *nodeRow) bool {
+	if a.startByte != b.startByte {
+		return a.startByte < b.startByte
+	}
+	if a.endByte != b.endByte {
+		return a.endByte > b.endByte
+	}
+	if a.kind != b.kind {
+		return a.kind < b.kind
+	}
+	return a.qn < b.qn
+}
+
+// reuseNodeIDs gives each node of g the id of the file's existing node with the
+// same identity and ordinal, rewriting g's edge sources and contains endpoints to
+// match, and returns the reused ids.
+func reuseNodeIDs(ctx context.Context, c store.Conn, fileID string, g fileGraph) (map[string]bool, error) {
+	rows, err := c.QueryContext(ctx, `SELECT n.id, n.kind, n.qualified_name, n.name FROM nodes n
+		 WHERE n.file_id=? ORDER BY `+nodeOrderSQL, fileID)
+	if err != nil {
+		return nil, err
+	}
+	old := map[string][]string{}
+	for rows.Next() {
+		var id, kind, qn, name string
+		if err := rows.Scan(&id, &kind, &qn, &name); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		k := nodeIdentity(kind, qn, name)
+		old[k] = append(old[k], id)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	order := make([]int, len(g.nodes))
+	for i := range order {
+		order[i] = i
+	}
+	sort.SliceStable(order, func(a, b int) bool { return nodeLess(&g.nodes[order[a]], &g.nodes[order[b]]) })
+	kept := map[string]bool{}
+	remap := map[string]string{}
+	seen := map[string]int{}
+	for _, i := range order {
+		n := &g.nodes[i]
+		k := nodeIdentity(n.kind, n.qn, n.name)
+		ord := seen[k]
+		seen[k]++
+		if ord < len(old[k]) {
+			remap[n.id] = old[k][ord]
+			n.id = old[k][ord]
+			kept[n.id] = true
+		}
+	}
+	for i := range g.edges {
+		if s, ok := g.edges[i].src.(string); ok && remap[s] != "" {
+			g.edges[i].src = remap[s]
+		}
+	}
+	for i := range g.contains {
+		cn := &g.contains[i]
+		if o := remap[cn.parentID]; o != "" {
+			cn.parentID = o
+		}
+		if o := remap[cn.childID]; o != "" {
+			cn.childID = o
+		}
+	}
+	return kept, nil
 }
 
 // qualifiedName builds a dotted structural name for the symbol at syms[i]. It

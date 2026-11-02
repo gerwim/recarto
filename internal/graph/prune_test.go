@@ -56,6 +56,15 @@ func TestPruneWorktreeRemovesAllRows(t *testing.T) {
 	if got := orphanFTSRows(t, e); got != 0 {
 		t.Errorf("orphaned FTS rows after prune = %d, want 0", got)
 	}
+	var mapped int
+	if err := e.st.DB.QueryRow(`SELECT COUNT(*) FROM node_fts_rows r
+		JOIN nodes n ON n.id=r.node_id JOIN files f ON f.id=n.file_id
+		WHERE f.worktree='/wtB'`).Scan(&mapped); err != nil {
+		t.Fatal(err)
+	}
+	if mapped != 0 {
+		t.Errorf("FTS row mappings for pruned worktree = %d, want 0", mapped)
+	}
 	if metaKeyExists(t, e, "graph_token:/wtB") {
 		t.Error("graph_token meta key survived the prune")
 	}

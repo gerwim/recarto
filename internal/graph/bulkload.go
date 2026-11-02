@@ -27,7 +27,7 @@ const bulkLoadMinFiles = 2000
 // removing it here so the rebuild does not resurrect it.
 var graphSecondaryIndexes = []struct{ name, create string }{
 	{"idx_nodes_file", `CREATE INDEX IF NOT EXISTS idx_nodes_file ON nodes(file_id)`},
-	{"idx_nodes_name", `CREATE INDEX IF NOT EXISTS idx_nodes_name ON nodes(name)`},
+	{"idx_nodes_name", `CREATE INDEX IF NOT EXISTS idx_nodes_name ON nodes(name, kind)`},
 	{"idx_nodes_qname", `CREATE INDEX IF NOT EXISTS idx_nodes_qname ON nodes(qualified_name)`},
 	{"idx_nodes_name_parent", `CREATE INDEX IF NOT EXISTS idx_nodes_name_parent ON nodes(name, parent_name)`},
 	{"idx_edges_src", `CREATE INDEX IF NOT EXISTS idx_edges_src ON edges(src_node_id, kind)`},

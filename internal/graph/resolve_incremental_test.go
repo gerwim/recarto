@@ -165,8 +165,20 @@ func TestResolveIncrementalMatchesFullResolve(t *testing.T) {
 		}},
 		{"add-second-implementer-structural", func() {
 			// A new IGreeter implementer changes `extends` structure: interface
-			// dispatch in Service must now include it. Must hit the full-resolve
-			// fallback and still match from-scratch.
+			// dispatch in Service must now include it, via the derived-class
+			// method scope, and still match from-scratch.
+			writeBumped(t, wt, "core/Shouter.cs",
+				"namespace App;\npublic class Shouter : IGreeter {\n"+
+					"  public string Greet() { return \"HEY\"; }\n}")
+		}},
+		{"existing-class-drops-interface", func() {
+			// Same methods, only the base list changes: no name sequence moves,
+			// so only the derived scope can catch Service's _greeter.Greet().
+			writeBumped(t, wt, "core/Shouter.cs",
+				"namespace App;\npublic class Shouter {\n"+
+					"  public string Greet() { return \"HEY\"; }\n}")
+		}},
+		{"existing-class-regains-interface", func() {
 			writeBumped(t, wt, "core/Shouter.cs",
 				"namespace App;\npublic class Shouter : IGreeter {\n"+
 					"  public string Greet() { return \"HEY\"; }\n}")
@@ -222,7 +234,14 @@ func TestResolveIncrementalDirectVsFull(t *testing.T) {
 	if err := e.IndexFile(ctx, wt, "A.cs", content, int64(len(content)+1), int64(len(content))); err != nil {
 		t.Fatal(err)
 	}
-	if err := e.ResolveIncremental(ctx, wt, []string{"A.cs"}, old); err != nil {
+	newSeqs, err := nameSeqs(ctx, e.st.DB, wt, []string{"A.cs"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ch := changedNames(old.seqs, newSeqs); len(ch) != 0 {
+		t.Errorf("body-only edit re-resolves names %v, want none (stable ids)", ch)
+	}
+	if err := e.ResolveIncremental(ctx, wt, []string{"A.cs"}, old, nil); err != nil {
 		t.Fatal(err)
 	}
 	gotInc := resolveSignature(t, e, wt)
