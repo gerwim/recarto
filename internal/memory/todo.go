@@ -3,7 +3,7 @@ package memory
 import (
 	"context"
 
-	"git.gerwim.nl/gerwim/recarto/internal/store"
+	"github.com/gerwim/recarto/internal/store"
 )
 
 // CompleteTodo marks an active todo as done (a terminal status, distinct from the

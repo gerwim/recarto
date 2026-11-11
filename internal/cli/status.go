@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"io"
 
-	"git.gerwim.nl/gerwim/recarto/internal/app"
-	"git.gerwim.nl/gerwim/recarto/internal/memory"
+	"github.com/gerwim/recarto/internal/app"
+	"github.com/gerwim/recarto/internal/memory"
 )
 
 // Status prints repo identity, per-kind active memory counts, and lifetime

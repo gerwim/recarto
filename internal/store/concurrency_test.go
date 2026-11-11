@@ -8,15 +8,15 @@ import (
 	"sync"
 	"testing"
 
-	"git.gerwim.nl/gerwim/recarto/internal/ledger"
-	"git.gerwim.nl/gerwim/recarto/internal/store"
+	"github.com/gerwim/recarto/internal/ledger"
+	"github.com/gerwim/recarto/internal/store"
 )
 
 // buildBinary compiles the recarto binary into a temp dir and returns its path.
 func buildBinary(t *testing.T) string {
 	t.Helper()
 	bin := filepath.Join(t.TempDir(), "recarto")
-	cmd := exec.Command("go", "build", "-o", bin, "git.gerwim.nl/gerwim/recarto/cmd/recarto")
+	cmd := exec.Command("go", "build", "-o", bin, "github.com/gerwim/recarto/cmd/recarto")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("build failed: %v\n%s", err, out)
 	}

@@ -6,8 +6,8 @@ import (
 	"sort"
 	"strings"
 
-	"git.gerwim.nl/gerwim/recarto/internal/ids"
-	"git.gerwim.nl/gerwim/recarto/internal/store"
+	"github.com/gerwim/recarto/internal/ids"
+	"github.com/gerwim/recarto/internal/store"
 )
 
 // Resolve links reference edges to a defining node within the same worktree.

@@ -7,8 +7,8 @@ import (
 	"io"
 	"strings"
 
-	"git.gerwim.nl/gerwim/recarto/internal/app"
-	"git.gerwim.nl/gerwim/recarto/internal/memory"
+	"github.com/gerwim/recarto/internal/app"
+	"github.com/gerwim/recarto/internal/memory"
 )
 
 // Bug dispatches `bug add` and `bug search`.

@@ -10,13 +10,13 @@ import (
 	"testing"
 	"time"
 
-	"git.gerwim.nl/gerwim/recarto/internal/clock"
-	"git.gerwim.nl/gerwim/recarto/internal/gitctx"
-	"git.gerwim.nl/gerwim/recarto/internal/ledger"
-	"git.gerwim.nl/gerwim/recarto/internal/memory"
-	"git.gerwim.nl/gerwim/recarto/internal/snapshot"
-	"git.gerwim.nl/gerwim/recarto/internal/store"
-	"git.gerwim.nl/gerwim/recarto/internal/syncserver"
+	"github.com/gerwim/recarto/internal/clock"
+	"github.com/gerwim/recarto/internal/gitctx"
+	"github.com/gerwim/recarto/internal/ledger"
+	"github.com/gerwim/recarto/internal/memory"
+	"github.com/gerwim/recarto/internal/snapshot"
+	"github.com/gerwim/recarto/internal/store"
+	"github.com/gerwim/recarto/internal/syncserver"
 )
 
 // unixHTTPClient starts handler on a unix-domain-socket listener. This

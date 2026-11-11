@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"git.gerwim.nl/gerwim/recarto/internal/agents"
-	"git.gerwim.nl/gerwim/recarto/internal/features"
+	"github.com/gerwim/recarto/internal/agents"
+	"github.com/gerwim/recarto/internal/features"
 )
 
 func TestInstallRepoScopeWritesConfigAndIsIdempotent(t *testing.T) {

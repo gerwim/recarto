@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"git.gerwim.nl/gerwim/recarto/internal/graph"
+	"github.com/gerwim/recarto/internal/graph"
 )
 
 // TestStopCheckpointsWAL: the Stop hook is the natural turn boundary to flush

@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"git.gerwim.nl/gerwim/recarto/internal/clock"
-	"git.gerwim.nl/gerwim/recarto/internal/embedding"
-	"git.gerwim.nl/gerwim/recarto/internal/ledger"
-	"git.gerwim.nl/gerwim/recarto/internal/store"
+	"github.com/gerwim/recarto/internal/clock"
+	"github.com/gerwim/recarto/internal/embedding"
+	"github.com/gerwim/recarto/internal/ledger"
+	"github.com/gerwim/recarto/internal/store"
 )
 
 type recallFixture struct {

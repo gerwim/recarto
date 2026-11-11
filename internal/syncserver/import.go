@@ -7,8 +7,8 @@ import (
 	"io"
 	"net/http"
 
-	"git.gerwim.nl/gerwim/recarto/internal/fullexport"
-	"git.gerwim.nl/gerwim/recarto/internal/syncwire"
+	"github.com/gerwim/recarto/internal/fullexport"
+	"github.com/gerwim/recarto/internal/syncwire"
 )
 
 // maxImportWireBytes / maxImportBytes bound a POST /v1/import body,

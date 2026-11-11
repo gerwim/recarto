@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"git.gerwim.nl/gerwim/recarto/internal/app"
-	"git.gerwim.nl/gerwim/recarto/internal/clock"
-	"git.gerwim.nl/gerwim/recarto/internal/store"
+	"github.com/gerwim/recarto/internal/app"
+	"github.com/gerwim/recarto/internal/clock"
+	"github.com/gerwim/recarto/internal/store"
 )
 
 // openAppIn builds an App against an explicit cache dir so a test can close it,

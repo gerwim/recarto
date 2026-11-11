@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"git.gerwim.nl/gerwim/recarto/internal/store"
+	"github.com/gerwim/recarto/internal/store"
 )
 
 // TestReindexFileIncrementalKeepsUnrelatedCandidates proves the single-file

@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"git.gerwim.nl/gerwim/recarto/internal/graph"
+	"github.com/gerwim/recarto/internal/graph"
 )
 
 // writeRepoFile writes content to a file at wt/rel, creating it with 0o644.

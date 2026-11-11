@@ -9,9 +9,9 @@ import (
 	"github.com/google/jsonschema-go/jsonschema"
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"git.gerwim.nl/gerwim/recarto/internal/app"
-	"git.gerwim.nl/gerwim/recarto/internal/features"
-	"git.gerwim.nl/gerwim/recarto/internal/version"
+	"github.com/gerwim/recarto/internal/app"
+	"github.com/gerwim/recarto/internal/features"
+	"github.com/gerwim/recarto/internal/version"
 )
 
 // NewServer builds the Recarto MCP server with every tool a's features leave on

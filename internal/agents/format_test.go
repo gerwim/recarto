@@ -5,9 +5,9 @@ import (
 	"strings"
 	"testing"
 
-	"git.gerwim.nl/gerwim/recarto/internal/graph"
-	"git.gerwim.nl/gerwim/recarto/internal/ledger"
-	"git.gerwim.nl/gerwim/recarto/internal/memory"
+	"github.com/gerwim/recarto/internal/graph"
+	"github.com/gerwim/recarto/internal/ledger"
+	"github.com/gerwim/recarto/internal/memory"
 )
 
 func TestFormatSessionContextIncludesCaveat(t *testing.T) {

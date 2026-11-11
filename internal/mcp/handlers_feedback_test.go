@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"git.gerwim.nl/gerwim/recarto/internal/feedback"
-	"git.gerwim.nl/gerwim/recarto/internal/memory"
+	"github.com/gerwim/recarto/internal/feedback"
+	"github.com/gerwim/recarto/internal/memory"
 )
 
 func TestReportRecartoIssueWritesToFeedbackStore(t *testing.T) {
@@ -70,9 +70,9 @@ func TestReportRecartoIssueRequiresFields(t *testing.T) {
 	a := newTestApp(t, "main")
 	ctx := context.Background()
 	cases := []ReportRecartoIssueInput{
-		{Title: "t", Detail: "d"},                  // missing signal_type
-		{SignalType: "error", Detail: "d"},          // missing title
-		{SignalType: "error", Title: "t"},           // missing detail
+		{Title: "t", Detail: "d"},          // missing signal_type
+		{SignalType: "error", Detail: "d"}, // missing title
+		{SignalType: "error", Title: "t"},  // missing detail
 	}
 	for i, in := range cases {
 		if _, err := reportRecartoIssue(ctx, a, in); err == nil {

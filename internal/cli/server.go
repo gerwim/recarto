@@ -13,7 +13,7 @@ import (
 	"syscall"
 	"time"
 
-	"git.gerwim.nl/gerwim/recarto/internal/syncserver"
+	"github.com/gerwim/recarto/internal/syncserver"
 )
 
 // ServerCmd runs the HTTP memory-sync server (`recarto server`) until

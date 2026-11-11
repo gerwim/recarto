@@ -5,11 +5,11 @@
 package feedback
 
 import (
-	"git.gerwim.nl/gerwim/recarto/internal/cache"
-	"git.gerwim.nl/gerwim/recarto/internal/clock"
-	"git.gerwim.nl/gerwim/recarto/internal/ledger"
-	"git.gerwim.nl/gerwim/recarto/internal/memory"
-	"git.gerwim.nl/gerwim/recarto/internal/store"
+	"github.com/gerwim/recarto/internal/cache"
+	"github.com/gerwim/recarto/internal/clock"
+	"github.com/gerwim/recarto/internal/ledger"
+	"github.com/gerwim/recarto/internal/memory"
+	"github.com/gerwim/recarto/internal/store"
 )
 
 // StoreID is the reserved repo-id for the global feedback store. Real repo-ids are

@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"git.gerwim.nl/gerwim/recarto/internal/ledger"
+	"github.com/gerwim/recarto/internal/ledger"
 )
 
 // SnippetResult is the structured result of Snippet. A miss is Found=false (not

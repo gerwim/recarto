@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"git.gerwim.nl/gerwim/recarto/internal/app"
-	"git.gerwim.nl/gerwim/recarto/internal/features"
+	"github.com/gerwim/recarto/internal/app"
+	"github.com/gerwim/recarto/internal/features"
 )
 
 // Doctor runs health checks: store reachable, WAL enabled, integrity ok, a schema

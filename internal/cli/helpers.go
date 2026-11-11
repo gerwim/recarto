@@ -9,8 +9,8 @@ import (
 	"flag"
 	"strings"
 
-	"git.gerwim.nl/gerwim/recarto/internal/app"
-	"git.gerwim.nl/gerwim/recarto/internal/memory"
+	"github.com/gerwim/recarto/internal/app"
+	"github.com/gerwim/recarto/internal/memory"
 )
 
 // parseFlags parses fs and reports whether the command should exit cleanly. It

@@ -7,8 +7,8 @@ import (
 
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"git.gerwim.nl/gerwim/recarto/internal/app"
-	"git.gerwim.nl/gerwim/recarto/internal/features"
+	"github.com/gerwim/recarto/internal/app"
+	"github.com/gerwim/recarto/internal/features"
 )
 
 // toolNames lists the tools NewServer offers a client for a.

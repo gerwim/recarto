@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"git.gerwim.nl/gerwim/recarto/internal/memory"
+	"github.com/gerwim/recarto/internal/memory"
 )
 
 // kindSections lists the kinds in display order with their headings. Pinned

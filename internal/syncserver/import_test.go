@@ -11,7 +11,7 @@ import (
 	"strings"
 	"testing"
 
-	"git.gerwim.nl/gerwim/recarto/internal/syncwire"
+	"github.com/gerwim/recarto/internal/syncwire"
 )
 
 // importArchive builds a minimal recarto-export/v1 NDJSON archive (header +

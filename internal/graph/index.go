@@ -9,9 +9,9 @@ import (
 	"sort"
 	"strings"
 
-	"git.gerwim.nl/gerwim/recarto/internal/ids"
-	"git.gerwim.nl/gerwim/recarto/internal/parse"
-	"git.gerwim.nl/gerwim/recarto/internal/store"
+	"github.com/gerwim/recarto/internal/ids"
+	"github.com/gerwim/recarto/internal/parse"
+	"github.com/gerwim/recarto/internal/store"
 )
 
 // IndexFile parses src and atomically (re)writes the file's nodes/edges and its

@@ -17,13 +17,13 @@ import (
 	"os"
 	"strings"
 
-	"git.gerwim.nl/gerwim/recarto/internal/cache"
-	"git.gerwim.nl/gerwim/recarto/internal/clock"
-	"git.gerwim.nl/gerwim/recarto/internal/ledger"
-	"git.gerwim.nl/gerwim/recarto/internal/memory"
-	"git.gerwim.nl/gerwim/recarto/internal/remotesync"
-	"git.gerwim.nl/gerwim/recarto/internal/repokey"
-	"git.gerwim.nl/gerwim/recarto/internal/store"
+	"github.com/gerwim/recarto/internal/cache"
+	"github.com/gerwim/recarto/internal/clock"
+	"github.com/gerwim/recarto/internal/ledger"
+	"github.com/gerwim/recarto/internal/memory"
+	"github.com/gerwim/recarto/internal/remotesync"
+	"github.com/gerwim/recarto/internal/repokey"
+	"github.com/gerwim/recarto/internal/store"
 )
 
 // EnvVar names the environment variable that enables the workspace store. Its

@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"git.gerwim.nl/gerwim/recarto/internal/features"
+	"github.com/gerwim/recarto/internal/features"
 )
 
 func TestInstructionsCoachesCandidateSymbols(t *testing.T) {

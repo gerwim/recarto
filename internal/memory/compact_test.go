@@ -6,10 +6,10 @@ import (
 	"testing"
 	"time"
 
-	"git.gerwim.nl/gerwim/recarto/internal/clock"
-	"git.gerwim.nl/gerwim/recarto/internal/ids"
-	"git.gerwim.nl/gerwim/recarto/internal/ledger"
-	"git.gerwim.nl/gerwim/recarto/internal/store"
+	"github.com/gerwim/recarto/internal/clock"
+	"github.com/gerwim/recarto/internal/ids"
+	"github.com/gerwim/recarto/internal/ledger"
+	"github.com/gerwim/recarto/internal/store"
 )
 
 func TestEpochDefaultsToOne(t *testing.T) {

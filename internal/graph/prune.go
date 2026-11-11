@@ -4,7 +4,7 @@ import (
 	"context"
 	"strings"
 
-	"git.gerwim.nl/gerwim/recarto/internal/store"
+	"github.com/gerwim/recarto/internal/store"
 )
 
 // pruneBatchFiles is how many files each prune transaction tears down. Batched

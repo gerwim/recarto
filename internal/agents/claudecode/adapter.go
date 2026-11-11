@@ -5,8 +5,8 @@ import (
 	"encoding/json"
 	"io"
 
-	"git.gerwim.nl/gerwim/recarto/internal/agents"
-	"git.gerwim.nl/gerwim/recarto/internal/app"
+	"github.com/gerwim/recarto/internal/agents"
+	"github.com/gerwim/recarto/internal/app"
 )
 
 // Adapter translates Claude Code hook payloads to and from agents.Event/Result.

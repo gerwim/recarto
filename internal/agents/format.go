@@ -8,10 +8,10 @@ import (
 	"strings"
 	"time"
 
-	"git.gerwim.nl/gerwim/recarto/internal/features"
-	"git.gerwim.nl/gerwim/recarto/internal/graph"
-	"git.gerwim.nl/gerwim/recarto/internal/ledger"
-	"git.gerwim.nl/gerwim/recarto/internal/memory"
+	"github.com/gerwim/recarto/internal/features"
+	"github.com/gerwim/recarto/internal/graph"
+	"github.com/gerwim/recarto/internal/ledger"
+	"github.com/gerwim/recarto/internal/memory"
 )
 
 // Session-start tier sizing. sessionStartBudget is the default token budget for

@@ -12,7 +12,7 @@ import (
 	"io"
 	"sort"
 
-	"git.gerwim.nl/gerwim/recarto/internal/memory"
+	"github.com/gerwim/recarto/internal/memory"
 )
 
 // line is the portable wire shape of one memory.

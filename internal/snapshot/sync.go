@@ -9,8 +9,8 @@ import (
 	"os"
 	"path/filepath"
 
-	"git.gerwim.nl/gerwim/recarto/internal/memory"
-	"git.gerwim.nl/gerwim/recarto/internal/store"
+	"github.com/gerwim/recarto/internal/memory"
+	"github.com/gerwim/recarto/internal/store"
 )
 
 const metaSnapshotHash = "snapshot_hash"

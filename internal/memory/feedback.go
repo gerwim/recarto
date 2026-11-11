@@ -4,7 +4,7 @@ import (
 	"context"
 	"database/sql"
 
-	"git.gerwim.nl/gerwim/recarto/internal/store"
+	"github.com/gerwim/recarto/internal/store"
 )
 
 // ResolveFeedback marks an active feedback report resolved (active→resolved),

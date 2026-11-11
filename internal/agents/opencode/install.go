@@ -5,8 +5,8 @@ import (
 	"path/filepath"
 	"reflect"
 
-	"git.gerwim.nl/gerwim/recarto/internal/agents"
-	"git.gerwim.nl/gerwim/recarto/internal/features"
+	"github.com/gerwim/recarto/internal/agents"
+	"github.com/gerwim/recarto/internal/features"
 )
 
 // ensureMCPServer keeps the recarto entry in an opencode.json "mcp" doc current.

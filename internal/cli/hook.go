@@ -8,11 +8,11 @@ import (
 	"os"
 	"slices"
 
-	"git.gerwim.nl/gerwim/recarto/internal/agents"
-	"git.gerwim.nl/gerwim/recarto/internal/agents/claudecode"
-	"git.gerwim.nl/gerwim/recarto/internal/agents/copilot"
-	"git.gerwim.nl/gerwim/recarto/internal/agents/opencode"
-	"git.gerwim.nl/gerwim/recarto/internal/app"
+	"github.com/gerwim/recarto/internal/agents"
+	"github.com/gerwim/recarto/internal/agents/claudecode"
+	"github.com/gerwim/recarto/internal/agents/copilot"
+	"github.com/gerwim/recarto/internal/agents/opencode"
+	"github.com/gerwim/recarto/internal/app"
 )
 
 // Hook dispatches a lifecycle hook for the host named by --agent (default claude)

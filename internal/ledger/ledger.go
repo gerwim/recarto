@@ -6,7 +6,7 @@ import (
 	"database/sql"
 	"errors"
 
-	"git.gerwim.nl/gerwim/recarto/internal/store"
+	"github.com/gerwim/recarto/internal/store"
 )
 
 // Ledger updates counters atomically, safe across goroutines and processes.

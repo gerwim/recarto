@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"git.gerwim.nl/gerwim/recarto/internal/memory"
+	"github.com/gerwim/recarto/internal/memory"
 )
 
 func TestStatusReportsIdentityCountsAndLedger(t *testing.T) {

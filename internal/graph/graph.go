@@ -10,10 +10,10 @@ import (
 	"strings"
 	"sync"
 
-	"git.gerwim.nl/gerwim/recarto/internal/clock"
-	"git.gerwim.nl/gerwim/recarto/internal/ledger"
-	"git.gerwim.nl/gerwim/recarto/internal/parse"
-	"git.gerwim.nl/gerwim/recarto/internal/store"
+	"github.com/gerwim/recarto/internal/clock"
+	"github.com/gerwim/recarto/internal/ledger"
+	"github.com/gerwim/recarto/internal/parse"
+	"github.com/gerwim/recarto/internal/store"
 )
 
 // Engine indexes files into, and answers structural queries over, the store.

@@ -4,11 +4,11 @@ import (
 	"context"
 	"fmt"
 
-	"git.gerwim.nl/gerwim/recarto/internal/app"
-	"git.gerwim.nl/gerwim/recarto/internal/feedback"
-	"git.gerwim.nl/gerwim/recarto/internal/memory"
-	"git.gerwim.nl/gerwim/recarto/internal/store"
-	"git.gerwim.nl/gerwim/recarto/internal/version"
+	"github.com/gerwim/recarto/internal/app"
+	"github.com/gerwim/recarto/internal/feedback"
+	"github.com/gerwim/recarto/internal/memory"
+	"github.com/gerwim/recarto/internal/store"
+	"github.com/gerwim/recarto/internal/version"
 )
 
 // ReportRecartoIssueInput are the arguments to report_recarto_issue. signal_type,

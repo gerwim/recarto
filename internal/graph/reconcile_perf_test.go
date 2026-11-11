@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"git.gerwim.nl/gerwim/recarto/internal/store"
+	"github.com/gerwim/recarto/internal/store"
 )
 
 // TestReconcileSkipsResolveWhenNothingChanged proves the resolver does not re-run

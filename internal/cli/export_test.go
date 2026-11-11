@@ -10,12 +10,12 @@ import (
 	"path/filepath"
 	"testing"
 
-	"git.gerwim.nl/gerwim/recarto/internal/clock"
-	"git.gerwim.nl/gerwim/recarto/internal/gitctx"
-	"git.gerwim.nl/gerwim/recarto/internal/ledger"
-	"git.gerwim.nl/gerwim/recarto/internal/memory"
-	"git.gerwim.nl/gerwim/recarto/internal/store"
-	"git.gerwim.nl/gerwim/recarto/internal/syncwire"
+	"github.com/gerwim/recarto/internal/clock"
+	"github.com/gerwim/recarto/internal/gitctx"
+	"github.com/gerwim/recarto/internal/ledger"
+	"github.com/gerwim/recarto/internal/memory"
+	"github.com/gerwim/recarto/internal/store"
+	"github.com/gerwim/recarto/internal/syncwire"
 )
 
 // seedCacheStore opens (creating) a store at <cacheDir>/<dirName>/store.db,

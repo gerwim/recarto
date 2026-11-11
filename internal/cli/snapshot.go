@@ -7,8 +7,8 @@ import (
 	"os"
 	"path/filepath"
 
-	"git.gerwim.nl/gerwim/recarto/internal/app"
-	"git.gerwim.nl/gerwim/recarto/internal/snapshot"
+	"github.com/gerwim/recarto/internal/app"
+	"github.com/gerwim/recarto/internal/snapshot"
 )
 
 // Snapshot exports or imports the committable team-memory file.

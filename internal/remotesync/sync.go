@@ -8,10 +8,10 @@ import (
 	"strconv"
 	"time"
 
-	"git.gerwim.nl/gerwim/recarto/internal/gitctx"
-	"git.gerwim.nl/gerwim/recarto/internal/memory"
-	"git.gerwim.nl/gerwim/recarto/internal/store"
-	"git.gerwim.nl/gerwim/recarto/internal/syncwire"
+	"github.com/gerwim/recarto/internal/gitctx"
+	"github.com/gerwim/recarto/internal/memory"
+	"github.com/gerwim/recarto/internal/store"
+	"github.com/gerwim/recarto/internal/syncwire"
 )
 
 // metaCursor is the meta key holding the last-applied server seq (the pull

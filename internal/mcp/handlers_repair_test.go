@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"git.gerwim.nl/gerwim/recarto/internal/app"
-	"git.gerwim.nl/gerwim/recarto/internal/clock"
-	"git.gerwim.nl/gerwim/recarto/internal/store"
+	"github.com/gerwim/recarto/internal/app"
+	"github.com/gerwim/recarto/internal/clock"
+	"github.com/gerwim/recarto/internal/store"
 )
 
 // damageAfter overwrites every complete database page at or after off with a

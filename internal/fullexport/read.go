@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"io"
 
-	"git.gerwim.nl/gerwim/recarto/internal/syncwire"
+	"github.com/gerwim/recarto/internal/syncwire"
 )
 
 // scannerBufSize allows a single archive line (one memory's full body) to

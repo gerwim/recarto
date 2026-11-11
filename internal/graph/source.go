@@ -5,7 +5,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"git.gerwim.nl/gerwim/recarto/internal/parse"
+	"github.com/gerwim/recarto/internal/parse"
 )
 
 // FileEntry is a candidate source file discovered by a Source.

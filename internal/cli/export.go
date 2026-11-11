@@ -11,11 +11,11 @@ import (
 	"strings"
 	"time"
 
-	"git.gerwim.nl/gerwim/recarto/internal/cache"
-	"git.gerwim.nl/gerwim/recarto/internal/clock"
-	"git.gerwim.nl/gerwim/recarto/internal/fullexport"
-	"git.gerwim.nl/gerwim/recarto/internal/gitctx"
-	"git.gerwim.nl/gerwim/recarto/internal/remotesync"
+	"github.com/gerwim/recarto/internal/cache"
+	"github.com/gerwim/recarto/internal/clock"
+	"github.com/gerwim/recarto/internal/fullexport"
+	"github.com/gerwim/recarto/internal/gitctx"
+	"github.com/gerwim/recarto/internal/remotesync"
 )
 
 // importHTTPTimeout is generous relative to sync.go's per-request timeouts

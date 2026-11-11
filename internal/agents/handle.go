@@ -9,13 +9,13 @@ import (
 	"strings"
 	"time"
 
-	"git.gerwim.nl/gerwim/recarto/internal/app"
-	"git.gerwim.nl/gerwim/recarto/internal/features"
-	"git.gerwim.nl/gerwim/recarto/internal/graph"
-	"git.gerwim.nl/gerwim/recarto/internal/ledger"
-	"git.gerwim.nl/gerwim/recarto/internal/memory"
-	"git.gerwim.nl/gerwim/recarto/internal/snapshot"
-	"git.gerwim.nl/gerwim/recarto/internal/store"
+	"github.com/gerwim/recarto/internal/app"
+	"github.com/gerwim/recarto/internal/features"
+	"github.com/gerwim/recarto/internal/graph"
+	"github.com/gerwim/recarto/internal/ledger"
+	"github.com/gerwim/recarto/internal/memory"
+	"github.com/gerwim/recarto/internal/snapshot"
+	"github.com/gerwim/recarto/internal/store"
 )
 
 // Handle runs the agent-neutral logic for one lifecycle event and returns the

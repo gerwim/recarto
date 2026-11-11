@@ -8,8 +8,8 @@ import (
 	"reflect"
 	"strings"
 
-	"git.gerwim.nl/gerwim/recarto/internal/agents"
-	"git.gerwim.nl/gerwim/recarto/internal/features"
+	"github.com/gerwim/recarto/internal/agents"
+	"github.com/gerwim/recarto/internal/features"
 )
 
 // hookFile is the recarto-owned Copilot CLI hook config. Copilot merges hook files

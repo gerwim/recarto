@@ -3,8 +3,8 @@ package remotesync
 import (
 	"os"
 
-	"git.gerwim.nl/gerwim/recarto/internal/gitctx"
-	"git.gerwim.nl/gerwim/recarto/internal/repokey"
+	"github.com/gerwim/recarto/internal/gitctx"
+	"github.com/gerwim/recarto/internal/repokey"
 )
 
 // RepoKey resolves the cross-machine sync identity for gc. gitctx.RepoID

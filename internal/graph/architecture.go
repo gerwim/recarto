@@ -8,7 +8,7 @@ import (
 	"sort"
 	"strings"
 
-	"git.gerwim.nl/gerwim/recarto/internal/store"
+	"github.com/gerwim/recarto/internal/store"
 )
 
 // Module is a project-level grouping (the nearest ancestor directory holding a

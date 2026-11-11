@@ -11,17 +11,17 @@ import (
 	"path/filepath"
 	"time"
 
-	"git.gerwim.nl/gerwim/recarto/internal/cache"
-	"git.gerwim.nl/gerwim/recarto/internal/clock"
-	"git.gerwim.nl/gerwim/recarto/internal/features"
-	"git.gerwim.nl/gerwim/recarto/internal/gitctx"
-	"git.gerwim.nl/gerwim/recarto/internal/graph"
-	"git.gerwim.nl/gerwim/recarto/internal/ledger"
-	"git.gerwim.nl/gerwim/recarto/internal/memory"
-	"git.gerwim.nl/gerwim/recarto/internal/remotesync"
-	"git.gerwim.nl/gerwim/recarto/internal/store"
-	"git.gerwim.nl/gerwim/recarto/internal/version"
-	"git.gerwim.nl/gerwim/recarto/internal/workspace"
+	"github.com/gerwim/recarto/internal/cache"
+	"github.com/gerwim/recarto/internal/clock"
+	"github.com/gerwim/recarto/internal/features"
+	"github.com/gerwim/recarto/internal/gitctx"
+	"github.com/gerwim/recarto/internal/graph"
+	"github.com/gerwim/recarto/internal/ledger"
+	"github.com/gerwim/recarto/internal/memory"
+	"github.com/gerwim/recarto/internal/remotesync"
+	"github.com/gerwim/recarto/internal/store"
+	"github.com/gerwim/recarto/internal/version"
+	"github.com/gerwim/recarto/internal/workspace"
 )
 
 // Config configures App construction. The zero value is valid: it resolves the

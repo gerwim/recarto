@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"git.gerwim.nl/gerwim/recarto/internal/update"
+	"github.com/gerwim/recarto/internal/update"
 )
 
 func TestBuildReleaseHashesBinaries(t *testing.T) {

@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"git.gerwim.nl/gerwim/recarto/internal/graph"
+	"github.com/gerwim/recarto/internal/graph"
 )
 
 func TestSearchGraphHandler(t *testing.T) {

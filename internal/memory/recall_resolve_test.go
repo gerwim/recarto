@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"git.gerwim.nl/gerwim/recarto/internal/clock"
+	"github.com/gerwim/recarto/internal/clock"
 )
 
 func recordWithRef(t *testing.T, e *Engine, kind Kind, title string, ref Ref, pinned bool) {

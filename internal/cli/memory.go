@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"io"
 
-	"git.gerwim.nl/gerwim/recarto/internal/app"
-	"git.gerwim.nl/gerwim/recarto/internal/export"
-	"git.gerwim.nl/gerwim/recarto/internal/memory"
+	"github.com/gerwim/recarto/internal/app"
+	"github.com/gerwim/recarto/internal/export"
+	"github.com/gerwim/recarto/internal/memory"
 )
 
 // Memory dispatches `memory show` — render all active memory as markdown to w.

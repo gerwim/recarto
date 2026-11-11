@@ -7,9 +7,9 @@ import (
 	"os"
 	"sort"
 
-	"git.gerwim.nl/gerwim/recarto/internal/cache"
-	"git.gerwim.nl/gerwim/recarto/internal/gitctx"
-	"git.gerwim.nl/gerwim/recarto/internal/store"
+	"github.com/gerwim/recarto/internal/cache"
+	"github.com/gerwim/recarto/internal/gitctx"
+	"github.com/gerwim/recarto/internal/store"
 )
 
 // Repair rebuilds a store file from whatever is still readable in it: the

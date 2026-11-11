@@ -9,12 +9,12 @@ import (
 	"sort"
 	"strings"
 
-	"git.gerwim.nl/gerwim/recarto/internal/clock"
-	"git.gerwim.nl/gerwim/recarto/internal/embedding"
-	"git.gerwim.nl/gerwim/recarto/internal/features"
-	"git.gerwim.nl/gerwim/recarto/internal/ids"
-	"git.gerwim.nl/gerwim/recarto/internal/ledger"
-	"git.gerwim.nl/gerwim/recarto/internal/store"
+	"github.com/gerwim/recarto/internal/clock"
+	"github.com/gerwim/recarto/internal/embedding"
+	"github.com/gerwim/recarto/internal/features"
+	"github.com/gerwim/recarto/internal/ids"
+	"github.com/gerwim/recarto/internal/ledger"
+	"github.com/gerwim/recarto/internal/store"
 )
 
 // Engine is the memory subsystem: write+dedup and recall over the store.

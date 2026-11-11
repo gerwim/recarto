@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"io"
 
-	"git.gerwim.nl/gerwim/recarto/internal/app"
-	"git.gerwim.nl/gerwim/recarto/internal/memory"
+	"github.com/gerwim/recarto/internal/app"
+	"github.com/gerwim/recarto/internal/memory"
 )
 
 // Remember records a memory of the given kind from CLI flags:

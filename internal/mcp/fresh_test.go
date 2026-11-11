@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"git.gerwim.nl/gerwim/recarto/internal/graph"
+	"github.com/gerwim/recarto/internal/graph"
 )
 
 func TestFreshnessHintMapping(t *testing.T) {

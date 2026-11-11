@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"git.gerwim.nl/gerwim/recarto/internal/remotesync"
+	"github.com/gerwim/recarto/internal/remotesync"
 )
 
 // TestSyncIntervalNonGitWorkspaceOnly covers the 1.2.0 crash state: sync fully

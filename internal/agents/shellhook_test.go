@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"git.gerwim.nl/gerwim/recarto/internal/app"
-	"git.gerwim.nl/gerwim/recarto/internal/clock"
-	"git.gerwim.nl/gerwim/recarto/internal/memory"
+	"github.com/gerwim/recarto/internal/app"
+	"github.com/gerwim/recarto/internal/clock"
+	"github.com/gerwim/recarto/internal/memory"
 )
 
 // contextAdapter decodes every payload to ev and writes the result's context.

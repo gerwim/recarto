@@ -3,7 +3,7 @@ package syncserver
 import (
 	"context"
 
-	"git.gerwim.nl/gerwim/recarto/internal/store"
+	"github.com/gerwim/recarto/internal/store"
 )
 
 // reconcileSyncIndex gives every memory and tombstone in the store a sync_index

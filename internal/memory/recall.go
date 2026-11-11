@@ -7,7 +7,7 @@ import (
 	"sort"
 	"strings"
 
-	"git.gerwim.nl/gerwim/recarto/internal/ledger"
+	"github.com/gerwim/recarto/internal/ledger"
 )
 
 // Recall scoring weights. Structural overlap is strongest; lexical and semantic

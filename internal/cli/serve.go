@@ -3,8 +3,8 @@ package cli
 import (
 	"context"
 
-	"git.gerwim.nl/gerwim/recarto/internal/app"
-	"git.gerwim.nl/gerwim/recarto/internal/mcp"
+	"github.com/gerwim/recarto/internal/app"
+	"github.com/gerwim/recarto/internal/mcp"
 )
 
 // Serve runs the MCP server over stdio until the client disconnects. It is a thin

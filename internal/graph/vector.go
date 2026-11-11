@@ -8,7 +8,7 @@ import (
 
 	_ "modernc.org/sqlite/vec" // registers the vec0 virtual table on the modernc driver
 
-	"git.gerwim.nl/gerwim/recarto/internal/store"
+	"github.com/gerwim/recarto/internal/store"
 )
 
 // embedBatch bounds how many symbol docs are embedded per model call / insert

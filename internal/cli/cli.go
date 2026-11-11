@@ -6,7 +6,7 @@ import (
 	"io"
 	"os"
 
-	"git.gerwim.nl/gerwim/recarto/internal/app"
+	"github.com/gerwim/recarto/internal/app"
 )
 
 // known reports whether cmd is a CLI command that needs an open App.

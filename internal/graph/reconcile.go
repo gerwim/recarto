@@ -7,8 +7,8 @@ import (
 	"runtime"
 	"sync"
 
-	"git.gerwim.nl/gerwim/recarto/internal/parse"
-	"git.gerwim.nl/gerwim/recarto/internal/store"
+	"github.com/gerwim/recarto/internal/parse"
+	"github.com/gerwim/recarto/internal/store"
 )
 
 // indexBatchSize is how many parsed files share one write transaction. Grouping

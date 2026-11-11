@@ -7,8 +7,8 @@ import (
 
 	"github.com/mattn/go-isatty"
 
-	"git.gerwim.nl/gerwim/recarto/internal/agents"
-	"git.gerwim.nl/gerwim/recarto/internal/features"
+	"github.com/gerwim/recarto/internal/agents"
+	"github.com/gerwim/recarto/internal/features"
 )
 
 // initHint asks for a re-run of recarto init, the only writer of the agent
