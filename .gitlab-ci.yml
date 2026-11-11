@@ -65,6 +65,8 @@ sync-image:
 # Hash binaries, merge index.json, sign with minisign, upload everything to R2.
 publish:
   stage: publish
+  # The signing and R2 variables are scoped to this environment.
+  environment: publish
   image: "$BUILDER_IMAGE"
   rules:
     - if: '$CI_COMMIT_TAG'
