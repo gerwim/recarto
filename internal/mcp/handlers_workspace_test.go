@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"git.gerwim.nl/gerwim/recarto/internal/app"
+	"github.com/gerwim/recarto/internal/app"
 )
 
 // newWorkspaceApp is newTestApp with the cross-repo workspace store enabled.

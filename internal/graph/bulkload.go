@@ -4,7 +4,7 @@ import (
 	"context"
 	"strings"
 
-	"git.gerwim.nl/gerwim/recarto/internal/store"
+	"github.com/gerwim/recarto/internal/store"
 )
 
 // bulkLoadMinFiles is the worklist size above which a fresh index drops and

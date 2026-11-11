@@ -3,7 +3,7 @@ package mcp
 import (
 	"testing"
 
-	"git.gerwim.nl/gerwim/recarto/internal/memory"
+	"github.com/gerwim/recarto/internal/memory"
 )
 
 func TestRecordMemorySchemaHasKindEnum(t *testing.T) {

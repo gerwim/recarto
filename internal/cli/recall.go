@@ -7,8 +7,8 @@ import (
 	"io"
 	"strings"
 
-	"git.gerwim.nl/gerwim/recarto/internal/app"
-	"git.gerwim.nl/gerwim/recarto/internal/memory"
+	"github.com/gerwim/recarto/internal/app"
+	"github.com/gerwim/recarto/internal/memory"
 )
 
 // Recall runs a ranked, token-budgeted recall and prints the selected memories.

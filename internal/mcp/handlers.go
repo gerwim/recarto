@@ -11,9 +11,9 @@ import (
 	"fmt"
 	"sort"
 
-	"git.gerwim.nl/gerwim/recarto/internal/app"
-	"git.gerwim.nl/gerwim/recarto/internal/features"
-	"git.gerwim.nl/gerwim/recarto/internal/memory"
+	"github.com/gerwim/recarto/internal/app"
+	"github.com/gerwim/recarto/internal/features"
+	"github.com/gerwim/recarto/internal/memory"
 )
 
 // MemoryView is the wire shape for a memory returned by recall/list/get/search.

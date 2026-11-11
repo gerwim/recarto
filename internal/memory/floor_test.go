@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"git.gerwim.nl/gerwim/recarto/internal/clock"
+	"github.com/gerwim/recarto/internal/clock"
 )
 
 const floorTestBranch = "feature/index-speed-improvements"

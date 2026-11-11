@@ -22,7 +22,7 @@ func TestMultiProcessCompactSharedStore(t *testing.T) {
 		t.Skip("builds the recarto binary (CGO); skipped under -short")
 	}
 	bin := filepath.Join(t.TempDir(), "recarto")
-	build := exec.Command("go", "build", "-o", bin, "git.gerwim.nl/gerwim/recarto/cmd/recarto")
+	build := exec.Command("go", "build", "-o", bin, "github.com/gerwim/recarto/cmd/recarto")
 	build.Env = append(os.Environ(), "CGO_ENABLED=1")
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build recarto: %v\n%s", err, out)

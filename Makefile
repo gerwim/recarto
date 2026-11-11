@@ -1,6 +1,6 @@
 BINARY_NAME := recarto
 PKG         := ./cmd/recarto
-MODULE      := git.gerwim.nl/gerwim/recarto
+MODULE      := github.com/gerwim/recarto
 VERSION     ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS     := -ldflags "-s -w -X $(MODULE)/internal/version.Version=$(VERSION)"
 

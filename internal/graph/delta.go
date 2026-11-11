@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"sort"
 
-	"git.gerwim.nl/gerwim/recarto/internal/ids"
-	"git.gerwim.nl/gerwim/recarto/internal/store"
+	"github.com/gerwim/recarto/internal/ids"
+	"github.com/gerwim/recarto/internal/store"
 )
 
 // Delta is one symbol-level index change: a symbol that was added, removed, or

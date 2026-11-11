@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"io"
 
-	"git.gerwim.nl/gerwim/recarto/internal/app"
-	"git.gerwim.nl/gerwim/recarto/internal/memory"
+	"github.com/gerwim/recarto/internal/app"
+	"github.com/gerwim/recarto/internal/memory"
 )
 
 // Compact runs a compaction/decay pass over this repo's memory store.

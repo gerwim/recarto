@@ -1,5 +1,6 @@
 # Build output (make linux|windows|darwin|native)
 /releases/
+/artifacts/
 recarto-minisign.key
 recarto-minisign.pub
 ci/osxcross-sdk/

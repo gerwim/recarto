@@ -5,7 +5,7 @@ import (
 	"database/sql"
 	"errors"
 
-	"git.gerwim.nl/gerwim/recarto/internal/store"
+	"github.com/gerwim/recarto/internal/store"
 )
 
 // Forget hard-deletes a memory by id: the row, its refs, and its lexical index

@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"git.gerwim.nl/gerwim/recarto/internal/clock"
-	"git.gerwim.nl/gerwim/recarto/internal/graph"
-	"git.gerwim.nl/gerwim/recarto/internal/memory"
+	"github.com/gerwim/recarto/internal/clock"
+	"github.com/gerwim/recarto/internal/graph"
+	"github.com/gerwim/recarto/internal/memory"
 )
 
 func TestHandleSessionStartEmptyRepo(t *testing.T) {

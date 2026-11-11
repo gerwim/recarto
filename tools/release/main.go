@@ -20,7 +20,7 @@ import (
 	"os"
 	"strings"
 
-	"git.gerwim.nl/gerwim/recarto/internal/update"
+	"github.com/gerwim/recarto/internal/update"
 )
 
 type artifactInput struct {

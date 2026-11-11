@@ -3,7 +3,7 @@ package memory
 import (
 	"context"
 
-	"git.gerwim.nl/gerwim/recarto/internal/syncwire"
+	"github.com/gerwim/recarto/internal/syncwire"
 )
 
 // AllRecords returns every stored memory (any status), with refs, ordered by

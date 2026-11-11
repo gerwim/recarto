@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"strings"
 
-	"git.gerwim.nl/gerwim/recarto/internal/store"
+	"github.com/gerwim/recarto/internal/store"
 )
 
 // Incremental resolve. A full Resolve (resolve.go) re-derives every call edge's

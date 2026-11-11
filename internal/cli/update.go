@@ -11,8 +11,8 @@ import (
 	"strconv"
 	"strings"
 
-	"git.gerwim.nl/gerwim/recarto/internal/update"
-	"git.gerwim.nl/gerwim/recarto/internal/version"
+	"github.com/gerwim/recarto/internal/update"
+	"github.com/gerwim/recarto/internal/version"
 )
 
 // ErrUpdateAvailable is returned by `recarto update --check` when a newer release

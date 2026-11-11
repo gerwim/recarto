@@ -7,8 +7,8 @@ import (
 	"strconv"
 	"strings"
 
-	"git.gerwim.nl/gerwim/recarto/internal/app"
-	"git.gerwim.nl/gerwim/recarto/internal/graph"
+	"github.com/gerwim/recarto/internal/app"
+	"github.com/gerwim/recarto/internal/graph"
 )
 
 // Graph dispatches `graph <sub>`: search | callers | callees | arch | query | snippet.

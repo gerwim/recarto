@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"git.gerwim.nl/gerwim/recarto/internal/clock"
-	"git.gerwim.nl/gerwim/recarto/internal/features"
+	"github.com/gerwim/recarto/internal/clock"
+	"github.com/gerwim/recarto/internal/features"
 )
 
 func TestSemanticRecallFollowsConfig(t *testing.T) {

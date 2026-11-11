@@ -9,12 +9,19 @@ import (
 )
 
 const (
+	// Revision is the pinned revision of minishlab/potion-base-8M on Hugging Face.
+	Revision = "bf8b056"
 	// ModelID identifies model + revision + quantization + tokenizer recipe. Bump
 	// the suffix whenever tokenization, pooling or quantization changes.
-	ModelID   = "potion-base-8M@bf8b056/int8/v1"
+	ModelID   = "potion-base-8M@" + Revision + "/int8/v1"
 	modelRows = 29528
 	modelDim  = 256
 )
+
+// License is the potion-base-8M licence and its vocabulary notice.
+//
+//go:embed assets/LICENSE
+var License string
 
 //go:embed assets/potion-base-8M.i8
 var matrixAsset []byte

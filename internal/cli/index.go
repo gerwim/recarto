@@ -9,8 +9,8 @@ import (
 
 	"github.com/mattn/go-isatty"
 
-	"git.gerwim.nl/gerwim/recarto/internal/app"
-	"git.gerwim.nl/gerwim/recarto/internal/graph"
+	"github.com/gerwim/recarto/internal/app"
+	"github.com/gerwim/recarto/internal/graph"
 )
 
 // Index reconciles the code graph for the current worktree and prints a summary.

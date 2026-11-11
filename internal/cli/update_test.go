@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"git.gerwim.nl/gerwim/recarto/internal/update"
+	"github.com/gerwim/recarto/internal/update"
 )
 
 func testManifest() *update.Manifest {

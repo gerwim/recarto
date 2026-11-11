@@ -3,8 +3,8 @@ package claudecode
 import (
 	"runtime"
 
-	"git.gerwim.nl/gerwim/recarto/internal/agents"
-	"git.gerwim.nl/gerwim/recarto/internal/features"
+	"github.com/gerwim/recarto/internal/agents"
+	"github.com/gerwim/recarto/internal/features"
 )
 
 // goos is the target OS Recarto installs for. It indirects runtime.GOOS so tests

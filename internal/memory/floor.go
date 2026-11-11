@@ -6,7 +6,7 @@ import (
 	"strings"
 	"unicode"
 
-	"git.gerwim.nl/gerwim/recarto/internal/embedding"
+	"github.com/gerwim/recarto/internal/embedding"
 )
 
 // These thresholds are calibrated for embedding.ModelID; recalibrate when the

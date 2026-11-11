@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"git.gerwim.nl/gerwim/recarto/internal/syncwire"
+	"github.com/gerwim/recarto/internal/syncwire"
 )
 
 func TestReadSkipsHeaderLine(t *testing.T) {

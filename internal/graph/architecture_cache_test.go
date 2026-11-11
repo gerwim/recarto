@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"git.gerwim.nl/gerwim/recarto/internal/store"
+	"github.com/gerwim/recarto/internal/store"
 )
 
 // TestArchitectureCachedByGraphToken proves Architecture serves the stored

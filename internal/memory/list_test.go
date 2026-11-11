@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"git.gerwim.nl/gerwim/recarto/internal/clock"
+	"github.com/gerwim/recarto/internal/clock"
 )
 
 func TestListFiltersByKind(t *testing.T) {

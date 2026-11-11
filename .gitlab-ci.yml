@@ -11,6 +11,19 @@ test:
     - go vet ./...
     - go test ./...
 
+# Fail on any secret in the pushed history or commit messages (ci/secret-scan.sh).
+# GIT_DEPTH 0 fetches the whole history so every commit is scanned, not just the last 20.
+# The image is pinned by digest so a re-pushed tag cannot swap the scanner.
+secret-scan:
+  stage: test
+  image:
+    name: zricethezav/gitleaks:v8.30.1@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f
+    entrypoint: [""]
+  variables:
+    GIT_DEPTH: "0"
+  script:
+    - sh ci/secret-scan.sh
+
 # Cross-compile linux+windows via zig. Darwin (osxcross) is disabled for now.
 build:
   stage: build
@@ -52,6 +65,8 @@ sync-image:
 # Hash binaries, merge index.json, sign with minisign, upload everything to R2.
 publish:
   stage: publish
+  # The signing and R2 variables are scoped to this environment.
+  environment: publish
   image: "$BUILDER_IMAGE"
   rules:
     - if: '$CI_COMMIT_TAG'

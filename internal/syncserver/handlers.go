@@ -7,9 +7,9 @@ import (
 	"net/http"
 	"strconv"
 
-	"git.gerwim.nl/gerwim/recarto/internal/memory"
-	"git.gerwim.nl/gerwim/recarto/internal/store"
-	"git.gerwim.nl/gerwim/recarto/internal/syncwire"
+	"github.com/gerwim/recarto/internal/memory"
+	"github.com/gerwim/recarto/internal/store"
+	"github.com/gerwim/recarto/internal/syncwire"
 )
 
 // defaultChangesLimit / maxChangesLimit bound one GET /changes page.

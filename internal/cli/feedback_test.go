@@ -6,9 +6,9 @@ import (
 	"strings"
 	"testing"
 
-	"git.gerwim.nl/gerwim/recarto/internal/clock"
-	"git.gerwim.nl/gerwim/recarto/internal/feedback"
-	"git.gerwim.nl/gerwim/recarto/internal/memory"
+	"github.com/gerwim/recarto/internal/clock"
+	"github.com/gerwim/recarto/internal/feedback"
+	"github.com/gerwim/recarto/internal/memory"
 )
 
 func seedFeedback(t *testing.T) string {

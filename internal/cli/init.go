@@ -6,10 +6,10 @@ import (
 	"io"
 	"strings"
 
-	"git.gerwim.nl/gerwim/recarto/internal/agents"
-	"git.gerwim.nl/gerwim/recarto/internal/agents/claudecode"
-	"git.gerwim.nl/gerwim/recarto/internal/agents/copilot"
-	"git.gerwim.nl/gerwim/recarto/internal/agents/opencode"
+	"github.com/gerwim/recarto/internal/agents"
+	"github.com/gerwim/recarto/internal/agents/claudecode"
+	"github.com/gerwim/recarto/internal/agents/copilot"
+	"github.com/gerwim/recarto/internal/agents/opencode"
 )
 
 // Init configures Recarto integration for one or more agents. With no --agent it

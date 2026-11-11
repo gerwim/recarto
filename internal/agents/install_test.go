@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"git.gerwim.nl/gerwim/recarto/internal/features"
+	"github.com/gerwim/recarto/internal/features"
 )
 
 func TestWriteInstructionsBlockIdempotent(t *testing.T) {

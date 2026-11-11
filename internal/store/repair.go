@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"git.gerwim.nl/gerwim/recarto/internal/features"
+	"github.com/gerwim/recarto/internal/features"
 )
 
 // Repairing a corrupt store is a BUILD-ASIDE operation: nothing at the store's

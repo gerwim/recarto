@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"git.gerwim.nl/gerwim/recarto/internal/clock"
-	"git.gerwim.nl/gerwim/recarto/internal/graph"
+	"github.com/gerwim/recarto/internal/clock"
+	"github.com/gerwim/recarto/internal/graph"
 )
 
 // worktreeListGit extends fakeGit with a `git worktree list --porcelain`

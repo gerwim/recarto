@@ -1,4 +1,4 @@
-module git.gerwim.nl/gerwim/recarto
+module github.com/gerwim/recarto
 
 go 1.26.4
 

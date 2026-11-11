@@ -12,10 +12,10 @@ import (
 
 	"github.com/mattn/go-isatty"
 
-	"git.gerwim.nl/gerwim/recarto/internal/cli"
-	"git.gerwim.nl/gerwim/recarto/internal/ledger"
-	"git.gerwim.nl/gerwim/recarto/internal/store"
-	"git.gerwim.nl/gerwim/recarto/internal/version"
+	"github.com/gerwim/recarto/internal/cli"
+	"github.com/gerwim/recarto/internal/ledger"
+	"github.com/gerwim/recarto/internal/store"
+	"github.com/gerwim/recarto/internal/version"
 )
 
 func main() {

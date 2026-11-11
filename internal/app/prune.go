@@ -4,7 +4,7 @@ import (
 	"context"
 	"os"
 
-	"git.gerwim.nl/gerwim/recarto/internal/gitctx"
+	"github.com/gerwim/recarto/internal/gitctx"
 )
 
 // DeadWorktrees returns the stored graph worktrees that no longer exist. A

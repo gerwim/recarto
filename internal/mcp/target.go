@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"git.gerwim.nl/gerwim/recarto/internal/app"
+	"github.com/gerwim/recarto/internal/app"
 )
 
 // repoTarget resolves which served repo a tool call operates on: the primary

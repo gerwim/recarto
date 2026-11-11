@@ -31,10 +31,21 @@ func TestRunHelpListsNewCommands(t *testing.T) {
 	if err := Run([]string{"help"}, &buf); err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"init", "serve", "hook"} {
+	for _, want := range []string{"init", "serve", "hook", "licenses"} {
 		if !strings.Contains(buf.String(), want) {
 			t.Errorf("usage missing %q:\n%s", want, buf.String())
 		}
+	}
+}
+
+func TestRunLicensesWorksOutsideARepo(t *testing.T) {
+	t.Chdir(t.TempDir())
+	var buf bytes.Buffer
+	if err := Run([]string{"licenses"}, &buf); err != nil {
+		t.Fatalf("licenses failed outside a repo: %v", err)
+	}
+	if !strings.Contains(buf.String(), "Third-party notices") {
+		t.Error("licenses output has no third-party notices")
 	}
 }
 

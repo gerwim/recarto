@@ -4,7 +4,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"git.gerwim.nl/gerwim/recarto/internal/features"
+	"github.com/gerwim/recarto/internal/features"
 )
 
 func TestSyncFollowsConfig(t *testing.T) {

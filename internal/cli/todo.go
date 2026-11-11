@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"io"
 
-	"git.gerwim.nl/gerwim/recarto/internal/app"
+	"github.com/gerwim/recarto/internal/app"
 )
 
 // todoListLimit caps `recarto todo list` output.

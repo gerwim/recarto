@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"io"
 
-	"git.gerwim.nl/gerwim/recarto/internal/app"
-	"git.gerwim.nl/gerwim/recarto/internal/features"
-	"git.gerwim.nl/gerwim/recarto/internal/remotesync"
+	"github.com/gerwim/recarto/internal/app"
+	"github.com/gerwim/recarto/internal/features"
+	"github.com/gerwim/recarto/internal/remotesync"
 )
 
 // Sync runs a manual pull and/or push against the configured HTTP memory-sync

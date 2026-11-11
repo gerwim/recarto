@@ -3,8 +3,8 @@ package mcp
 import (
 	"github.com/google/jsonschema-go/jsonschema"
 
-	"git.gerwim.nl/gerwim/recarto/internal/features"
-	"git.gerwim.nl/gerwim/recarto/internal/memory"
+	"github.com/gerwim/recarto/internal/features"
+	"github.com/gerwim/recarto/internal/memory"
 )
 
 // schemaFor builds the auto-derived input schema for In, panicking on the

@@ -10,8 +10,8 @@ import (
 	"strings"
 	"testing"
 
-	"git.gerwim.nl/gerwim/recarto/internal/store"
-	"git.gerwim.nl/gerwim/recarto/internal/syncwire"
+	"github.com/gerwim/recarto/internal/store"
+	"github.com/gerwim/recarto/internal/syncwire"
 )
 
 // TestSyncIndexIsRebuiltAfterAStoreRepair is the recovery contract for the one

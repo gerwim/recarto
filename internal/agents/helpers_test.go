@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"git.gerwim.nl/gerwim/recarto/internal/app"
-	"git.gerwim.nl/gerwim/recarto/internal/clock"
+	"github.com/gerwim/recarto/internal/app"
+	"github.com/gerwim/recarto/internal/clock"
 )
 
 // fakeGit + newTestApp duplicated per test package (no shared testutil yet).

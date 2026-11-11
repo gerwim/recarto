@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"git.gerwim.nl/gerwim/recarto/internal/clock"
-	"git.gerwim.nl/gerwim/recarto/internal/syncwire"
+	"github.com/gerwim/recarto/internal/clock"
+	"github.com/gerwim/recarto/internal/syncwire"
 )
 
 func TestImportMemoryInsertReinforceSkip(t *testing.T) {

@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"git.gerwim.nl/gerwim/recarto/internal/app"
-	"git.gerwim.nl/gerwim/recarto/internal/clock"
+	"github.com/gerwim/recarto/internal/app"
+	"github.com/gerwim/recarto/internal/clock"
 )
 
 // fakeGit is a gitctx.Runner returning a fixed repo identity (no real git, no fs).

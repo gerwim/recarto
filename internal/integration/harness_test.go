@@ -47,9 +47,9 @@ import (
 	"testing"
 	"time"
 
-	"git.gerwim.nl/gerwim/recarto/internal/app"
-	"git.gerwim.nl/gerwim/recarto/internal/cli"
-	"git.gerwim.nl/gerwim/recarto/internal/clock"
+	"github.com/gerwim/recarto/internal/app"
+	"github.com/gerwim/recarto/internal/cli"
+	"github.com/gerwim/recarto/internal/clock"
 )
 
 // manifest configures one language fixture.

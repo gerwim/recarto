@@ -5,7 +5,7 @@ import (
 	"database/sql"
 	"errors"
 
-	"git.gerwim.nl/gerwim/recarto/internal/store"
+	"github.com/gerwim/recarto/internal/store"
 )
 
 // ImportMemory is a portable memory record from a team snapshot.

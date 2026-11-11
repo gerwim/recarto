@@ -8,9 +8,9 @@ import (
 	"sort"
 	"strings"
 
-	"git.gerwim.nl/gerwim/recarto/internal/clock"
-	"git.gerwim.nl/gerwim/recarto/internal/feedback"
-	"git.gerwim.nl/gerwim/recarto/internal/memory"
+	"github.com/gerwim/recarto/internal/clock"
+	"github.com/gerwim/recarto/internal/feedback"
+	"github.com/gerwim/recarto/internal/memory"
 )
 
 // Feedback dispatches `recarto feedback [list|show|resolve]`. It opens the global

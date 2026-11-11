@@ -6,7 +6,8 @@ import (
 	"io"
 	"os"
 
-	"git.gerwim.nl/gerwim/recarto/internal/app"
+	"github.com/gerwim/recarto/internal/app"
+	"github.com/gerwim/recarto/internal/licenses"
 )
 
 // known reports whether cmd is a CLI command that needs an open App.
@@ -53,6 +54,11 @@ func Run(args []string, out io.Writer) error {
 		return Feedback(context.Background(), out, rest)
 	}
 
+	// licenses prints embedded text: like `version`, it needs no repo, store or network.
+	if cmd == "licenses" {
+		return licenses.Write(out)
+	}
+
 	// server is a standalone daemon: no git repo, no per-repo App — it holds one
 	// store per repo key for whichever repos its clients push/pull.
 	if cmd == "server" {
@@ -85,7 +91,7 @@ func Run(args []string, out io.Writer) error {
 	}
 
 	if !known(cmd) {
-		return fmt.Errorf("unknown command %q (try: init config serve hook status doctor remember forget recall bug feedback memory index graph compact snapshot todo sync server export import repair)", cmd)
+		return fmt.Errorf("unknown command %q (try: init config licenses serve hook status doctor remember forget recall bug feedback memory index graph compact snapshot todo sync server export import repair)", cmd)
 	}
 
 	// Only the long-lived serving process pays for the proactive corruption check
@@ -147,6 +153,7 @@ func usage(w io.Writer) error {
 	fmt.Fprintln(w, "recarto <command>")
 	fmt.Fprintln(w, "  init              configure agents (--agent claude,opencode,copilot  --scope user|repo)")
 	fmt.Fprintln(w, "  config            turn features on or off: interactive in a terminal (or list|enable|disable|path)")
+	fmt.Fprintln(w, "  licenses          print Recarto's licence and the third-party notices")
 	fmt.Fprintln(w, "  serve             run the MCP server over stdio")
 	fmt.Fprintln(w, "  hook <event>      run an agent hook (session-start|post-read|post-edit|augment|stop|shell) [--agent] [--cmd]")
 	fmt.Fprintln(w, "  status            repo id, branch, memory counts, ledger")

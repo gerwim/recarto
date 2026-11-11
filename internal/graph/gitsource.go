@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"git.gerwim.nl/gerwim/recarto/internal/parse"
+	"github.com/gerwim/recarto/internal/parse"
 )
 
 // NewSource returns the best file Source for root: a git-aware source that honors

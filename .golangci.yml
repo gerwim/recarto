@@ -1,0 +1,21 @@
+version: "2"
+
+# Only the linters below: gofmt and go vet already cover formatting and the
+# standard checks. These four look for likely bugs, dead code, complexity and
+# duplication.
+linters:
+  default: none
+  enable:
+    - errcheck    # ignored error returns
+    - ineffassign # assignments that are never read
+    - staticcheck # staticcheck's bug checks
+    - unused      # unused code
+    - gocyclo     # functions that are too complex
+    - dupl        # duplicated code blocks
+  settings:
+    gocyclo:
+      min-complexity: 30
+    dupl:
+      threshold: 150
+  exclusions:
+    generated: lax

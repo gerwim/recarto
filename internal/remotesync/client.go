@@ -12,7 +12,7 @@ import (
 	"strconv"
 	"strings"
 
-	"git.gerwim.nl/gerwim/recarto/internal/syncwire"
+	"github.com/gerwim/recarto/internal/syncwire"
 )
 
 // Client is a thin HTTP client for the sync server's /v1/repos/{key}/changes

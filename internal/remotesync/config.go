@@ -15,7 +15,7 @@ import (
 	"strconv"
 	"time"
 
-	"git.gerwim.nl/gerwim/recarto/internal/features"
+	"github.com/gerwim/recarto/internal/features"
 )
 
 // Config is resolved once per process from the environment.

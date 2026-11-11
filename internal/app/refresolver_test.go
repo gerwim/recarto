@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"git.gerwim.nl/gerwim/recarto/internal/memory"
+	"github.com/gerwim/recarto/internal/memory"
 )
 
 func seedFile(t *testing.T, a *App, worktree, path string) {

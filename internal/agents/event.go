@@ -10,8 +10,8 @@ import (
 	"io"
 	"path/filepath"
 
-	"git.gerwim.nl/gerwim/recarto/internal/app"
-	"git.gerwim.nl/gerwim/recarto/internal/features"
+	"github.com/gerwim/recarto/internal/app"
+	"github.com/gerwim/recarto/internal/features"
 )
 
 // EventKind enumerates the lifecycle events Recarto reacts to.

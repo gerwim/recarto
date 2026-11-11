@@ -9,8 +9,8 @@ import (
 	"strconv"
 	"strings"
 
-	"git.gerwim.nl/gerwim/recarto/internal/ledger"
-	"git.gerwim.nl/gerwim/recarto/internal/store"
+	"github.com/gerwim/recarto/internal/ledger"
+	"github.com/gerwim/recarto/internal/store"
 )
 
 // Compaction tuning. These are policy defaults (not empirically optimized) and

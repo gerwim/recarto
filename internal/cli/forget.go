@@ -6,7 +6,7 @@ import (
 	"io"
 	"strings"
 
-	"git.gerwim.nl/gerwim/recarto/internal/app"
+	"github.com/gerwim/recarto/internal/app"
 )
 
 // Forget hard-deletes a memory by id — the CLI counterpart of the forget_memory

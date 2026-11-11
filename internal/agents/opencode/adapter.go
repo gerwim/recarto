@@ -10,8 +10,8 @@ import (
 	"encoding/json"
 	"io"
 
-	"git.gerwim.nl/gerwim/recarto/internal/agents"
-	"git.gerwim.nl/gerwim/recarto/internal/app"
+	"github.com/gerwim/recarto/internal/agents"
+	"github.com/gerwim/recarto/internal/app"
 )
 
 // Adapter translates the neutral JSON the generated plugin sends/receives to and

@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"git.gerwim.nl/gerwim/recarto/internal/agents"
+	"github.com/gerwim/recarto/internal/agents"
 )
 
 func TestDecodeNeutral(t *testing.T) {

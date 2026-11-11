@@ -7,8 +7,8 @@ import (
 	"sort"
 	"strings"
 
-	"git.gerwim.nl/gerwim/recarto/internal/embedding"
-	"git.gerwim.nl/gerwim/recarto/internal/store"
+	"github.com/gerwim/recarto/internal/embedding"
+	"github.com/gerwim/recarto/internal/store"
 )
 
 // Embedder turns text into an L2-normalized vector. ID identifies the vector

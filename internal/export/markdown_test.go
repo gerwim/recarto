@@ -3,7 +3,7 @@ package export
 import (
 	"testing"
 
-	"git.gerwim.nl/gerwim/recarto/internal/memory"
+	"github.com/gerwim/recarto/internal/memory"
 )
 
 func TestRenderGolden(t *testing.T) {

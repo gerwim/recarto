@@ -10,7 +10,7 @@ import (
 	"strconv"
 	"testing"
 
-	"git.gerwim.nl/gerwim/recarto/internal/syncwire"
+	"github.com/gerwim/recarto/internal/syncwire"
 )
 
 func testServer(t *testing.T, key string) (*http.Client, string) {

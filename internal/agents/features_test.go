@@ -10,11 +10,11 @@ import (
 	"testing"
 	"time"
 
-	"git.gerwim.nl/gerwim/recarto/internal/app"
-	"git.gerwim.nl/gerwim/recarto/internal/clock"
-	"git.gerwim.nl/gerwim/recarto/internal/features"
-	"git.gerwim.nl/gerwim/recarto/internal/graph"
-	"git.gerwim.nl/gerwim/recarto/internal/memory"
+	"github.com/gerwim/recarto/internal/app"
+	"github.com/gerwim/recarto/internal/clock"
+	"github.com/gerwim/recarto/internal/features"
+	"github.com/gerwim/recarto/internal/graph"
+	"github.com/gerwim/recarto/internal/memory"
 )
 
 // off returns a Set with fs switched off.

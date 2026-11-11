@@ -4,7 +4,7 @@ import (
 	"context"
 	"strings"
 
-	"git.gerwim.nl/gerwim/recarto/internal/store"
+	"github.com/gerwim/recarto/internal/store"
 )
 
 // LexResult is one lexical match: a memory id and a normalized score in [0,1]

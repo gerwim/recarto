@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"git.gerwim.nl/gerwim/recarto/internal/features"
+	"github.com/gerwim/recarto/internal/features"
 )
 
 // Delimiters bounding recarto's managed block inside an instructions file, so a

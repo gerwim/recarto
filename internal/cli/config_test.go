@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"git.gerwim.nl/gerwim/recarto/internal/features"
+	"github.com/gerwim/recarto/internal/features"
 )
 
 // useConfig points RECARTO_CONFIG at a fresh path holding content ("" for no file).
