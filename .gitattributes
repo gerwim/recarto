@@ -1,1 +1,2 @@
 internal/embedding/assets/* binary
+internal/licenses/*.txt -text

@@ -2,6 +2,8 @@
   // internal/parse links tree-sitter through CGO, which needs a C compiler.
   "setup": {"run": "apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq gcc libc6-dev"},
   "commands": [
+    {"name": "Secret scan", "run": "sh ci/secret-scan.sh"},
+    {"name": "Code quality: Go", "run": "golangci-lint run --output.sarif.path=artifacts/golangci.sarif ./...", "report": "artifacts/golangci.sarif"},
     {"name": "Build", "run": "go build ./..."},
     {"name": "Vet", "run": "go vet ./..."},
     {"name": "Unit tests", "run": "go test ./...", "timeoutMinutes": 30}

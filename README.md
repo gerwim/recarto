@@ -2,6 +2,8 @@
 
 **Cross-session memory and a code graph for AI coding agents — one static binary.**
 
+**AI-generated.** Recarto's code is written by AI coding agents, orchestrated with [Kanship](https://kanship.com).
+
 Recarto gives your coding agent a persistent brain: it remembers preferences,
 learnings, decisions, do-not-repeats and bugs across sessions, and it indexes your
 codebase into a tree-sitter symbol/call graph. Both are exposed as **MCP tools** and
@@ -51,19 +53,23 @@ Recarto is a single self-contained binary (no runtime dependencies).
 
 ### Download a prebuilt binary
 
-Grab the binary for your platform from the
-[releases page](https://git.gerwim.nl/gerwim/recarto/-/releases), then put it on your
-`PATH`:
+Prebuilt binaries are published on <https://releases.gerwim.com/recarto/>:
 
 | Platform | File |
 |---|---|
-| **Linux x64** | `recarto` (linux-amd64, static musl) |
-| **Windows x64** | `recarto.exe` (windows-amd64) |
-| **macOS (Apple Silicon)** | `recarto` (darwin-arm64) |
+| **Linux x64** | `recarto-linux-amd64` (static musl) |
+| **Windows x64** | `recarto-windows-amd64.exe` |
 
-**Linux / macOS**
+On any other platform, [build from source](#build-from-source).
+
+[`index.json`](https://releases.gerwim.com/recarto/index.json) lists every version
+(`latest` is the newest) with each file's sha256.
+
+**Linux**
 
 ```sh
+curl -fLo recarto https://releases.gerwim.com/recarto/<version>/recarto-linux-amd64
+echo "<sha256 from index.json>  recarto" | sha256sum -c -
 chmod +x recarto
 sudo mv recarto /usr/local/bin/recarto      # or anywhere on your PATH
 recarto version
@@ -72,6 +78,8 @@ recarto version
 **Windows (PowerShell)**
 
 ```powershell
+Invoke-WebRequest https://releases.gerwim.com/recarto/<version>/recarto-windows-amd64.exe -OutFile recarto.exe
+(Get-FileHash .\recarto.exe -Algorithm SHA256).Hash   # must equal the sha256 in index.json
 # Move recarto.exe to a folder on your PATH, e.g. %USERPROFILE%\bin
 mkdir $HOME\bin -Force
 Move-Item .\recarto.exe $HOME\bin\
@@ -81,11 +89,11 @@ recarto version
 
 ### Build from source
 
-Requires **Go 1.26.4**. Recarto links tree-sitter via CGO, so a C toolchain is
-needed.
+Requires **Go 1.26.4 or later** and a C compiler. Recarto links tree-sitter via
+CGO, so a C toolchain is needed.
 
 ```sh
-git clone https://git.gerwim.nl/gerwim/recarto.git
+git clone https://github.com/gerwim/recarto.git
 cd recarto
 
 # Host build (uses your system C compiler — best on macOS for the darwin binary):
@@ -97,6 +105,16 @@ make windows           # → releases/windows-amd64/recarto.exe
 make darwin            # → releases/darwin-arm64/recarto   (see note below)
 make all               # linux + windows + darwin
 ```
+
+Or install straight to your `GOPATH/bin`; this also needs a C compiler:
+
+```sh
+go install github.com/gerwim/recarto/cmd/recarto@latest
+```
+
+Release tags have no `v` prefix, so Go resolves `@latest` to the newest commit on
+`master`, and that binary reports a development version (`0.1.0-dev`). Run
+`recarto update` to replace it with the latest signed release.
 
 `zig` is used only as a cross-compiler (`zig cc`) and is never shipped. Install it
 from <https://ziglang.org/download/> (or `brew install zig`).
@@ -129,11 +147,11 @@ it. Development builds (non-release versions) are always offered the latest rele
 ### Releasing
 
 Tag a commit (`git tag X.Y.Z && git push origin X.Y.Z`). GitLab CI cross-compiles the
-three targets (darwin via an osxcross builder image), computes sha256s, merges
-`index.json`, signs it with minisign, and uploads the binaries + manifest + signature
-to the Cloudflare R2 bucket behind `releases.gerwim.com`. The minisign secret key and
-R2 credentials live only in masked CI variables; the minisign **public** key is
-committed (`internal/update/pubkey.go`) and embedded in the binary.
+Linux and Windows binaries, computes sha256s, merges `index.json`, signs it with
+minisign, and uploads the binaries + manifest + signature to the Cloudflare R2 bucket
+behind `releases.gerwim.com`. The minisign secret key and R2 credentials live only in
+masked CI variables; the minisign **public** key is committed
+(`internal/update/pubkey.go`) and embedded in the binary.
 
 The one-time setup — extracting the macOS SDK, building/pushing the builder image,
 the Cloudflare R2 bucket, and the exact GitLab CI/CD variables — is documented in
@@ -188,6 +206,7 @@ hooks fire automatically. The CLI is available for inspection and scripting:
 
 ```
 recarto config            turn features on or off (interactive; or list|enable|disable|path)
+recarto licenses          print Recarto's licence and the third-party notices
 recarto status            repo id, branch, memory counts, ledger
 recarto doctor            health checks (db, WAL, integrity, git)
 recarto remember <kind>   record a memory (--title --body --files --symbols --tags --pin --global)
@@ -543,11 +562,6 @@ docker network create proxy   # once, unless your proxy already has a network to
 docker compose up -d --build
 ```
 
-Every release tag also publishes a prebuilt image to the GitLab registry at
-`reg.gerwim.nl/gerwim/recarto/sync:latest` (and `:X.Y.Z` for a pinned version), so you
-can skip the local build: `docker login reg.gerwim.nl`, set `image:` in
-`docker-compose.yml` instead of `build:`, then `docker compose up -d`.
-
 Then point every client machine at the proxied URL, same as any other server (§ above):
 
 ```sh
@@ -657,3 +671,20 @@ make fmt      # gofmt -l .
 
 CI runs the suite on Linux, macOS and Windows, gofmt-checks every file, and
 cross-compiles all three release targets with `zig cc`.
+
+## Contributing
+
+Issues and pull requests are welcome on [GitHub](https://github.com/gerwim/recarto),
+and contributions are accepted under the MIT licence. GitHub is a mirror of the main
+repository: accepted changes are applied there and reach GitHub through the mirror.
+See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Security
+
+Report vulnerabilities privately, as described in [SECURITY.md](SECURITY.md).
+
+## Licence
+
+Recarto is released under the [MIT licence](LICENSE). The binary also contains
+third-party code and the potion-base-8M model, each under its own licence;
+`recarto licenses` prints all of them.
