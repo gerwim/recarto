@@ -95,6 +95,16 @@ console.log(JSON.stringify({
 }));
 `
 
+// TestPluginHidesWindowsConsole checks the shared launcher without Node or a
+// POSIX shell, so the console-window regression is covered on Windows too.
+func TestPluginHidesWindowsConsole(t *testing.T) {
+	js := pluginJS("recarto")
+	const launcher = `spawn(BIN, ["hook", event, "--agent", "opencode"], { cwd, stdio: ["pipe", "pipe", "ignore"], windowsHide: true })`
+	if !strings.Contains(js, launcher) {
+		t.Fatal("generated hook launcher must pass windowsHide: true to spawn")
+	}
+}
+
 // TestPluginRunsUnderNode executes the generated plugin (as OpenCode's JS runtime
 // would) against a stub recarto, covering both plugin APIs end to end.
 func TestPluginRunsUnderNode(t *testing.T) {
