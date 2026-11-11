@@ -32,7 +32,7 @@ const run = (cwd, event, payload) =>
   new Promise((done) => {
     let out = "";
     try {
-      const child = spawn(BIN, ["hook", event, "--agent", "opencode"], { cwd, stdio: ["pipe", "pipe", "ignore"] });
+      const child = spawn(BIN, ["hook", event, "--agent", "opencode"], { cwd, stdio: ["pipe", "pipe", "ignore"], windowsHide: true });
       const timer = setTimeout(() => child.kill(), 60000);
       child.stdout.on("data", (d) => (out += d));
       child.stdin.on("error", () => {});
