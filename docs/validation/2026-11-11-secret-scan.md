@@ -28,10 +28,11 @@ the merge diff of `1d47011`; that is one false positive, not a second finding.
 
 ## Re-run
 
-The commands above with `CFG="$PWD/.gitleaks.toml"` (absolute, because the tree scan
-runs inside the archive) report no leaks:
+Run these from the repository root; they report no leaks:
 
 ```sh
+CFG="$PWD/.gitleaks.toml"
+T=$(mktemp -d)
 git archive efe61c8 | tar -x -C "$T"
 (cd "$T" && gitleaks dir -c "$CFG" --redact --no-banner .)
 gitleaks git -c "$CFG" --redact --no-banner --log-opts="--all --full-history -m" .
