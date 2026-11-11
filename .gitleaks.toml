@@ -1,0 +1,19 @@
+# Rules for the secret-scan check (ci/secret-scan.sh).
+# Scan report: docs/validation/2026-11-11-secret-scan.md
+
+[extend]
+useDefault = true
+
+# gitleaks has no rule for minisign keys; this one signs the manifest `recarto update` trusts.
+[[rules]]
+id = "minisign-secret-key"
+description = "minisign secret key"
+regex = '''RW(?:RTY0Iy|QAAEIy)[A-Za-z0-9+/]{100,}={0,2}'''
+keywords = ["RWRTY0Iy", "RWQAAEIy"]
+
+[[allowlists]]
+description = "tokenSHA is the SHA-256 checksum of the pinned potion-base-8M tokenizer.json, not a credential"
+condition = "AND"
+paths = ['''^tools/embedgen/main\.go$''']
+regexTarget = "line"
+regexes = ['''tokenSHA\s*=\s*"[0-9a-f]{64}"''']
