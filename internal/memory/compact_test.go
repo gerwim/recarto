@@ -337,7 +337,9 @@ func TestCompactDryRunDoesNotWrite(t *testing.T) {
 	ctx := context.Background()
 	// Seed a superseded row.
 	oldID, _, _, _ := e.Record(ctx, NewMemory{Kind: KindDecision, Body: "old decision text here"})
-	e.Record(ctx, NewMemory{Kind: KindDecision, Body: "a wholly different decision now", SupersedesID: oldID})
+	if _, _, _, err := e.Record(ctx, NewMemory{Kind: KindDecision, Body: "a wholly different decision now", SupersedesID: oldID}); err != nil {
+		t.Fatal(err)
+	}
 
 	before, _ := e.Epoch(ctx)
 	rep, err := e.Compact(ctx, CompactOptions{Force: true, DryRun: true})
