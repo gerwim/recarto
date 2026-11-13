@@ -57,7 +57,11 @@ func readArchiveEntries(t *testing.T, path string) []syncwire.ExportEntry {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer gzr.Close()
+	defer func() {
+		if err := gzr.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
 	raw, err := io.ReadAll(gzr)
 	if err != nil {
 		t.Fatal(err)

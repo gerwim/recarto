@@ -61,13 +61,13 @@ func (c *Client) do(req *http.Request) (*http.Response, error) {
 		return nil, err
 	}
 	if resp.StatusCode != http.StatusOK {
-		defer resp.Body.Close()
+		_ = resp.Body.Close() // the failed status is the error to report
 		return nil, fmt.Errorf("recarto sync: %s %s: %s", req.Method, req.URL.Path, resp.Status)
 	}
 	if resp.Header.Get("Content-Encoding") == "gzip" {
 		gzr, err := gzip.NewReader(resp.Body)
 		if err != nil {
-			resp.Body.Close()
+			_ = resp.Body.Close() // the gzip error is the one to report
 			return nil, err
 		}
 		resp.Body = gzipRespBody{gz: gzr, underlying: resp.Body}
