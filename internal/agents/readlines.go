@@ -60,7 +60,7 @@ func readBefore(ctx context.Context, a *app.App, scope, file string, first, last
 	}
 	// shortcut: size+mtime misses a same-size rewrite within one mtime tick on a
 	// coarse-mtime filesystem; switch to a content hash if that ever matters.
-	prefix := fmt.Sprintf("lines:%s@%d.%d:", file, info.Size(), info.ModTime().UnixNano())
+	prefix := fmt.Sprintf("%s%s@%d.%d:", readMetric, file, info.Size(), info.ModTime().UnixNano())
 	earlier, err := a.Ledger.Metrics(ctx, scope, prefix)
 	if err != nil {
 		return false, err

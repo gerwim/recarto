@@ -131,3 +131,24 @@ func TestClaimOnce(t *testing.T) {
 		t.Errorf("claim in another scope = %v, %v; want true", other, err)
 	}
 }
+
+func TestDeleteByPrefix(t *testing.T) {
+	l := New(newStore(t))
+	ctx := context.Background()
+	for _, c := range [][2]string{{"s", "lines:/a:1-5"}, {"s", "surfaced:m1"}, {"s", "large_read_nudged"}, {"t", "lines:/a:1-5"}} {
+		if err := l.Incr(ctx, c[0], c[1], 1); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := l.Delete(ctx, "s", "lines:", "surfaced:"); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		scope, metric string
+		want          int64
+	}{{"s", "lines:/a:1-5", 0}, {"s", "surfaced:m1", 0}, {"s", "large_read_nudged", 1}, {"t", "lines:/a:1-5", 1}} {
+		if got, err := l.Get(ctx, c.scope, c.metric); err != nil || got != c.want {
+			t.Errorf("%s %s = %d, %v; want %d", c.scope, c.metric, got, err, c.want)
+		}
+	}
+}

@@ -29,9 +29,13 @@ const (
 // Event is the agent-neutral hook input. Adapters populate the fields relevant to
 // the Kind; unused fields stay zero.
 type Event struct {
-	Kind       EventKind
-	Agent      string // sessions.agent: "claude-code" | "opencode" | "copilot"
-	SessionID  string
+	Kind      EventKind
+	Agent     string // sessions.agent: "claude-code" | "opencode" | "copilot"
+	SessionID string
+	// AgentID names the conversation within the session the hook fired in when
+	// the host runs several under one session id (a Claude Code subagent's
+	// agent_id); "" for the session's main conversation.
+	AgentID    string
 	Source     string
 	FilePath   string // absolute path (PostRead/PostEdit)
 	Pattern    string // grep/glob query (Augment)
