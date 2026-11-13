@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -74,49 +75,157 @@ func TestHandleStopNudgesFeedback(t *testing.T) {
 	}
 }
 
-func TestHandlePostReadWarnsOnRepeat(t *testing.T) {
-	a := newTestApp(t, "main")
-	ctx := context.Background()
-	ev := Event{Kind: KindPostRead, Agent: "claude-code", SessionID: "s1", FilePath: "internal/store/store.go", ToolResult: "package store"}
-
-	first, err := Handle(ctx, a, ev)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(first.Context, "already read") {
-		t.Errorf("first read should not warn:\n%s", first.Context)
-	}
-	second, err := Handle(ctx, a, ev)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(second.Context, "already read") {
-		t.Errorf("second read should warn:\n%s", second.Context)
-	}
-}
-
 // largeReadResult returns a tool-result string whose estimated token count is
 // safely above the large-read nudge threshold.
 func largeReadResult() string { return strings.Repeat("abcd ", 4000) } // ~5263 tokens
 
-func TestHandlePostReadNudgesGraphForLargeIndexedFile(t *testing.T) {
-	a := newTestApp(t, "main")
+// writeLines writes an n-line Go file (one func, then comments) into dir and
+// returns its absolute path and content.
+func writeLines(t *testing.T, dir, name string, n int) (string, []byte) {
+	t.Helper()
+	var b strings.Builder
+	b.WriteString("package p\nfunc Alpha() {}\n")
+	for i := 3; i <= n; i++ {
+		fmt.Fprintf(&b, "// line %d\n", i)
+	}
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, []byte(b.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path, []byte(b.String())
+}
+
+func TestPostReadRepeatNotice(t *testing.T) {
+	a, dir := newTreeApp(t)
 	ctx := context.Background()
-	wt := a.Git.Worktree
-	src := []byte("package p\n\nfunc Alpha() {}\n\nfunc Beta() int { return 1 }\n\nfunc Gamma() {}\n")
-	if err := a.Graph.IndexFile(ctx, wt, "big.go", src, 1, int64(len(src))); err != nil {
-		t.Fatal(err)
+	big, _ := writeLines(t, dir, "big.go", 3000)
+	// A step is a read (ranged, first, last; want = expect the notice) or, with
+	// change set, a rewrite of big.go to a new mtime.
+	type step struct {
+		change      bool
+		ranged      bool
+		first, last int
+		want        bool
+		wantText    string
 	}
-	ev := Event{Kind: KindPostRead, Agent: "claude-code", SessionID: "s1", FilePath: wt + "/big.go", ToolResult: largeReadResult()}
-	res, err := Handle(ctx, a, ev)
-	if err != nil {
-		t.Fatal(err)
+	read := func(ranged bool, first, last int, want bool) step {
+		return step{ranged: ranged, first: first, last: last, want: want}
 	}
-	if !strings.Contains(res.Context, "get_file_outline") || !strings.Contains(res.Context, "get_code_snippet") {
-		t.Errorf("expected graph-navigation nudge for a large indexed file:\n%s", res.Context)
+	changed := 0
+	cases := map[string][]step{
+		"disjoint ranges":    {read(true, 100, 149, false), read(true, 2000, 2049, false), read(true, 900, 949, false)},
+		"same range twice":   {read(true, 100, 149, false), {ranged: true, first: 100, last: 149, want: true, wantText: "lines 100-149 of big.go"}},
+		"whole then part":    {read(false, 1, 3000, false), read(true, 100, 149, true)},
+		"part then whole":    {read(true, 1, 100, false), read(false, 1, 3000, false)},
+		"changed in between": {read(false, 1, 3000, false), {change: true}, read(false, 1, 3000, false), {first: 1, last: 3000, want: true, wantText: "all of big.go"}},
+		"adjacent union":     {read(true, 1, 50, false), read(true, 51, 100, false), read(true, 40, 60, true)},
+		"unknown lines":      {read(false, 1, 3000, false), read(true, 0, 0, false)},
 	}
-	if n, _ := a.Ledger.Get(ctx, "lifetime", "large_reads_nudged"); n != 1 {
-		t.Errorf("large_reads_nudged = %d, want 1", n)
+	notices := int64(0)
+	for name, steps := range cases {
+		for i, st := range steps {
+			if st.change {
+				changed++
+				// Same lines (so "whole" still means 1-3000), at a distinct fixed mtime.
+				writeLines(t, dir, "big.go", 3000)
+				mt := time.Unix(1_600_000_000+int64(changed), 0)
+				if err := os.Chtimes(big, mt, mt); err != nil {
+					t.Fatal(err)
+				}
+				continue
+			}
+			res, err := Handle(ctx, a, Event{Kind: KindPostRead, Agent: "claude-code", SessionID: name, FilePath: big,
+				ReadRanged: st.ranged, ReadFirst: st.first, ReadLast: st.last, ToolResult: "x"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := strings.Contains(res.Context, "you already have")
+			if got != st.want {
+				t.Errorf("%s step %d: notice = %v, want %v:\n%s", name, i, got, st.want, res.Context)
+			}
+			if got {
+				notices++
+				if !strings.Contains(res.Context, st.wantText) {
+					t.Errorf("%s step %d: notice lacks %q:\n%s", name, i, st.wantText, res.Context)
+				}
+			}
+			if st.wantText == "all of big.go" && strings.Contains(res.Context, "lines ") {
+				t.Errorf("%s step %d: a whole-file notice names lines:\n%s", name, i, res.Context)
+			}
+		}
+	}
+	if n, _ := a.Ledger.Get(ctx, "lifetime", "repeated_reads_blocked"); n != notices {
+		t.Errorf("repeated_reads_blocked = %d, want %d", n, notices)
+	}
+}
+
+func TestPostReadLargeNudge(t *testing.T) {
+	a, dir := newTreeApp(t)
+	ctx := context.Background()
+	big, src := writeLines(t, dir, "big.go", 3000)
+	big2, src2 := writeLines(t, dir, "big2.go", 3000)
+	for rel, b := range map[string][]byte{"big.go": src, "big2.go": src2} {
+		if err := a.Graph.IndexFile(ctx, dir, rel, b, 1, int64(len(b))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	nudge := func(session, file string, ranged bool, first, last int) bool {
+		t.Helper()
+		res, err := Handle(ctx, a, Event{Kind: KindPostRead, Agent: "claude-code", SessionID: session, FilePath: file,
+			ReadRanged: ranged, ReadFirst: first, ReadLast: last, ToolResult: largeReadResult()})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return strings.Contains(res.Context, "get_file_outline")
+	}
+	if nudge("a", big, true, 100, 149) {
+		t.Error("a partial ranged read got the nudge")
+	}
+	if !nudge("b", big, false, 1, 2000) {
+		t.Error("a read with no range (cut by the host) got no nudge")
+	}
+	if !nudge("c", big, true, 1, 3000) {
+		t.Error("a ranged read covering the whole file got no nudge")
+	}
+	if !nudge("d", big, false, 1, 3000) {
+		t.Error("the session's first whole-file read got no nudge")
+	}
+	if nudge("d", big2, false, 1, 3000) {
+		t.Error("a second file in the same session got the nudge again")
+	}
+	before, _ := a.Ledger.Get(ctx, "lifetime", "large_reads_nudged")
+
+	var wg sync.WaitGroup
+	got := make([]bool, 8)
+	errs := make([]error, 8)
+	for i := range got {
+		file := big
+		if i%2 == 1 {
+			file = big2
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			res, err := Handle(ctx, a, Event{Kind: KindPostRead, Agent: "claude-code", SessionID: "e", FilePath: file,
+				ToolResult: largeReadResult()})
+			got[i], errs[i] = strings.Contains(res.Context, "get_file_outline"), err
+		}()
+	}
+	wg.Wait()
+	won := 0
+	for i := range got {
+		if errs[i] != nil {
+			t.Fatal(errs[i])
+		}
+		if got[i] {
+			won++
+		}
+	}
+	if won != 1 {
+		t.Errorf("%d competing reads got the nudge, want 1", won)
+	}
+	if n, _ := a.Ledger.Get(ctx, "lifetime", "large_reads_nudged"); n != 4 || n != before+1 {
+		t.Errorf("large_reads_nudged = %d (before the race %d), want 4", n, before)
 	}
 }
 
@@ -151,35 +260,6 @@ func TestHandlePostReadNoGraphNudgeForUnindexedFile(t *testing.T) {
 	}
 	if strings.Contains(res.Context, "get_file_outline") {
 		t.Errorf("unindexed file should not trigger the graph nudge:\n%s", res.Context)
-	}
-}
-
-func TestHandlePostReadGraphNudgeOncePerFile(t *testing.T) {
-	a := newTestApp(t, "main")
-	ctx := context.Background()
-	wt := a.Git.Worktree
-	src := []byte("package p\n\nfunc Alpha() {}\n\nfunc Beta() {}\n")
-	if err := a.Graph.IndexFile(ctx, wt, "big.go", src, 1, int64(len(src))); err != nil {
-		t.Fatal(err)
-	}
-	ev := Event{Kind: KindPostRead, Agent: "claude-code", SessionID: "s1", FilePath: wt + "/big.go", ToolResult: largeReadResult()}
-	if _, err := Handle(ctx, a, ev); err != nil {
-		t.Fatal(err)
-	}
-	// The second read of the same file gets the stronger repeated-read warning and
-	// must not also re-inject the (now-redundant) graph nudge.
-	second, err := Handle(ctx, a, ev)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(second.Context, "already read") {
-		t.Errorf("repeat read should warn:\n%s", second.Context)
-	}
-	if strings.Contains(second.Context, "get_file_outline") {
-		t.Errorf("repeat read should not re-inject the graph nudge:\n%s", second.Context)
-	}
-	if n, _ := a.Ledger.Get(ctx, "lifetime", "large_reads_nudged"); n != 1 {
-		t.Errorf("large_reads_nudged = %d, want 1 (nudge once per file)", n)
 	}
 }
 

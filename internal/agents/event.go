@@ -48,6 +48,11 @@ type Event struct {
 	// and the absolute paths of the files it prints (Shell).
 	Patterns []string
 	Files    []string
+	// ReadRanged reports that the agent asked a read for a line range.
+	// ReadFirst..ReadLast are the 1-based lines the read returned; both are 0
+	// when the host did not say (PostRead).
+	ReadRanged          bool
+	ReadFirst, ReadLast int
 }
 
 // Result is the agent-neutral hook output. Context is injected as the host's

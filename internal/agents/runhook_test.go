@@ -142,7 +142,7 @@ func TestRunHookHandlerErrorWritesNothing(t *testing.T) {
 		ev  Event
 	}{
 		{ctx, Event{Kind: KindPostEdit, SessionID: "s", FilePath: file}},
-		{cancelled, Event{Kind: KindPostRead, SessionID: "s", FilePath: file}},
+		{cancelled, Event{Kind: KindPostRead, SessionID: "s", FilePath: file, ReadFirst: 1, ReadLast: 3}},
 	} {
 		var out bytes.Buffer
 		if err := RunHook(c.ctx, Opened(a), fixedAdapter{c.ev}, c.ev.Kind, strings.NewReader(""), &out); err == nil || out.Len() != 0 {

@@ -87,3 +87,22 @@ func TestJSStringEscapesWindowsPath(t *testing.T) {
 		t.Errorf("jsString = %s", got)
 	}
 }
+
+func TestDecodeRead(t *testing.T) {
+	for name, c := range map[string]struct {
+		payload     string
+		ranged      bool
+		first, last int
+	}{
+		"opencode 2": {`{"file_path":"/x.go","offset":10,"limit":3,"tool_result":"Read file x.go, lines 10-12\n10: a\n11: \n12: c\n\n[Output truncated. Continue reading with offset: 13]"}`, true, 10, 12},
+		"opencode 1": {`{"file_path":"/x.go","tool_result":"<path>/x.go</path>\n<type>file</type>\n<content>\n1: x\n2: y\n\n(End of file - total 2 lines)\n</content>"}`, false, 1, 2},
+	} {
+		ev, err := Adapter{}.Decode(agents.KindPostRead, strings.NewReader(c.payload))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ev.ReadRanged != c.ranged || ev.ReadFirst != c.first || ev.ReadLast != c.last {
+			t.Errorf("%s: ranged %v lines %d-%d, want %v %d-%d", name, ev.ReadRanged, ev.ReadFirst, ev.ReadLast, c.ranged, c.first, c.last)
+		}
+	}
+}

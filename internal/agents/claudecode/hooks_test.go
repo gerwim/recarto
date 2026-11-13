@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -114,26 +116,32 @@ func TestSessionStartInjectsRecallAndOpensSession(t *testing.T) {
 func TestPostReadWarnsOnRepeat(t *testing.T) {
 	a := newTestApp(t, "main")
 	ctx := context.Background()
-	payload := `{"session_id":"sess-1","tool_name":"Read","tool_input":{"file_path":"internal/store/store.go"},"tool_result":"package store // ..."}`
-
-	var first bytes.Buffer
-	if err := PostRead(ctx, a, strings.NewReader(payload), &first); err != nil {
+	file := filepath.Join(t.TempDir(), "f.go")
+	if err := os.WriteFile(file, []byte(strings.Repeat("x\n", 200)), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(first.String(), "already read") {
-		t.Errorf("first read should not warn:\n%s", first.String())
+	payload := func(resp string) io.Reader {
+		return strings.NewReader(fmt.Sprintf(`{"session_id":"sess-1","tool_name":"Read",`+
+			`"tool_input":{"file_path":%q,"offset":100,"limit":50},"tool_response":%s}`, file, resp))
 	}
-
-	var second bytes.Buffer
-	if err := PostRead(ctx, a, strings.NewReader(payload), &second); err != nil {
-		t.Fatal(err)
+	text := fmt.Sprintf(`{"type":"text","file":{"filePath":%q,"content":"x","numLines":50,"startLine":100,"totalLines":200}}`, file)
+	for i, c := range []struct {
+		resp string
+		want bool
+	}{
+		{text, false},
+		{text, true}, // Claude Code with its own dedup off returns the lines again
+		{fmt.Sprintf(`{"type":"file_unchanged","file":{"filePath":%q}}`, file), false},
+	} {
+		var out bytes.Buffer
+		if err := PostRead(ctx, a, payload(c.resp), &out); err != nil {
+			t.Fatal(err)
+		}
+		if got := strings.Contains(out.String(), "you already have lines 100-149"); got != c.want {
+			t.Errorf("read %d: notice = %v, want %v:\n%s", i+1, got, c.want, out.String())
+		}
 	}
-	if !strings.Contains(second.String(), "already read") {
-		t.Errorf("second read should warn:\n%s", second.String())
-	}
-
-	n, _ := a.Ledger.Get(ctx, "lifetime", "repeated_reads_blocked")
-	if n != 1 {
+	if n, _ := a.Ledger.Get(ctx, "lifetime", "repeated_reads_blocked"); n != 1 {
 		t.Errorf("repeated_reads_blocked = %d, want 1", n)
 	}
 }
@@ -252,14 +260,31 @@ func TestAdapterDecodePostEditFilePath(t *testing.T) {
 // Claude Code reports a tool's output as tool_response; the read ledger sizes
 // reads from it (repeated-read cost, large-read nudge).
 func TestAdapterDecodeToolResponse(t *testing.T) {
-	in := strings.NewReader(`{"session_id":"s","tool_name":"Read","tool_input":{"file_path":"/x/y.go"},` +
-		`"tool_response":{"type":"text","file":{"filePath":"/x/y.go","content":"package y"}}}`)
-	ev, err := Adapter{}.Decode(agents.KindPostRead, in)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(ev.ToolResult, "package y") {
-		t.Errorf("ToolResult = %q, want the tool_response content", ev.ToolResult)
+	for name, c := range map[string]struct {
+		input, resp string
+		ranged      bool
+		first, last int
+	}{
+		"ranged":      {`"offset":100,"limit":50`, `{"type":"text","file":{"filePath":"/x/y.go","content":"package y","numLines":50,"startLine":100,"totalLines":200}}`, true, 100, 149},
+		"whole":       {``, `{"type":"text","file":{"filePath":"/x/y.go","content":"package y","numLines":41,"startLine":1,"totalLines":41}}`, false, 1, 41},
+		"unchanged":   {`"offset":100,"limit":50`, `{"type":"file_unchanged","file":{"filePath":"/x/y.go"}}`, true, 0, 0},
+		"offset zero": {`"offset":0`, `{"type":"text","file":{"filePath":"/x/y.go","content":"package y","numLines":3,"startLine":0,"totalLines":3}}`, true, 1, 3},
+	} {
+		input := `"file_path":"/x/y.go"`
+		if c.input != "" {
+			input += "," + c.input
+		}
+		in := strings.NewReader(`{"session_id":"s","tool_name":"Read","tool_input":{` + input + `},"tool_response":` + c.resp + `}`)
+		ev, err := Adapter{}.Decode(agents.KindPostRead, in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ev.ReadRanged != c.ranged || ev.ReadFirst != c.first || ev.ReadLast != c.last {
+			t.Errorf("%s: ranged %v lines %d-%d, want %v %d-%d", name, ev.ReadRanged, ev.ReadFirst, ev.ReadLast, c.ranged, c.first, c.last)
+		}
+		if c.first != 0 && !strings.Contains(ev.ToolResult, "package y") {
+			t.Errorf("%s: ToolResult = %q, want the tool_response content", name, ev.ToolResult)
+		}
 	}
 }
 

@@ -1,6 +1,8 @@
 package copilot
 
 import (
+	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -113,5 +115,31 @@ func TestDecodeAcceptsStringToolArgs(t *testing.T) {
 	}
 	if ev.FilePath != "/a/b.go" {
 		t.Errorf("path = %q from a JSON-string toolArgs", ev.FilePath)
+	}
+}
+
+func TestDecodeViewLines(t *testing.T) {
+	result := `"toolResult":{"resultType":"success","textResultForLlm":"100. a\n101. b\n149. z"}`
+	lines := make([]string, 0, 50)
+	for i := 100; i <= 149; i++ {
+		lines = append(lines, fmt.Sprintf("%d. x", i))
+	}
+	full, _ := json.Marshal(map[string]any{"resultType": "success", "textResultForLlm": strings.Join(lines, "\n")})
+	for name, c := range map[string]struct {
+		payload     string
+		ranged      bool
+		first, last int
+	}{
+		"view_range":  {`{"toolName":"view","toolArgs":{"path":"/a.go","view_range":[100,149]},"toolResult":` + string(full) + `}`, true, 100, 149},
+		"whole file":  {`{"toolName":"view","toolArgs":{"path":"/a.go"},` + result + `}`, false, 100, 101},
+		"string args": {`{"toolName":"view","toolArgs":"{\"path\":\"/a.go\",\"view_range\":[2,3]}"}`, true, 0, 0},
+	} {
+		ev, err := Adapter{}.Decode(agents.KindPostRead, strings.NewReader(c.payload))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ev.ReadRanged != c.ranged || ev.ReadFirst != c.first || ev.ReadLast != c.last {
+			t.Errorf("%s: ranged %v lines %d-%d, want %v %d-%d", name, ev.ReadRanged, ev.ReadFirst, ev.ReadLast, c.ranged, c.first, c.last)
+		}
 	}
 }

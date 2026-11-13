@@ -354,8 +354,12 @@ func dedupSurfaced(ctx context.Context, a *app.App, sessionID string, recs []*me
 	return out
 }
 
-// handlePostRead logs the read to the ledger and warns (non-blocking) when the same
-// file has already been read this session, plus surfaces any prior bug tied to it.
+// handlePostRead logs the read to the ledger and adds, besides the notes
+// anchored to the file, at most two advisory notices. The repeat-read notice
+// fires when earlier reads in this session returned every line this one did and
+// the file has not changed since; a read whose lines are unknown gets none. The
+// large-file nudge fires once per session, on a large whole-file read of a file
+// with indexed symbols; a read of part of a file never gets it.
 func handlePostRead(ctx context.Context, a *app.App, ev Event) (Result, error) {
 	file := ev.FilePath
 	if file == "" {
@@ -366,19 +370,7 @@ func handlePostRead(ctx context.Context, a *app.App, ev Event) (Result, error) {
 
 	_ = a.Ledger.Incr(ctx, "lifetime", "reads", 1)
 	_ = a.Ledger.Incr(ctx, scope, "reads", 1)
-	_ = a.Ledger.Incr(ctx, scope, "read:"+file, 1)
 
-	n, err := a.Ledger.Get(ctx, scope, "read:"+file)
-	if err != nil {
-		return Result{}, err
-	}
-
-	var msgs []string
-	if n > 1 && a.Features.On(features.RepeatedReads) {
-		_ = a.Ledger.Incr(ctx, "lifetime", "repeated_reads_blocked", 1)
-		msgs = append(msgs, fmt.Sprintf("You have already read %s in this session (%d times, ~%d tokens each). "+
-			"Rely on the earlier read instead of reading it again.", file, n, tokens))
-	}
 	// Route the file to the served repo that owns it — a session reading a
 	// sibling repo's file (a verifier in a scratch dir, RECARTO_REPOS) must
 	// surface THAT repo's anchored memories, with the path made relative to
@@ -387,17 +379,49 @@ func handlePostRead(ctx context.Context, a *app.App, ev Event) (Result, error) {
 	if !owned {
 		target, rel = a.AllRepos()[0], memory.RelFileRef(a.Git.Worktree, file)
 	}
-	// First whole-file read of a large, graph-indexed file: nudge toward the cheaper
-	// navigation tools. Whole-file reads of big files are the dominant token sink, and
-	// the graph offers a structural alternative only when the file actually has symbols.
-	// Gated to the first read (n == 1) because a repeat already gets the stronger
-	// "rely on the earlier read" warning above — so this fires at most once per file.
-	if n == 1 && tokens >= int64(largeReadThreshold()) && a.Features.On(features.LargeReads) && a.Features.On(features.GraphTools) {
-		if syms, err := target.Graph.Outline(ctx, target.Git.Worktree, rel); err == nil && len(syms) > 0 {
-			_ = a.Ledger.Incr(ctx, "lifetime", "large_reads_nudged", 1)
-			msgs = append(msgs, fmt.Sprintf("Recarto: %s is large (~%d tokens, %d symbols indexed). "+
-				"Next time use get_file_outline for its structure or get_code_snippet to read one symbol, "+
-				"instead of reading the whole file.", rel, tokens, len(syms)))
+
+	first, last := ev.ReadFirst, ev.ReadLast
+	var msgs []string
+	if ev.SessionID != "" && first >= 1 && last >= first && a.Features.On(features.RepeatedReads) {
+		repeat, err := readBefore(ctx, a, scope, file, first, last)
+		if err != nil {
+			return Result{}, err
+		}
+		if repeat {
+			_ = a.Ledger.Incr(ctx, "lifetime", "repeated_reads_blocked", 1)
+			if coversFile(file, first, last) {
+				msgs = append(msgs, fmt.Sprintf("Recarto: you already have all of %s from an earlier read in this session, "+
+					"and it has not changed. Use that read instead of reading it again.", rel))
+			} else {
+				msgs = append(msgs, fmt.Sprintf("Recarto: you already have lines %d-%d of %s from an earlier read in this session, "+
+					"and they have not changed. Use that read instead of reading them again.", first, last, rel))
+			}
+		}
+	}
+	// A read starting past line 1 asked for a range, whatever the host reported.
+	ranged := ev.ReadRanged || first > 1
+	if ev.SessionID != "" && tokens >= int64(largeReadThreshold()) &&
+		a.Features.On(features.LargeReads) && a.Features.On(features.GraphTools) {
+		// The Get only skips work once the session's nudge is given; Claim decides.
+		nudged, err := a.Ledger.Get(ctx, scope, "large_read_nudged")
+		if err != nil {
+			return Result{}, err
+		}
+		if nudged == 0 && (!ranged || coversFile(file, first, last)) {
+			// No symbols (or an outline error) means the graph has no cheaper view to offer.
+			if syms, err := target.Graph.Outline(ctx, target.Git.Worktree, rel); err == nil && len(syms) > 0 {
+				// Claimed last, so a read that can't be nudged never uses up the session's nudge.
+				won, err := a.Ledger.Claim(ctx, scope, "large_read_nudged")
+				if err != nil {
+					return Result{}, err
+				}
+				if won {
+					_ = a.Ledger.Incr(ctx, "lifetime", "large_reads_nudged", 1)
+					msgs = append(msgs, fmt.Sprintf("Recarto: %s is large (~%d tokens read, %d symbols indexed). "+
+						"For large indexed files, use get_file_outline for the structure or get_code_snippet to read one symbol, "+
+						"instead of reading the whole file.", rel, tokens, len(syms)))
+				}
+			}
 		}
 	}
 	msgs = append(msgs, anchoredNotes(ctx, a, ev.SessionID, target, rel)...)

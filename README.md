@@ -269,6 +269,15 @@ A misspelled feature or a value other than `true`/`false` is reported with its l
 number by `recarto config` and `recarto doctor`; hooks skip the bad line.
 `RECARTO_SEMANTIC=0` and `RECARTO_AUTO_REPAIR=0` still turn those features off too.
 
+## Read notices
+
+After a file read (Claude Code's `Read`, OpenCode's `read`, Copilot's `view`), Recarto adds the file's anchored notes and at most two notices:
+
+- **Repeat read** (`repeated-reads`). Added when every line the read returned came back in earlier reads of the same file in this session, and the file has not changed since. It names the lines when the read returned only part of the file. Once a file changes, reads of its old content no longer count. A read whose lines Recarto can't tell gets no notice. That includes Claude Code's own "file unchanged" reply when the agent repeats its last read.
+- **Large file** (`large-reads`). Added once per session, on the first whole-file read of a file with indexed symbols that returns at least 2,000 estimated tokens (`RECARTO_LARGE_READ_TOKENS`). It points to `get_file_outline` and `get_code_snippet`. A read is whole-file when it asked for no line range, even if the host cut the output short, or when the lines it returned cover the whole file. A read of part of a file never gets it.
+
+`recarto status` counts the notices added under `repeated_reads_blocked` and `large_reads_nudged`. On OpenCode, re-run `recarto init` after upgrading so the plugin passes the read's line range.
+
 ## Shell searches and file views
 
 Claude Code's native macOS, Linux and WSL builds (2.1.117 and later) have **no Grep or
@@ -315,7 +324,7 @@ Recarto adds nothing to:
   grep/glob/read tools, which Recarto hooks;
 - a command it cannot parse.
 
-Shell views are not counted as reads, so they get no repeated-read warning, large-file
+Shell views are not counted as reads, so they get no repeat-read notice, large-file
 nudge or read count. Recarto never blocks or rewrites a command and never changes its
 output; it only adds the hint.
 

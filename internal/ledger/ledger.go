@@ -41,3 +41,47 @@ func (l *Ledger) Get(ctx context.Context, scope, metric string) (int64, error) {
 	}
 	return v, nil
 }
+
+// Metrics returns the names of scope's metrics that start with prefix.
+func (l *Ledger) Metrics(ctx context.Context, scope, prefix string) ([]string, error) {
+	// substr, not LIKE, so % and _ in a file path match literally.
+	rows, err := l.st.DB.QueryContext(ctx,
+		`SELECT metric FROM counters WHERE scope = ? AND substr(metric, 1, length(?)) = ?`,
+		scope, prefix, prefix)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }() // a read-only cursor: closing it cannot lose data
+	var out []string
+	for rows.Next() {
+		var m string
+		if err := rows.Scan(&m); err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
+// Claim sets counters[scope, metric] to 1 unless it already exists and reports
+// whether this call created it: of concurrent callers, in this process or
+// another, exactly one gets true.
+func (l *Ledger) Claim(ctx context.Context, scope, metric string) (bool, error) {
+	var won bool
+	err := l.st.WriteTx(ctx, func(c store.Conn) error {
+		res, err := c.ExecContext(ctx,
+			`INSERT INTO counters(scope, metric, value) VALUES (?, ?, 1)
+			 ON CONFLICT(scope, metric) DO NOTHING`, scope, metric)
+		if err != nil {
+			return err
+		}
+		n, err := res.RowsAffected()
+		// WriteTx may retry this callback, so only the committed attempt's result counts.
+		won = n == 1
+		return err
+	})
+	if err != nil {
+		return false, err
+	}
+	return won, nil
+}

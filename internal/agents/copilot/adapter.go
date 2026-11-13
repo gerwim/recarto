@@ -72,6 +72,12 @@ func (Adapter) Decode(kind agents.EventKind, in io.Reader) (agents.Event, error)
 	}
 	ev.FilePath = pickString(p.ToolArgs, "path", "filePath", "file_path", "file")
 	ev.Pattern = pickString(p.ToolArgs, "pattern", "query", "regex")
+	if kind == agents.KindPostRead {
+		r, _ := toolArgs(p.ToolArgs)["view_range"].([]any)
+		// Copilot shows the whole file for an empty or absent view_range.
+		ev.ReadRanged = len(r) > 0
+		ev.ReadFirst, ev.ReadLast = agents.NumberedLines(pickString(p.ToolResult, "textResultForLlm"), ". ")
+	}
 	return ev, nil
 }
 
@@ -88,8 +94,20 @@ func (Adapter) Encode(kind agents.EventKind, out io.Writer, res agents.Result) e
 // pickString returns the first non-empty string value among keys in a JSON object,
 // given as an object or as a JSON-encoded string of one (Copilot has sent both).
 func pickString(raw json.RawMessage, keys ...string) string {
+	m := toolArgs(raw)
+	for _, k := range keys {
+		if s, ok := m[k].(string); ok && s != "" {
+			return s
+		}
+	}
+	return ""
+}
+
+// toolArgs decodes a JSON object, given as an object or as a JSON-encoded
+// string of one (Copilot has sent both); nil when raw is neither.
+func toolArgs(raw json.RawMessage) map[string]any {
 	if len(raw) == 0 {
-		return ""
+		return nil
 	}
 	var enc string
 	if json.Unmarshal(raw, &enc) == nil {
@@ -97,14 +115,9 @@ func pickString(raw json.RawMessage, keys ...string) string {
 	}
 	var m map[string]any
 	if json.Unmarshal(raw, &m) != nil {
-		return ""
+		return nil
 	}
-	for _, k := range keys {
-		if s, ok := m[k].(string); ok && s != "" {
-			return s
-		}
-	}
-	return ""
+	return m
 }
 
 // Public hook entrypoints (used by `recarto hook <event> --agent copilot`).

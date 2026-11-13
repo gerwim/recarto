@@ -168,11 +168,13 @@ func TestSessionStartUpkeepFollowsFeatures(t *testing.T) {
 }
 
 func TestReadAndEditHintsFollowFeatures(t *testing.T) {
-	a := newTestApp(t, "main")
+	a, wt := newTreeApp(t)
 	ctx := context.Background()
-	wt := a.Git.Worktree
 	rel := "big.go"
 	src := []byte("package p\n\nfunc Alpha() {}\n\nfunc Beta() {}\n")
+	if err := os.WriteFile(filepath.Join(wt, rel), src, 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if err := a.Graph.IndexFile(ctx, wt, rel, src, 1, int64(len(src))); err != nil {
 		t.Fatal(err)
 	}
@@ -184,14 +186,15 @@ func TestReadAndEditHintsFollowFeatures(t *testing.T) {
 		guidance = "do-not-repeat for big.go"
 		todo     = "open todo for big.go"
 		large    = "get_file_outline"
-		repeat   = "already read"
+		repeat   = "you already have"
 	)
 	read := func(session string, f features.Set) string {
 		t.Helper()
 		a.Features = f
 		var out []string
 		for range 2 {
-			res, err := Handle(ctx, a, Event{Kind: KindPostRead, SessionID: session, FilePath: wt + "/" + rel, ToolResult: largeReadResult()})
+			res, err := Handle(ctx, a, Event{Kind: KindPostRead, SessionID: session, FilePath: wt + "/" + rel,
+				ReadFirst: 1, ReadLast: 5, ToolResult: largeReadResult()})
 			if err != nil {
 				t.Fatal(err)
 			}

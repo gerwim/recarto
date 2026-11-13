@@ -98,7 +98,7 @@ const setup = async (ctx) => {
       if (event.tool === "read") {
         if (event.result.output && event.result.output.type === "list-page") return; // a directory listing
         const text = contentOf(event.result).map((c) => c.text || "").join("\n");
-        append(event, (await run(dir, "post-read", { ...base, file_path: abs(input.path), tool_result: text })).additionalContext);
+        append(event, (await run(dir, "post-read", { ...base, file_path: abs(input.path), tool_result: text, offset: input.offset, limit: input.limit })).additionalContext);
       } else if (event.tool === "grep" || event.tool === "glob") {
         append(event, (await run(dir, "augment", { ...base, pattern: input.pattern || "" })).additionalContext);
       } else if (isShell(event.tool, input.command)) {
@@ -165,7 +165,7 @@ const server = async ({ directory }) => {
         const base = { session_id: input.sessionID };
         let r = {};
         if (input.tool === "read") {
-          r = await run(directory, "post-read", { ...base, file_path: abs(args.filePath), tool_result: (output && output.output) || "" });
+          r = await run(directory, "post-read", { ...base, file_path: abs(args.filePath), tool_result: (output && output.output) || "", offset: args.offset, limit: args.limit });
         } else if (input.tool === "grep" || input.tool === "glob") {
           r = await run(directory, "augment", { ...base, pattern: args.pattern || "" });
         } else if (isShell(input.tool, args.command)) {

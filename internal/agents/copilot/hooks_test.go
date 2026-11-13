@@ -127,3 +127,26 @@ func TestShellViewThroughCopilotPayload(t *testing.T) {
 		t.Errorf("output %q (%v), want the anchored todo", out.String(), err)
 	}
 }
+
+func TestPostReadRepeatNoticeThroughView(t *testing.T) {
+	root := t.TempDir()
+	a := newTestApp(t, root)
+	ctx := context.Background()
+	file := filepath.Join(root, "a.go")
+	if err := os.WriteFile(file, []byte("package a\n// 2\n// 3\n// 4\n// 5\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	path, _ := json.Marshal(file)
+	in := `{"sessionId":"s","toolName":"view","toolArgs":{"path":` + string(path) + `,"view_range":[2,3]},` +
+		`"toolResult":{"resultType":"success","textResultForLlm":"2. // 2\n3. // 3"}}`
+	var out strings.Builder
+	for range 2 {
+		out.Reset()
+		if err := PostRead(ctx, a, strings.NewReader(in), &out); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !strings.Contains(out.String(), "you already have lines 2-3") {
+		t.Errorf("second view = %q, want the repeat-read notice", out.String())
+	}
+}
