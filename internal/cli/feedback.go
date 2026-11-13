@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -16,12 +17,12 @@ import (
 // Feedback dispatches `recarto feedback [list|show|resolve]`. It opens the global
 // feedback store directly (no git/app resolution) so it works from anywhere,
 // including outside a git repo.
-func Feedback(ctx context.Context, w io.Writer, args []string) error {
+func Feedback(ctx context.Context, w io.Writer, args []string) (rerr error) {
 	b, err := feedback.Open(clock.Real{})
 	if err != nil {
 		return err
 	}
-	defer b.Close()
+	defer func() { rerr = errors.Join(rerr, b.Close()) }()
 
 	sub := "list"
 	rest := args

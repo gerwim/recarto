@@ -39,7 +39,9 @@ func TestClientImportRoundTrip(t *testing.T) {
 	if _, _, _, err := engA.Record(ctx, memory.NewMemory{Kind: memory.KindLearning, Title: "t", Body: "a directly-imported learning"}); err != nil {
 		t.Fatal(err)
 	}
-	stA.Close()
+	if err := stA.Close(); err != nil {
+		t.Fatal(err)
+	}
 
 	var archive bytes.Buffer
 	gw := gzip.NewWriter(&archive)
@@ -110,7 +112,9 @@ func TestFullHistoryExportImportConverges(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	stA.Close()
+	if err := stA.Close(); err != nil {
+		t.Fatal(err)
+	}
 
 	var archive bytes.Buffer
 	gw := gzip.NewWriter(&archive)

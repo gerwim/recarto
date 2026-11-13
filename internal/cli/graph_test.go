@@ -24,7 +24,9 @@ func TestGraphSearch(t *testing.T) {
 	a := newTestApp(t, "main")
 	wt := t.TempDir()
 	a.Git.Worktree = wt
-	os.WriteFile(filepath.Join(wt, "a.go"), []byte("package p\nfunc Authenticate(){}"), 0o644)
+	if err := os.WriteFile(filepath.Join(wt, "a.go"), []byte("package p\nfunc Authenticate(){}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if err := Index(context.Background(), a, &bytes.Buffer{}, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -45,7 +47,9 @@ func TestGraphQueryBareNameMatchesName(t *testing.T) {
 	a := newTestApp(t, "main")
 	wt := t.TempDir()
 	a.Git.Worktree = wt
-	os.WriteFile(filepath.Join(wt, "a.go"), []byte("package p\nfunc Authenticate(){}"), 0o644)
+	if err := os.WriteFile(filepath.Join(wt, "a.go"), []byte("package p\nfunc Authenticate(){}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if err := Index(context.Background(), a, &bytes.Buffer{}, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -75,7 +79,9 @@ func TestGraphQuerySpaceFormFlags(t *testing.T) {
 	a := newTestApp(t, "main")
 	wt := t.TempDir()
 	a.Git.Worktree = wt
-	os.WriteFile(filepath.Join(wt, "a.go"), []byte("package p\ntype Authenticate struct{}\nfunc AuthenticateUser(){}"), 0o644)
+	if err := os.WriteFile(filepath.Join(wt, "a.go"), []byte("package p\ntype Authenticate struct{}\nfunc AuthenticateUser(){}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if err := Index(context.Background(), a, &bytes.Buffer{}, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -105,7 +111,9 @@ func TestGraphQueryEmptyErrors(t *testing.T) {
 	a := newTestApp(t, "main")
 	wt := t.TempDir()
 	a.Git.Worktree = wt
-	os.WriteFile(filepath.Join(wt, "a.go"), []byte("package p\nfunc Authenticate(){}"), 0o644)
+	if err := os.WriteFile(filepath.Join(wt, "a.go"), []byte("package p\nfunc Authenticate(){}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if err := Index(context.Background(), a, &bytes.Buffer{}, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -126,7 +134,9 @@ func TestGraphSearchEmptyErrors(t *testing.T) {
 	a := newTestApp(t, "main")
 	wt := t.TempDir()
 	a.Git.Worktree = wt
-	os.WriteFile(filepath.Join(wt, "a.go"), []byte("package p\nfunc Authenticate(){}"), 0o644)
+	if err := os.WriteFile(filepath.Join(wt, "a.go"), []byte("package p\nfunc Authenticate(){}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if err := Index(context.Background(), a, &bytes.Buffer{}, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -148,7 +158,9 @@ func TestGraphGrepCoversUnindexedFiles(t *testing.T) {
 	a := newTestApp(t, "main")
 	wt := t.TempDir()
 	a.Git.Worktree = wt
-	os.WriteFile(filepath.Join(wt, "a.go"), []byte("package p\nfunc Use(){ _ = \"DepMarker\" }\n"), 0o644)
+	if err := os.WriteFile(filepath.Join(wt, "a.go"), []byte("package p\nfunc Use(){ _ = \"DepMarker\" }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	os.WriteFile(filepath.Join(wt, "proj.csproj"), []byte("<Project>\n  <PackageReference Include=\"DepMarker\"/>\n</Project>\n"), 0o644)
 	if err := Index(context.Background(), a, &bytes.Buffer{}, nil); err != nil {
 		t.Fatal(err)
@@ -449,7 +461,9 @@ func TestGraphSnippetBySymbolAmbiguous(t *testing.T) {
 	a := newTestApp(t, "main")
 	wt := t.TempDir()
 	a.Git.Worktree = wt
-	os.WriteFile(filepath.Join(wt, "a.go"), []byte("package a\n\nfunc Dup() {}\n"), 0o644)
+	if err := os.WriteFile(filepath.Join(wt, "a.go"), []byte("package a\n\nfunc Dup() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	os.WriteFile(filepath.Join(wt, "b.go"), []byte("package b\n\nfunc Dup() {}\n"), 0o644)
 	if err := Index(context.Background(), a, &bytes.Buffer{}, nil); err != nil {
 		t.Fatal(err)

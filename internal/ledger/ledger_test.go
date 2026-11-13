@@ -3,6 +3,7 @@ package ledger
 import (
 	"context"
 	"path/filepath"
+	"slices"
 	"sync"
 	"testing"
 
@@ -75,5 +76,58 @@ func TestIncrConcurrentInProcess(t *testing.T) {
 	}
 	if got != int64(g*n) {
 		t.Fatalf("stress = %d, want %d (lost in-process updates)", got, g*n)
+	}
+}
+
+func TestMetricsByPrefix(t *testing.T) {
+	l := New(newStore(t))
+	ctx := context.Background()
+	for _, c := range [][2]string{
+		{"s", "lines:/a%_b@1:1-5"}, {"s", "lines:/a%_b@1:7-9"},
+		{"s", "lines:/axb@1:1-5"}, // what LIKE would also match
+		{"other", "lines:/a%_b@1:1-5"},
+	} {
+		if err := l.Incr(ctx, c[0], c[1], 1); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := l.Metrics(ctx, "s", "lines:/a%_b@1:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	slices.Sort(got)
+	if want := []string{"lines:/a%_b@1:1-5", "lines:/a%_b@1:7-9"}; !slices.Equal(got, want) {
+		t.Errorf("Metrics = %q, want %q", got, want)
+	}
+}
+
+func TestClaimOnce(t *testing.T) {
+	l := New(newStore(t))
+	ctx := context.Background()
+	const g = 8
+	won := make([]bool, g)
+	var wg sync.WaitGroup
+	for i := range won {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			var err error
+			if won[i], err = l.Claim(ctx, "session:s", "large_read_nudged"); err != nil {
+				t.Errorf("claim: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+	if n := len(slices.DeleteFunc(won, func(w bool) bool { return !w })); n != 1 {
+		t.Errorf("%d concurrent claims won, want 1", n)
+	}
+	if v, _ := l.Get(ctx, "session:s", "large_read_nudged"); v != 1 {
+		t.Errorf("value = %d, want 1", v)
+	}
+	if again, err := l.Claim(ctx, "session:s", "large_read_nudged"); err != nil || again {
+		t.Errorf("repeat claim = %v, %v; want false", again, err)
+	}
+	if other, err := l.Claim(ctx, "session:t", "large_read_nudged"); err != nil || !other {
+		t.Errorf("claim in another scope = %v, %v; want true", other, err)
 	}
 }

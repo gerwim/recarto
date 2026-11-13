@@ -112,7 +112,9 @@ func selectTarget(m *update.Manifest, current, flagVersion string, interactive b
 		}
 		fmt.Fprintf(out, "  %d) %s%s\n", i+1, r.Version, marker)
 	}
-	fmt.Fprint(out, "> ")
+	if _, err := fmt.Fprint(out, "> "); err != nil {
+		return "", false, err
+	}
 	raw, err := bufio.NewReader(stdin).ReadString('\n')
 	if err != nil && err != io.EOF {
 		return "", false, fmt.Errorf("read selection: %w", err)

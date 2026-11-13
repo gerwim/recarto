@@ -240,7 +240,7 @@ func buildPyModules(ctx context.Context, c store.Conn, worktree string, named ma
 	if err != nil {
 		return err
 	}
-	defer stmt.Close()
+	defer func() { _ = stmt.Close() }() // a statement close frees memory only; the transaction reports write errors
 	for _, f := range files {
 		for _, m := range pyModuleNames(f.path) {
 			if !pyNamed(named, m) {
@@ -567,7 +567,7 @@ SELECT ed.id, ed.src_node_id, ed.dst_name, ed.dst_recv, ed.file_id
 	if err != nil {
 		return err
 	}
-	defer stmt.Close()
+	defer func() { _ = stmt.Close() }() // a statement close frees memory only; the transaction reports write errors
 
 	seen := map[string]struct{}{} // DISTINCT type per edge; reused across edges
 	for i := range edges {
@@ -727,7 +727,7 @@ SELECT ed.id, ed.dst_name, ed.file_id, ed.dst_recv = ''
 	if err != nil {
 		return err
 	}
-	defer stmt.Close()
+	defer func() { _ = stmt.Close() }() // a statement close frees memory only; the transaction reports write errors
 
 	// ranked is a candidate match with its locality keys precomputed relative to
 	// the calling edge, ready for the S5 ordering.

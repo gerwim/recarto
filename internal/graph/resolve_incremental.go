@@ -773,7 +773,7 @@ func insertValues(ctx context.Context, c store.Conn, stmt string, vals []string)
 	if err != nil {
 		return err
 	}
-	defer ps.Close()
+	defer func() { _ = ps.Close() }() // a statement close frees memory only; the transaction reports write errors
 	for _, v := range vals {
 		if _, err := ps.ExecContext(ctx, v); err != nil {
 			return err

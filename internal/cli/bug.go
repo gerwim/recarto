@@ -112,8 +112,8 @@ func bugSearch(ctx context.Context, a *app.App, w io.Writer, args []string) erro
 	}
 	results := set.Results
 	if len(results) == 0 {
-		fmt.Fprintln(w, "(no matching bugs)")
-		return nil
+		_, err := fmt.Fprintln(w, "(no matching bugs)")
+		return err
 	}
 	for _, r := range results {
 		title := r.Record.Title

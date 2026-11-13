@@ -226,7 +226,7 @@ func TestShellViewsSurfaceAnchoredMemories(t *testing.T) {
 				t.Errorf("%s: missing %q:\n%s", command, want, first)
 			}
 		}
-		for _, banned := range []string{"already read", "get_file_outline", "search_content"} {
+		for _, banned := range []string{"you already have", "get_file_outline", "search_content"} {
 			if strings.Contains(first, banned) {
 				t.Errorf("%s: a view must not add %q:\n%s", command, banned, first)
 			}
