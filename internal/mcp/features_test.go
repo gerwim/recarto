@@ -14,8 +14,8 @@ import (
 	"github.com/gerwim/recarto/internal/features"
 )
 
-// listTools lists the tools NewServer offers a client for a, by name.
-func listTools(t *testing.T, a *app.App) map[string]*sdk.Tool {
+// connect connects a client to NewServer(a) over in-memory transports.
+func connect(t *testing.T, a *app.App) *sdk.ClientSession {
 	t.Helper()
 	ctx := context.Background()
 	ct, st := sdk.NewInMemoryTransports()
@@ -27,8 +27,15 @@ func listTools(t *testing.T, a *app.App) map[string]*sdk.Tool {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = cs.Close(); _ = ss.Wait() }()
-	res, err := cs.ListTools(ctx, nil)
+	// Teardown errors say nothing about the behaviour under test.
+	t.Cleanup(func() { _ = cs.Close(); _ = ss.Wait() })
+	return cs
+}
+
+// listTools lists the tools NewServer offers a client for a, by name.
+func listTools(t *testing.T, a *app.App) map[string]*sdk.Tool {
+	t.Helper()
+	res, err := connect(t, a).ListTools(context.Background(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,7 +127,7 @@ func TestTodosOffRejectsTodoMemories(t *testing.T) {
 	a := newTestApp(t, "main")
 	ctx := context.Background()
 	hasTodo := func() bool {
-		for _, v := range recordMemorySchema(a.Features).Properties["kind"].Enum {
+		for _, v := range recordMemorySchema(a).Properties["kind"].Enum {
 			if v == "todo" {
 				return true
 			}

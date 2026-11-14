@@ -46,7 +46,7 @@ const (
 // RecordMemoryInput are the arguments to the record_memory tool. Fields without
 // `omitempty` (kind, body) are required in the generated JSON schema.
 type RecordMemoryInput struct {
-	Kind         string   `json:"kind" jsonschema:"memory kind: preference, learning, decision, do_not_repeat, bug, or todo"`
+	Kind         string   `json:"kind" jsonschema:"preference, learning, decision, do_not_repeat, bug or todo (open work that resurfaces until done)"`
 	Title        string   `json:"title,omitempty" jsonschema:"short one-line summary"`
 	Body         string   `json:"body" jsonschema:"full memory content"`
 	Files        []string `json:"files,omitempty" jsonschema:"related file paths"`
@@ -54,8 +54,8 @@ type RecordMemoryInput struct {
 	Tags         []string `json:"tags,omitempty" jsonschema:"freeform tags"`
 	Pinned       bool     `json:"pinned,omitempty" jsonschema:"pin so it is never evicted"`
 	Global       bool     `json:"global,omitempty" jsonschema:"store repo-global instead of branch-scoped"`
-	Scope        string   `json:"scope,omitempty" jsonschema:"where to store it: repo (default) or workspace — the cross-repo store shared under RECARTO_WORKSPACE, for preferences/knowledge that apply beyond this repo"`
-	Repo         string   `json:"repo,omitempty" jsonschema:"store into this served repo's memory (RECARTO_REPOS name or path) instead of the current one; mutually exclusive with scope=workspace"`
+	Scope        string   `json:"scope,omitempty" jsonschema:"where to store it: repo (default) or workspace"`
+	Repo         string   `json:"repo,omitempty" jsonschema:"store into this served repo (name or path) instead of the current one; not with scope=workspace"`
 	SupersedesID string   `json:"supersedes_id,omitempty" jsonschema:"id of a prior memory this replaces"`
 }
 
@@ -157,7 +157,7 @@ type RecallMemoryInput struct {
 	TaskHint    string   `json:"task_hint,omitempty" jsonschema:"free-text description of the current task"`
 	Files       []string `json:"files,omitempty" jsonschema:"files relevant to the current task"`
 	Symbols     []string `json:"symbols,omitempty" jsonschema:"symbols relevant to the current task"`
-	Kind        string   `json:"kind,omitempty" jsonschema:"restrict to a single kind (authoritative — pinned do_not_repeat are filtered too)"`
+	Kind        string   `json:"kind,omitempty" jsonschema:"restrict to one kind; pinned memories are filtered too"`
 	Limit       int      `json:"limit,omitempty" jsonschema:"maximum memories to return"`
 	TokenBudget int      `json:"token_budget,omitempty" jsonschema:"token budget for the returned set"`
 	MinScore    float64  `json:"min_score,omitempty" jsonschema:"drop candidates scoring below this (0-1)"`
@@ -330,7 +330,7 @@ type RecordBugInput struct {
 	File         string   `json:"file,omitempty" jsonschema:"the file that was fixed"`
 	Symbols      []string `json:"symbols,omitempty" jsonschema:"related symbol names"`
 	Tags         []string `json:"tags,omitempty" jsonschema:"freeform tags"`
-	Repo         string   `json:"repo,omitempty" jsonschema:"record into this served repo's memory (RECARTO_REPOS name or path) instead of the current one"`
+	Repo         string   `json:"repo,omitempty" jsonschema:"record into this served repo (name or path) instead of the current one"`
 }
 
 // RecordBugOutput is the result of the record_bug tool.
@@ -388,7 +388,7 @@ func recordBug(ctx context.Context, a *app.App, in RecordBugInput) (RecordBugOut
 
 // SearchBugsInput is the argument to the search_bugs tool.
 type SearchBugsInput struct {
-	Query string `json:"query" jsonschema:"keywords to search bug memories before fixing"`
+	Query string `json:"query" jsonschema:"keywords or a plain-words description of the bug"`
 }
 
 // SearchBugsOutput is the result of the search_bugs tool.
