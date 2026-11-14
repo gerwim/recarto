@@ -24,6 +24,8 @@ const (
 	archModuleLimit    = 8   // caps both the module list and the dependency-edge list of the map
 	cerebrumReserve    = 384 // headroom for the map (~165 tok) + recent-bugs (~60 tok) + delta (~150 tok) tiers
 	cerebrumBodyMax    = 160
+	titleMax           = 160 // runes of a title in a one-line note or list
+	fixMax             = 200 // runes of a fix in a bug warning
 
 	// deltaTierBudget caps the session-start "what changed" tier. The full list is
 	// one get_graph_delta call away, so the tier only buys orientation.
@@ -126,11 +128,7 @@ func formatSessionContext(results []memory.RecallResult, wsName string, wsResult
 		}
 		b.WriteString(":\n")
 		for _, r := range bugs {
-			t := r.Title
-			if t == "" {
-				t = "(untitled)"
-			}
-			fmt.Fprintf(&b, "- %s\n", t)
+			fmt.Fprintf(&b, "- %s\n", noteTitle(r))
 		}
 	}
 
@@ -172,10 +170,7 @@ func formatMemories(results []memory.RecallResult, budget int) (string, []string
 	}
 	used := 0
 	for _, r := range results {
-		title := r.Record.Title
-		if title == "" {
-			title = "(untitled)"
-		}
+		title := noteTitle(r.Record)
 		if r.Record.Kind == memory.KindDoNotRepeat && r.Record.Pinned {
 			line := fmt.Sprintf("- [%s] %s\n  %s\n", r.Record.Kind, title, r.Record.Body)
 			b.WriteString(line)
@@ -227,25 +222,27 @@ func formatWorkspaceMemories(name string, rs []memory.RecallResult) (string, []s
 	var emitted []string
 	fmt.Fprintf(&b, "\nWorkspace memory (%s, shared across repos):\n", name)
 	for _, r := range rs {
-		title := r.Record.Title
-		if title == "" {
-			title = "(untitled)"
-		}
+		title := noteTitle(r.Record)
 		fmt.Fprintf(&b, "- [%s] %s\n  %s\n", r.Record.Kind, title, trimOneLine(r.Record.Body))
 		emitted = append(emitted, r.Record.ID)
 	}
 	return b.String(), emitted
 }
 
-// formatBugWarnings renders prior bugs tied to a code location as advisory lines.
-func formatBugWarnings(loc string, bugs []*memory.Record) string {
+// formatBugWarnings renders prior bugs tied to a code location as advisory
+// lines: the title and the start of the fix, plus, when pointer is set, the
+// get_memory call that returns the whole text.
+func formatBugWarnings(loc string, bugs []*memory.Record, pointer bool) string {
 	lines := make([]string, 0, len(bugs))
 	for _, r := range bugs {
-		if fix, _ := r.Extra["fix"].(string); fix != "" {
-			lines = append(lines, fmt.Sprintf("⚠ prior bug in %s: %s — fix: %s", loc, r.Title, fix))
-		} else {
-			lines = append(lines, fmt.Sprintf("⚠ prior bug in %s: %s", loc, r.Title))
+		line := fmt.Sprintf("⚠ prior bug in %s: %s", loc, noteTitle(r))
+		if fix, _ := r.Extra["fix"].(string); strings.TrimSpace(fix) != "" {
+			line += " — fix: " + clip(fix, fixMax)
 		}
+		if pointer {
+			line += fmt.Sprintf(" (full text: get_memory id=%s)", r.ID)
+		}
+		lines = append(lines, line)
 	}
 	return strings.Join(lines, "\n")
 }
@@ -255,11 +252,7 @@ func formatBugWarnings(loc string, bugs []*memory.Record) string {
 func formatTodoReminders(loc string, todos []*memory.Record) string {
 	lines := make([]string, 0, len(todos))
 	for _, r := range todos {
-		title := r.Title
-		if title == "" {
-			title = "(untitled)"
-		}
-		lines = append(lines, fmt.Sprintf("📝 open todo for %s: %s", loc, title))
+		lines = append(lines, fmt.Sprintf("📝 open todo for %s: %s", loc, noteTitle(r)))
 	}
 	return strings.Join(lines, "\n")
 }
@@ -272,10 +265,7 @@ func formatTodoReminders(loc string, todos []*memory.Record) string {
 func formatGuidance(loc string, recs []*memory.Record) string {
 	lines := make([]string, 0, len(recs))
 	for _, r := range recs {
-		title := r.Title
-		if title == "" {
-			title = "(untitled)"
-		}
+		title := noteTitle(r)
 		switch r.Kind {
 		case memory.KindDoNotRepeat:
 			lines = append(lines, fmt.Sprintf("🚫 do-not-repeat for %s: %s", loc, title))
@@ -295,10 +285,25 @@ func trimOneLine(s string) string {
 	if i := strings.IndexByte(s, '\n'); i >= 0 {
 		s = s[:i]
 	}
-	if r := []rune(s); len(r) > cerebrumBodyMax {
-		s = string(r[:cerebrumBodyMax]) + "…"
+	return clip(s, cerebrumBodyMax)
+}
+
+// clip collapses s's whitespace runs to single spaces and cuts it to max
+// runes, marking a cut with "…".
+func clip(s string, max int) string {
+	s = strings.Join(strings.Fields(s), " ")
+	if r := []rune(s); len(r) > max {
+		s = string(r[:max]) + "…"
 	}
 	return s
+}
+
+// noteTitle is r's title as one-line notes and lists show it.
+func noteTitle(r *memory.Record) string {
+	if t := clip(r.Title, titleMax); t != "" {
+		return t
+	}
+	return "(untitled)"
 }
 
 // nullable maps "" to a SQL NULL so repo-global rows store NULL, not "".

@@ -202,7 +202,7 @@ func TestReadAndEditHintsFollowFeatures(t *testing.T) {
 		}
 		return strings.Join(out, "\n")
 	}
-	if got := read("all", nil); !strings.Contains(got, bug) || !strings.Contains(got, guidance) ||
+	if got := read("all", nil); !strings.Contains(got, bug) || !strings.Contains(got, "get_memory id=") || !strings.Contains(got, guidance) ||
 		!strings.Contains(got, todo) || !strings.Contains(got, large) || !strings.Contains(got, repeat) {
 		t.Fatalf("all features on, missing a hint:\n%s", got)
 	}
@@ -216,6 +216,7 @@ func TestReadAndEditHintsFollowFeatures(t *testing.T) {
 		"large":    {off(features.LargeReads), large},
 		"tools":    {off(features.GraphTools), large},
 		"repeat":   {off(features.RepeatedReads), repeat},
+		"memory":   {off(features.MemoryTools), "get_memory"},
 	} {
 		got := read(name, tc.f)
 		if strings.Contains(got, tc.gone) {
@@ -239,11 +240,7 @@ func TestReadAndEditHintsFollowFeatures(t *testing.T) {
 func TestSearchHintsFollowFeatures(t *testing.T) {
 	a, dir := newTreeApp(t)
 	ctx := context.Background()
-	src := []byte("package p\n\nfunc Widget() {}\n")
-	if err := a.Graph.IndexFile(ctx, dir, "widget.go", src, 1, int64(len(src))); err != nil {
-		t.Fatal(err)
-	}
-	recordWidgetBug(t, a)
+	indexWidgetBug(t, a)
 	grep := func(session string, f features.Set) string {
 		t.Helper()
 		a.Features = f
@@ -254,7 +251,7 @@ func TestSearchHintsFollowFeatures(t *testing.T) {
 		return res.Context
 	}
 	if got := grep("on", nil); !strings.Contains(got, "widget.go:3") || !strings.Contains(got, "get_code_snippet") ||
-		!strings.Contains(got, "Related bugs (search_bugs for detail):") {
+		!strings.Contains(got, "Known bugs in this code (search_bugs for detail):\n- ⚠ Widget overflow") {
 		t.Fatalf("all on:\n%s", got)
 	}
 	if got := grep("off", off(features.SearchHints)); got != "" {
@@ -264,7 +261,7 @@ func TestSearchHintsFollowFeatures(t *testing.T) {
 		t.Errorf("graph-tools off must keep the symbols, drop the tool pointer:\n%s", got)
 	}
 	// memory-tools off unregisters search_bugs, but the bug titles stay.
-	if got := grep("memory", off(features.MemoryTools)); !strings.Contains(got, "Related bugs:\n") ||
+	if got := grep("memory", off(features.MemoryTools)); !strings.Contains(got, "Known bugs in this code:\n") ||
 		!strings.Contains(got, "Widget overflow") || strings.Contains(got, "search_bugs") {
 		t.Errorf("memory-tools off must keep the bugs, drop the search_bugs pointer:\n%s", got)
 	}

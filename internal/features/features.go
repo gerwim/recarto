@@ -51,7 +51,7 @@ var (
 	Todos         = add(whileWorking, "todos", "Track open work as todos that resurface until done")
 	RepeatedReads = add(whileWorking, "repeated-reads", "Warn when a read repeats unchanged lines already read")
 	LargeReads    = add(whileWorking, "large-reads", "Suggest an outline once after a large whole-file read")
-	SearchHints   = add(whileWorking, "search-hints", "Add matching symbols and bugs to Grep/Glob results")
+	SearchHints   = add(whileWorking, "search-hints", "List symbols a Grep/Glob search names, and their bugs")
 	ShellHints    = add(whileWorking, "shell-hints", "Hint on grep, find, cat and other shell commands")
 
 	StopReminder = add(endOfTurn, "stop-reminder", "Remind to record learnings when the agent stops")

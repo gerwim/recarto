@@ -537,7 +537,7 @@ func anchoredNotes(ctx context.Context, a *app.App, scope string, target *app.Re
 	if a.Features.On(features.BugWarnings) {
 		if found, err := target.Engine.BugsForCode(ctx, target.Git.Branch, []string{rel}, nil); err == nil {
 			if found = dedupSurfaced(ctx, a, scope, found); len(found) > 0 {
-				msgs = append(msgs, formatBugWarnings(rel, found))
+				msgs = append(msgs, formatBugWarnings(rel, found, a.Features.On(features.MemoryTools)))
 			}
 		}
 	}
@@ -598,133 +598,14 @@ func handlePostEdit(ctx context.Context, a *app.App, ev Event) (Result, error) {
 	return res, target.Graph.ReindexFileIncremental(ctx, target.Git.Worktree, rel, content, info.ModTime().UnixMilli(), info.Size())
 }
 
-// handleAugment runs a code-graph search matching the agent's Grep/Glob pattern and
-// also surfaces any kind=bug memories matching that pattern.
+// handleAugment answers a Grep/Glob call with the search hint for its pattern
+// (see searchHint).
 func handleAugment(ctx context.Context, a *app.App, ev Event) (Result, error) {
-	pattern := ev.Pattern
-	if pattern == "" || !a.Features.On(features.SearchHints) {
+	if ev.Pattern == "" || !a.Features.On(features.SearchHints) {
 		return Result{}, nil
 	}
-
-	// Session-scoped dedup: re-running the same Grep/Glob pattern would re-inject
-	// a symbol/bug block already sitting earlier in the transcript — pure token
-	// waste. Suppress the repeat (mirrors the repeated-read path) and nudge the
-	// agent to rely on the earlier injection instead.
-	scope := conversation(ev)
-	metric := searchMetric + pattern
-	if scope != "" {
-		if n, err := a.Ledger.Get(ctx, scope, metric); err == nil && n > 0 {
-			_ = a.Ledger.Incr(ctx, "lifetime", "repeated_augments_blocked", 1)
-			return Result{Context: fmt.Sprintf("You already searched %q this session — the matching symbols/bugs were surfaced earlier. "+
-				"Rely on that injection instead of re-searching.", pattern)}, nil
-		}
-	}
-
-	// A Glob pattern (e.g. "*.cs") is a path query, not a symbol query: searching
-	// symbols for its literal stem injects irrelevant matches (minified-bundle
-	// functions named "cs", etc.). Reduce file globs to their identifier stem and
-	// skip injection entirely for stemless ones; plain Grep terms pass through.
-	term, ok := augmentSearchTerm(pattern)
-	if !ok {
-		return Result{}, nil
-	}
-
-	var b strings.Builder
-	// Search every served repo's graph (primary first), capping the combined
-	// page — a repo-less session's greps are about the sibling repos' code, so
-	// primary-only search would inject nothing. Extra repos' paths are
-	// prefixed with their repo name so hits stay unambiguous.
-	var symLines []string
-	for _, rc := range a.AllRepos() {
-		if len(symLines) >= 8 {
-			break
-		}
-		res, err := rc.Graph.Search(ctx, rc.Git.Worktree, term, "", "", 8-len(symLines))
-		if err != nil {
-			continue
-		}
-		prefix := ""
-		if rc.Git.RepoID != a.Git.RepoID {
-			prefix = rc.Git.RepoName + ":"
-		}
-		for _, r := range res {
-			symLines = append(symLines, fmt.Sprintf("- [%s] %s  %s%s:%d", r.Kind, r.QualifiedName, prefix, r.Path, r.Line))
-		}
-	}
-	if len(symLines) > 0 {
-		b.WriteString("Recarto code graph — symbols matching your search:\n")
-		b.WriteString(strings.Join(symLines, "\n"))
-		if a.Features.On(features.GraphTools) {
-			b.WriteString("\nUse get_code_snippet to read one symbol instead of the whole file.")
-		}
-	}
-
-	var bugResults []memory.RecallResult
-	for _, rc := range a.AllRepos() {
-		if len(bugResults) >= 5 {
-			break
-		}
-		set, err := rc.Engine.Recall(ctx, memory.RecallQuery{
-			TaskHint: term, Kind: memory.KindBug, Branch: rc.Git.Branch, Worktree: rc.Git.Worktree,
-			Limit: 5 - len(bugResults), LexicalOnly: true,
-		})
-		if err != nil {
-			continue
-		}
-		for _, r := range set.Results {
-			if r.Record.Kind == memory.KindBug { // recall always includes pinned do_not_repeat
-				bugResults = append(bugResults, r)
-			}
-		}
-	}
-	{
-		// Drop bugs already surfaced this session — at session-start, on a read/edit,
-		// or by an earlier search — so the same bug block is never injected twice
-		// (pure token waste). dedupSurfaced also marks the survivors, so a later
-		// read/edit of the same code stays quiet about a bug this search just showed.
-		var bugRecs []*memory.Record
-		for _, r := range bugResults {
-			bugRecs = append(bugRecs, r.Record)
-		}
-		fresh := make(map[string]bool, len(bugRecs))
-		for _, r := range dedupSurfaced(ctx, a, scope, bugRecs) {
-			fresh[r.ID] = true
-		}
-		var bugLines []string
-		for _, r := range bugResults {
-			if !fresh[r.Record.ID] {
-				continue
-			}
-			if fix, _ := r.Record.Extra["fix"].(string); fix != "" {
-				bugLines = append(bugLines, fmt.Sprintf("- ⚠ %s — fix: %s", r.Record.Title, fix))
-			} else {
-				bugLines = append(bugLines, fmt.Sprintf("- ⚠ %s", r.Record.Title))
-			}
-			if c := r.Caveat(); c != "" {
-				bugLines = append(bugLines, "  "+c)
-			}
-		}
-		if len(bugLines) > 0 {
-			if b.Len() > 0 {
-				b.WriteString("\n")
-			}
-			b.WriteString("Related bugs")
-			if a.Features.On(features.MemoryTools) {
-				b.WriteString(" (search_bugs for detail)")
-			}
-			b.WriteString(":\n")
-			b.WriteString(strings.Join(bugLines, "\n"))
-		}
-	}
-
-	out := b.String()
-	// Mark the pattern as injected so a later repeat in this session is deduped.
-	// Only record when content was actually injected and the session is scoped,
-	// so the reminder never fires for an empty first result.
-	if out != "" && scope != "" {
-		_ = a.Ledger.Incr(ctx, scope, metric, 1)
-	}
-	return Result{Context: out}, nil
+	hint, err := searchHint(ctx, a, conversation(ev), []string{ev.Pattern})
+	return Result{Context: hint}, err
 }
 
 // shellSearchNudge points the agent at the MCP tools that beat a shell search.
@@ -734,9 +615,8 @@ const shellSearchNudge = "Recarto: next time, search with its MCP tools instead 
 	"and search_graph (symbol and concept search)."
 
 // handleShell answers a shell tool call RunHook read as searches and file
-// views. Each search gets the hint a Grep/Glob tool call with that pattern
-// gets (caps, glob stems and the per-session repeat reminder included), and
-// the session's first shell search adds shellSearchNudge. Each printed file in
+// views. The line's searches share one search hint, capped like a Grep/Glob
+// call's, and the session's first shell search adds shellSearchNudge. Each printed file in
 // a served repo surfaces its anchored memories, deduped exactly like a Read —
 // without a Read's counters, repeat warning or large-file nudge.
 func handleShell(ctx context.Context, a *app.App, ev Event) (Result, error) {
@@ -744,16 +624,16 @@ func handleShell(ctx context.Context, a *app.App, ev Event) (Result, error) {
 		return Result{}, nil
 	}
 	var msgs []string
-	for _, p := range ev.Patterns {
-		res, err := handleAugment(ctx, a, Event{Kind: KindAugment, SessionID: ev.SessionID, AgentID: ev.AgentID, Pattern: p})
+	scope := conversation(ev)
+	if a.Features.On(features.SearchHints) {
+		hint, err := searchHint(ctx, a, scope, ev.Patterns)
 		if err != nil {
 			return Result{}, err
 		}
-		if res.Context != "" {
-			msgs = append(msgs, res.Context)
+		if hint != "" {
+			msgs = append(msgs, hint)
 		}
 	}
-	scope := conversation(ev)
 	if len(ev.Patterns) > 0 && scope != "" && a.Features.On(features.GraphTools) {
 		if n, err := a.Ledger.Get(ctx, scope, "shell_search_nudged"); err == nil && n == 0 {
 			_ = a.Ledger.Incr(ctx, scope, "shell_search_nudged", 1)

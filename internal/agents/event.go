@@ -153,9 +153,9 @@ func wanted(ev Event, f features.Set) bool {
 
 // idle reports whether ev has nothing to act on, judged from the payload alone.
 // It mirrors the handlers' own early returns, so skipping Handle for it changes
-// neither output nor ledger. A stemless file glob ("*.cs") is idle too:
-// handleAugment injects nothing for it and so never marks it for the
-// repeated-search dedup. A shell line is idle unless it searches or prints a
+// neither output nor ledger. A Grep/Glob pattern that names no identifier
+// (a stemless glob like "*.cs", a path, regex syntax alone) is idle too: it
+// gets no hint and never touches the ledger. A shell line is idle unless it searches or prints a
 // file: builds, tests, git and writes never reach the store.
 func idle(ev Event) bool {
 	switch ev.Kind {
@@ -164,8 +164,7 @@ func idle(ev Event) bool {
 	case KindPostEdit:
 		return !filepath.IsAbs(ev.FilePath) // owningRepo rejects relative paths
 	case KindAugment:
-		_, ok := augmentSearchTerm(ev.Pattern)
-		return ev.Pattern == "" || !ok
+		return len(searchIdentifiers(ev.Pattern)) == 0
 	case KindStop:
 		return ev.SessionID == ""
 	case KindShell:

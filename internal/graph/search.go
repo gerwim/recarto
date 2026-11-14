@@ -3,6 +3,7 @@ package graph
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 )
 
@@ -212,6 +213,72 @@ SELECT n.id, n.name, n.qualified_name, n.kind, f.language, f.path, n.start_line,
 		return nil, err
 	}
 	return out, nil
+}
+
+// ValueTier ranks a result by how useful it is to open, lower first: 0 product
+// code, 1 tests and fixtures, 2 generated code, 3 namespace containers.
+func ValueTier(r SearchResult) int {
+	switch {
+	case containerKinds[r.Kind]:
+		return 3
+	case isGeneratedPath(r.Path):
+		return 2
+	case isTestPath(r.Path) || isFixturePath(r.Path):
+		return 1
+	}
+	return 0
+}
+
+// SymbolsNamed returns the symbols in worktree whose name or qualified name is
+// exactly one of names (case-sensitive), one entry per symbol (symbolKey),
+// ordered by ValueTier, then path and line; at most limit.
+func (e *Engine) SymbolsNamed(ctx context.Context, worktree string, names []string, limit int) ([]SearchResult, error) {
+	seen := map[string]bool{}
+	var vals []any
+	var ph []string
+	for _, n := range names {
+		if n == "" || seen[n] {
+			continue
+		}
+		seen[n] = true
+		vals = append(vals, n)
+		ph = append(ph, "?")
+	}
+	if len(vals) == 0 {
+		return nil, nil
+	}
+	inList := strings.Join(ph, ",")
+	args := append([]any{worktree}, vals...)
+	args = append(args, vals...)
+	// No LIMIT: the tier comes from the path in Go, so a row cap taken before
+	// ranking could drop a product match for tests that sort earlier by path.
+	rows, err := e.st.DB.QueryContext(ctx, `
+SELECT n.id, n.name, n.qualified_name, n.kind, f.language, f.path, n.start_line, n.signature
+  FROM nodes n
+  JOIN files f ON f.id = n.file_id
+ WHERE f.worktree = ?
+   AND (n.name IN (`+inList+`) OR n.qualified_name IN (`+inList+`))
+ ORDER BY f.path, n.start_line`, args...)
+	if err != nil {
+		return nil, err
+	}
+	// A read-only query: rows.Err below reports any read failure, and Close only
+	// releases the statement.
+	defer func() { _ = rows.Close() }()
+	var out []SearchResult
+	for rows.Next() {
+		var r SearchResult
+		if err := rows.Scan(&r.NodeID, &r.Name, &r.QualifiedName, &r.Kind,
+			&r.Language, &r.Path, &r.Line, &r.Signature); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	slices.SortStableFunc(out, func(a, b SearchResult) int { return ValueTier(a) - ValueTier(b) })
+	return dedupBySymbol(out, limit), nil
 }
 
 // mergeHybrid fuses the lexical and vector tiers with a reserved tail. Lexical

@@ -56,7 +56,7 @@ func TestNoteShownToSubagentIsShownToMainAgent(t *testing.T) {
 
 func TestSearchHintedInSubagentIsHintedInMainAgent(t *testing.T) {
 	a, dir := newTreeApp(t)
-	recordWidgetBug(t, a)
+	indexWidgetBug(t, a)
 	search := func(agent string) string {
 		return shellHook(t, a, Event{SessionID: "s", AgentID: agent, Command: "rg Widget", CWD: dir})
 	}
@@ -65,8 +65,8 @@ func TestSearchHintedInSubagentIsHintedInMainAgent(t *testing.T) {
 			t.Errorf("agent %q: first search lacks the hint or the nudge:\n%s", agent, got)
 		}
 	}
-	if got := search(""); !strings.Contains(got, "already searched") || strings.Contains(got, "search_content") {
-		t.Errorf("main agent's second search:\n%s", got)
+	if got := search(""); got != "" {
+		t.Errorf("main agent's second search = %q, want nothing", got)
 	}
 }
 
