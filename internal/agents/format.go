@@ -24,6 +24,8 @@ const (
 	archModuleLimit    = 8   // caps both the module list and the dependency-edge list of the map
 	cerebrumReserve    = 384 // headroom for the map (~165 tok) + recent-bugs (~60 tok) + delta (~150 tok) tiers
 	cerebrumBodyMax    = 160
+	titleMax           = 160 // runes of a title in a one-line note or list
+	fixMax             = 200 // runes of a fix in a bug warning
 
 	// deltaTierBudget caps the session-start "what changed" tier. The full list is
 	// one get_graph_delta call away, so the tier only buys orientation.
@@ -53,6 +55,9 @@ func largeReadThreshold() int {
 	return largeReadTokens
 }
 
+// memoryHeader opens the repo memory tier of the session-start block.
+const memoryHeader = "Recarto memory for this repo/branch:\n"
+
 // formatSessionContext renders the tiered session-start block: pinned do_not_repeat
 // (always, full body), cerebrum memories (title + trimmed body, degrading to
 // titles-only then dropping under budget pressure), an optional cross-repo
@@ -65,8 +70,9 @@ func largeReadThreshold() int {
 // so the just-in-time read/edit hooks do not re-inject a guardrail/bug/todo already
 // sitting in this block — duplicate context is pure token waste. A memory dropped
 // here is deliberately left unmarked so it can still surface when its code is touched.
-// Workspace memories are never marked: the just-in-time hooks only serve the repo
-// store, so there is nothing to dedup against.
+// Workspace memories are returned too, so a resume does not show them again,
+// and so are the recent bugs, so a later search hint, read or edit in the
+// conversation does not show them again.
 //
 // With the session-memories feature off in f, the memory header, empty-memory
 // line and record nudge go too, leaving the other tiers; a line pointing at
@@ -77,79 +83,16 @@ func formatSessionContext(results []memory.RecallResult, wsName string, wsResult
 	var b strings.Builder
 	memories := f.On(features.SessionMemories)
 	if memories {
-		b.WriteString("Recarto memory for this repo/branch:\n")
+		b.WriteString(memoryHeader)
 	}
-
-	var emitted []string
-	markEmitted := func(r memory.RecallResult) {
-		if r.Record != nil && r.Record.ID != "" {
-			emitted = append(emitted, r.Record.ID)
-		}
-	}
-
-	budgetCap := budget - cerebrumReserve
-	if budgetCap < 0 {
-		budgetCap = budget
-	}
-	used := 0
-	for _, r := range results {
-		title := r.Record.Title
-		if title == "" {
-			title = "(untitled)"
-		}
-		if r.Record.Kind == memory.KindDoNotRepeat && r.Record.Pinned {
-			line := fmt.Sprintf("- [%s] %s\n  %s\n", r.Record.Kind, title, r.Record.Body)
-			b.WriteString(line)
-			used += ledger.EstimateTokens(line)
-			if c := r.Caveat(); c != "" {
-				fmt.Fprintf(&b, "  %s\n", c)
-				used += ledger.EstimateTokens(c)
-			}
-			markEmitted(r)
-			continue
-		}
-		// Gate on the RAW body cost so a large-bodied memory degrades to title-only,
-		// but emit (and account) the trimmed one-line display.
-		fullDisplay := fmt.Sprintf("- [%s] %s\n  %s\n", r.Record.Kind, title, trimOneLine(r.Record.Body))
-		fullCost := fmt.Sprintf("- [%s] %s\n  %s\n", r.Record.Kind, title, r.Record.Body)
-		titleOnly := fmt.Sprintf("- [%s] %s\n", r.Record.Kind, title)
-		switch {
-		case used+ledger.EstimateTokens(fullCost) <= budgetCap:
-			b.WriteString(fullDisplay)
-			used += ledger.EstimateTokens(fullDisplay)
-			if c := r.Caveat(); c != "" {
-				fmt.Fprintf(&b, "  %s\n", c)
-				used += ledger.EstimateTokens(c)
-			}
-			markEmitted(r)
-		case used+ledger.EstimateTokens(titleOnly) <= budgetCap:
-			b.WriteString(titleOnly)
-			used += ledger.EstimateTokens(titleOnly)
-			if c := r.Caveat(); c != "" {
-				fmt.Fprintf(&b, "  %s\n", c)
-				used += ledger.EstimateTokens(c)
-			}
-			markEmitted(r)
-		}
-	}
+	mem, emitted := formatMemories(results, budget)
+	b.WriteString(mem)
 	if len(results) == 0 && memories {
 		b.WriteString("(no prior memories yet)\n")
 	}
-
-	// The cross-repo workspace tier: already token-budgeted by its own recall
-	// (a slice of the session budget carved out by the caller), so it renders
-	// without further cap math — uniform title + trimmed body, like the
-	// cerebrum tier's compact form.
-	if len(wsResults) > 0 {
-		fmt.Fprintf(&b, "\nWorkspace memory (%s, shared across repos):\n", wsName)
-		for _, r := range wsResults {
-			title := r.Record.Title
-			if title == "" {
-				title = "(untitled)"
-			}
-			fmt.Fprintf(&b, "- [%s] %s\n  %s\n", r.Record.Kind, title, trimOneLine(r.Record.Body))
-		}
-	}
+	ws, wsEmitted := formatWorkspaceMemories(wsName, wsResults)
+	b.WriteString(ws)
+	emitted = append(emitted, wsEmitted...)
 
 	// One line, not a tier: the extra repos' memories reach the agent through
 	// recall (merged automatically) and the file-anchored read/edit hooks, so
@@ -187,11 +130,10 @@ func formatSessionContext(results []memory.RecallResult, wsName string, wsResult
 		}
 		b.WriteString(":\n")
 		for _, r := range bugs {
-			t := r.Title
-			if t == "" {
-				t = "(untitled)"
+			fmt.Fprintf(&b, "- %s\n", noteTitle(r))
+			if r.ID != "" {
+				emitted = append(emitted, r.ID)
 			}
-			fmt.Fprintf(&b, "- %s\n", t)
 		}
 	}
 
@@ -201,15 +143,111 @@ func formatSessionContext(results []memory.RecallResult, wsName string, wsResult
 	return strings.TrimSpace(b.String()), emitted
 }
 
-// formatBugWarnings renders prior bugs tied to a code location as advisory lines.
-func formatBugWarnings(loc string, bugs []*memory.Record) string {
+// formatResumeContext renders the memory tiers alone, for a resumed conversation:
+// the repo memories under memoryHeader, then the workspace tier. It returns the
+// IDs it rendered, and "" when there are none.
+func formatResumeContext(results []memory.RecallResult, wsName string, wsResults []memory.RecallResult, budget int) (string, []string) {
+	var b strings.Builder
+	mem, emitted := formatMemories(results, budget)
+	if mem != "" {
+		b.WriteString(memoryHeader)
+		b.WriteString(mem)
+	}
+	ws, wsEmitted := formatWorkspaceMemories(wsName, wsResults)
+	b.WriteString(ws)
+	return strings.TrimSpace(b.String()), append(emitted, wsEmitted...)
+}
+
+// formatMemories renders the repo memory entries within budget and returns the
+// IDs of those it rendered.
+func formatMemories(results []memory.RecallResult, budget int) (string, []string) {
+	var b strings.Builder
+	var emitted []string
+	markEmitted := func(r memory.RecallResult) {
+		if r.Record != nil && r.Record.ID != "" {
+			emitted = append(emitted, r.Record.ID)
+		}
+	}
+
+	budgetCap := budget - cerebrumReserve
+	if budgetCap < 0 {
+		budgetCap = budget
+	}
+	used := 0
+	for _, r := range results {
+		title := noteTitle(r.Record)
+		if r.Record.Kind == memory.KindDoNotRepeat && r.Record.Pinned {
+			line := fmt.Sprintf("- [%s] %s\n  %s\n", r.Record.Kind, title, r.Record.Body)
+			b.WriteString(line)
+			used += ledger.EstimateTokens(line)
+			if c := r.Caveat(); c != "" {
+				fmt.Fprintf(&b, "  %s\n", c)
+				used += ledger.EstimateTokens(c)
+			}
+			markEmitted(r)
+			continue
+		}
+		// Gate on the RAW body cost so a large-bodied memory degrades to title-only,
+		// but emit (and account) the trimmed one-line display.
+		fullDisplay := fmt.Sprintf("- [%s] %s\n  %s\n", r.Record.Kind, title, trimOneLine(r.Record.Body))
+		fullCost := fmt.Sprintf("- [%s] %s\n  %s\n", r.Record.Kind, title, r.Record.Body)
+		titleOnly := fmt.Sprintf("- [%s] %s\n", r.Record.Kind, title)
+		switch {
+		case used+ledger.EstimateTokens(fullCost) <= budgetCap:
+			b.WriteString(fullDisplay)
+			used += ledger.EstimateTokens(fullDisplay)
+			if c := r.Caveat(); c != "" {
+				fmt.Fprintf(&b, "  %s\n", c)
+				used += ledger.EstimateTokens(c)
+			}
+			markEmitted(r)
+		case used+ledger.EstimateTokens(titleOnly) <= budgetCap:
+			b.WriteString(titleOnly)
+			used += ledger.EstimateTokens(titleOnly)
+			if c := r.Caveat(); c != "" {
+				fmt.Fprintf(&b, "  %s\n", c)
+				used += ledger.EstimateTokens(c)
+			}
+			markEmitted(r)
+		}
+	}
+	return b.String(), emitted
+}
+
+// formatWorkspaceMemories renders the cross-repo workspace tier and returns the
+// IDs it rendered. The tier is already token-budgeted by its own recall (a
+// slice of the session budget carved out by the caller), so it renders without
+// further cap math — uniform title + trimmed body, like the cerebrum tier's
+// compact form.
+func formatWorkspaceMemories(name string, rs []memory.RecallResult) (string, []string) {
+	if len(rs) == 0 {
+		return "", nil
+	}
+	var b strings.Builder
+	var emitted []string
+	fmt.Fprintf(&b, "\nWorkspace memory (%s, shared across repos):\n", name)
+	for _, r := range rs {
+		title := noteTitle(r.Record)
+		fmt.Fprintf(&b, "- [%s] %s\n  %s\n", r.Record.Kind, title, trimOneLine(r.Record.Body))
+		emitted = append(emitted, r.Record.ID)
+	}
+	return b.String(), emitted
+}
+
+// formatBugWarnings renders prior bugs tied to a code location as advisory
+// lines: the title and the start of the fix, plus, when pointer is set, the
+// get_memory call that returns the whole text.
+func formatBugWarnings(loc string, bugs []*memory.Record, pointer bool) string {
 	lines := make([]string, 0, len(bugs))
 	for _, r := range bugs {
-		if fix, _ := r.Extra["fix"].(string); fix != "" {
-			lines = append(lines, fmt.Sprintf("⚠ prior bug in %s: %s — fix: %s", loc, r.Title, fix))
-		} else {
-			lines = append(lines, fmt.Sprintf("⚠ prior bug in %s: %s", loc, r.Title))
+		line := fmt.Sprintf("⚠ prior bug in %s: %s", loc, noteTitle(r))
+		if fix, _ := r.Extra["fix"].(string); strings.TrimSpace(fix) != "" {
+			line += " — fix: " + clip(fix, fixMax)
 		}
+		if pointer {
+			line += fmt.Sprintf(" (full text: get_memory id=%s)", r.ID)
+		}
+		lines = append(lines, line)
 	}
 	return strings.Join(lines, "\n")
 }
@@ -219,11 +257,7 @@ func formatBugWarnings(loc string, bugs []*memory.Record) string {
 func formatTodoReminders(loc string, todos []*memory.Record) string {
 	lines := make([]string, 0, len(todos))
 	for _, r := range todos {
-		title := r.Title
-		if title == "" {
-			title = "(untitled)"
-		}
-		lines = append(lines, fmt.Sprintf("📝 open todo for %s: %s", loc, title))
+		lines = append(lines, fmt.Sprintf("📝 open todo for %s: %s", loc, noteTitle(r)))
 	}
 	return strings.Join(lines, "\n")
 }
@@ -236,10 +270,7 @@ func formatTodoReminders(loc string, todos []*memory.Record) string {
 func formatGuidance(loc string, recs []*memory.Record) string {
 	lines := make([]string, 0, len(recs))
 	for _, r := range recs {
-		title := r.Title
-		if title == "" {
-			title = "(untitled)"
-		}
+		title := noteTitle(r)
 		switch r.Kind {
 		case memory.KindDoNotRepeat:
 			lines = append(lines, fmt.Sprintf("🚫 do-not-repeat for %s: %s", loc, title))
@@ -259,10 +290,25 @@ func trimOneLine(s string) string {
 	if i := strings.IndexByte(s, '\n'); i >= 0 {
 		s = s[:i]
 	}
-	if r := []rune(s); len(r) > cerebrumBodyMax {
-		s = string(r[:cerebrumBodyMax]) + "…"
+	return clip(s, cerebrumBodyMax)
+}
+
+// clip collapses s's whitespace runs to single spaces and cuts it to max
+// runes, marking a cut with "…".
+func clip(s string, max int) string {
+	s = strings.Join(strings.Fields(s), " ")
+	if r := []rune(s); len(r) > max {
+		s = string(r[:max]) + "…"
 	}
 	return s
+}
+
+// noteTitle is r's title as one-line notes and lists show it.
+func noteTitle(r *memory.Record) string {
+	if t := clip(r.Title, titleMax); t != "" {
+		return t
+	}
+	return "(untitled)"
 }
 
 // nullable maps "" to a SQL NULL so repo-global rows store NULL, not "".

@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -66,5 +67,8 @@ func TestServeNonGitCwdWithWorkspaceSync(t *testing.T) {
 	}
 	_ = cs.Close()
 	cancel()
-	<-done
+	// cancel ends the session, so serve reports exactly that.
+	if err := <-done; err != nil && !errors.Is(err, context.Canceled) {
+		t.Errorf("serve: %v", err)
+	}
 }

@@ -28,11 +28,13 @@ func (Adapter) Decode(kind agents.EventKind, in io.Reader) (agents.Event, error)
 		ToolResult string `json:"tool_result"`
 		Command    string `json:"command"`
 		CWD        string `json:"cwd"`
+		Offset     any    `json:"offset"`
+		Limit      any    `json:"limit"`
 	}
 	if err := json.NewDecoder(in).Decode(&p); err != nil && err != io.EOF {
 		return agents.Event{}, err
 	}
-	return agents.Event{
+	ev := agents.Event{
 		Kind:       kind,
 		Agent:      "opencode",
 		SessionID:  p.SessionID,
@@ -42,7 +44,13 @@ func (Adapter) Decode(kind agents.EventKind, in io.Reader) (agents.Event, error)
 		ToolResult: p.ToolResult,
 		Command:    p.Command,
 		CWD:        p.CWD,
-	}, nil
+	}
+	if kind == agents.KindPostRead {
+		ev.ReadRanged = p.Offset != nil || p.Limit != nil
+		// OpenCode 1 and 2 both number the lines they return "N: ".
+		ev.ReadFirst, ev.ReadLast = agents.NumberedLines(p.ToolResult, ": ")
+	}
+	return ev, nil
 }
 
 // Encode writes the neutral result the plugin reads from recarto's stdout. The

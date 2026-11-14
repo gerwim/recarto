@@ -172,7 +172,11 @@ func TestRepairCommandRunsWhenTheAppCannotOpen(t *testing.T) {
 	}
 
 	a2 := openAppIn(t, cacheDir)
-	defer a2.Close()
+	defer func() {
+		if err := a2.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
 	var n int
 	if err := a2.Store.DB.QueryRow(`SELECT count(*) FROM memories`).Scan(&n); err != nil {
 		t.Fatal(err)
@@ -225,7 +229,11 @@ func TestRepairCommandSalvagesMemories(t *testing.T) {
 	}
 
 	a2 := openAppIn(t, cacheDir)
-	defer a2.Close()
+	defer func() {
+		if err := a2.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
 	var title string
 	if err := a2.Store.DB.QueryRow(`SELECT title FROM memories WHERE id='m1'`).Scan(&title); err != nil {
 		t.Fatalf("memory not salvaged: %v", err)
@@ -285,7 +293,11 @@ func TestDoctorHintsAtRepairWhenIntegrityFails(t *testing.T) {
 	smashPagesPast(t, path, base)
 
 	a2 := openAppIn(t, cacheDir) // opens fine: the damage is not on the open path
-	defer a2.Close()
+	defer func() {
+		if err := a2.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
 
 	var buf bytes.Buffer
 	err = Doctor(ctx, a2, &buf)

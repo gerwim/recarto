@@ -15,7 +15,9 @@ func TestSearchGraphHandler(t *testing.T) {
 	a := newTestApp(t, "main") // reuse the existing mcp test helper
 	wt := t.TempDir()
 	a.Git.Worktree = wt
-	os.WriteFile(filepath.Join(wt, "a.go"), []byte("package p\nfunc Authenticate(){}"), 0o644)
+	if err := os.WriteFile(filepath.Join(wt, "a.go"), []byte("package p\nfunc Authenticate(){}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if err := a.Graph.Reconcile(context.Background(), wt, graph.FSSource{Root: wt}); err != nil {
 		t.Fatal(err)
 	}
@@ -33,8 +35,10 @@ func TestSearchGraphReturnsSignature(t *testing.T) {
 	a := newTestApp(t, "main")
 	wt := t.TempDir()
 	a.Git.Worktree = wt
-	os.WriteFile(filepath.Join(wt, "a.go"),
-		[]byte("package p\nfunc Greet(name string) string { return name }"), 0o644)
+	if err := os.WriteFile(filepath.Join(wt, "a.go"),
+		[]byte("package p\nfunc Greet(name string) string { return name }"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if err := a.Graph.Reconcile(context.Background(), wt, graph.FSSource{Root: wt}); err != nil {
 		t.Fatal(err)
 	}
@@ -548,8 +552,10 @@ func TestTraceCallPathSuggestions(t *testing.T) {
 	a := newTestApp(t, "main")
 	wt := t.TempDir()
 	a.Git.Worktree = wt
-	os.WriteFile(filepath.Join(wt, "a.go"),
-		[]byte("package p\nfunc Greet(name string) string { return name }"), 0o644)
+	if err := os.WriteFile(filepath.Join(wt, "a.go"),
+		[]byte("package p\nfunc Greet(name string) string { return name }"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if err := a.Graph.Reconcile(context.Background(), wt, graph.FSSource{Root: wt}); err != nil {
 		t.Fatal(err)
 	}

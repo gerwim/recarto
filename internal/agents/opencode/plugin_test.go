@@ -59,7 +59,7 @@ await hooks["session.context"](r1);
 await hooks["session.context"](r2);
 
 const after = (tool, input, result) => ({ tool, sessionID: "root", status: "completed", input, result });
-const read = after("read", { path: "a.go" }, { content: [{ type: "text", text: "file body" }] });
+const read = after("read", { path: "a.go", offset: 10, limit: 5 }, { content: [{ type: "text", text: "file body" }] });
 const listing = after("read", { path: "." }, { content: "listing", output: { type: "list-page" } });
 const grep = after("grep", { pattern: "Foo" }, { content: "1 match" });
 const edit = after("edit", { path: "b.go" }, { content: [{ type: "text", text: "Edited" }] });
@@ -79,7 +79,7 @@ const v1 = await plugin.server({ directory: dir });
 const sys = { system: [] };
 await v1["experimental.chat.system.transform"]({ sessionID: "v1s" }, sys);
 const v1read = { title: "", output: "body", metadata: {} };
-await v1["tool.execute.after"]({ tool: "read", sessionID: "v1s", callID: "c", args: { filePath: "e.go" } }, v1read);
+await v1["tool.execute.after"]({ tool: "read", sessionID: "v1s", callID: "c", args: { filePath: "e.go", offset: 3 } }, v1read);
 const v1bash = { title: "", output: "hits", metadata: {} };
 await v1["tool.execute.after"]({ tool: "bash", sessionID: "v1s", callID: "d", args: { command: "grep -rn Foo .", workdir: "/abs/w" } }, v1bash);
 const v1test = { title: "", output: "ok", metadata: {} };
@@ -181,7 +181,7 @@ func TestPluginRunsUnderNode(t *testing.T) {
 	}
 	wantCalls := []string{
 		"session-start session_id=root", // once for two requests of the session
-		"post-read file_path=<dir>/a.go session_id=root tool_result=file body",
+		"post-read file_path=<dir>/a.go limit=5 offset=10 session_id=root tool_result=file body",
 		"augment pattern=Foo session_id=root",
 		"post-edit file_path=<dir>/b.go session_id=root",
 		"post-edit file_path=/abs/c.go session_id=root",
@@ -190,7 +190,7 @@ func TestPluginRunsUnderNode(t *testing.T) {
 		"shell command=cat a.go cwd=<dir> session_id=root",
 		"stop session_id=root", // the subagent session is skipped
 		"session-start session_id=v1s",
-		"post-read file_path=<dir>/e.go session_id=v1s tool_result=body",
+		"post-read file_path=<dir>/e.go offset=3 session_id=v1s tool_result=body",
 		"shell command=grep -rn Foo . cwd=/abs/w session_id=v1s",
 		"post-edit file_path=/abs/f.go",
 	}

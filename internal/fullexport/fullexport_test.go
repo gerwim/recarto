@@ -44,6 +44,14 @@ func seedStore(t *testing.T, cacheDir, dirName, repoName, rootCommit string) (*s
 	return st, memory.New(st, ledger.New(st), clock.Real{})
 }
 
+// closeStore closes st so ExportAll reads it from disk, failing the test if it can't.
+func closeStore(t *testing.T, st *store.Store) {
+	t.Helper()
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func readAllEntries(t *testing.T, data []byte) []syncwire.ExportEntry {
 	t.Helper()
 	var entries []syncwire.ExportEntry
@@ -84,7 +92,7 @@ func TestExportAllGroupsByServerKeyAndCoversAllStatuses(t *testing.T) {
 	if _, err := engA.Forget(ctx, forgottenID, "test"); err != nil {
 		t.Fatal(err)
 	}
-	stA.Close()
+	closeStore(t, stA)
 
 	stB, engB := seedStore(t, cacheDir, "dirB", "repoB", "rootcommitB")
 	if _, _, _, err := engB.Record(ctx, memory.NewMemory{
@@ -92,7 +100,7 @@ func TestExportAllGroupsByServerKeyAndCoversAllStatuses(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	stB.Close()
+	closeStore(t, stB)
 
 	stFB, engFB := seedStore(t, cacheDir, feedback.StoreID, "", "")
 	if _, _, _, err := engFB.Record(ctx, memory.NewMemory{
@@ -100,12 +108,12 @@ func TestExportAllGroupsByServerKeyAndCoversAllStatuses(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	stFB.Close()
+	closeStore(t, stFB)
 
 	// A shallow-clone-like store with no root commit must be skipped, not fail
 	// the whole export.
 	stShallow, _ := seedStore(t, cacheDir, "dirShallow", "shallowRepo", "")
-	stShallow.Close()
+	closeStore(t, stShallow)
 
 	var buf bytes.Buffer
 	stats, err := ExportAll(ctx, cacheDir, clock.NewFake(time.UnixMilli(1_700_000_000_000)), &buf, Options{})
@@ -210,13 +218,13 @@ func TestExportAllOnlyRestrictsToOneRepo(t *testing.T) {
 	if _, _, _, err := engA.Record(ctx, memory.NewMemory{Kind: memory.KindLearning, Title: "a", Body: "repo A only content"}); err != nil {
 		t.Fatal(err)
 	}
-	stA.Close()
+	closeStore(t, stA)
 
 	stB, engB := seedStore(t, cacheDir, "dirB", "repoB", "rootcommitB")
 	if _, _, _, err := engB.Record(ctx, memory.NewMemory{Kind: memory.KindLearning, Title: "b", Body: "repo B only content"}); err != nil {
 		t.Fatal(err)
 	}
-	stB.Close()
+	closeStore(t, stB)
 
 	var buf bytes.Buffer
 	stats, err := ExportAll(ctx, cacheDir, clock.Real{}, &buf, Options{Only: "dirA"})

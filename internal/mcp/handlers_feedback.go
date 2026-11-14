@@ -15,12 +15,12 @@ import (
 // title and detail are required; the rest are optional. Context (source repo,
 // version) is auto-captured by the handler — the agent does not supply it.
 type ReportRecartoIssueInput struct {
-	SignalType   string `json:"signal_type" jsonschema:"the kind of problem: error (a tool errored/crashed/returned a clearly-wrong empty result), quality (it worked but ranked/returned the wrong thing), friction (confusing or awkward API), or gap (a capability you needed was missing)"`
+	SignalType   string `json:"signal_type" jsonschema:"error (a tool failed or returned a clearly wrong empty result), quality (wrong ranking or result), friction (confusing to use) or gap (a missing capability)"`
 	Title        string `json:"title" jsonschema:"one-line summary of the problem"`
-	Detail       string `json:"detail" jsonschema:"what you were doing, what you expected, and what actually happened. Describe the Recarto interaction and a minimal repro — do NOT paste proprietary source from this repo"`
-	Tool         string `json:"tool,omitempty" jsonschema:"which Recarto tool or area was involved (e.g. search_content, trace_call_path)"`
+	Detail       string `json:"detail" jsonschema:"what you did, expected and got"`
+	Tool         string `json:"tool,omitempty" jsonschema:"the Recarto tool involved, e.g. search_content"`
 	Severity     string `json:"severity,omitempty" jsonschema:"low, medium, or high"`
-	Repro        string `json:"repro,omitempty" jsonschema:"the call/args that triggered it"`
+	Repro        string `json:"repro,omitempty" jsonschema:"the call and arguments that triggered it"`
 	SuggestedFix string `json:"suggested_fix,omitempty" jsonschema:"your proposed fix, if any"`
 }
 
@@ -45,7 +45,8 @@ func reportRecartoIssue(ctx context.Context, a *app.App, in ReportRecartoIssueIn
 	if err != nil {
 		return ReportRecartoIssueOutput{}, err
 	}
-	defer b.Close()
+	// The report is committed before Close, so a close failure loses nothing.
+	defer func() { _ = b.Close() }()
 
 	source := a.Git.RepoName
 	if source == "" {

@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -25,7 +26,7 @@ func known(cmd string) bool {
 // the repo's files and needs no store. Hooks are non-blocking: they open the App
 // themselves (only when the event has something to act on), report any error to
 // stderr, and Run still returns nil so the agent is never blocked.
-func Run(args []string, out io.Writer) error {
+func Run(args []string, out io.Writer) (rerr error) {
 	if len(args) == 0 {
 		return usage(out)
 	}
@@ -104,7 +105,7 @@ func Run(args []string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	defer a.Close()
+	defer func() { rerr = errors.Join(rerr, a.Close()) }()
 
 	ctx := context.Background()
 	switch cmd {
@@ -150,30 +151,31 @@ func binaryPath() string {
 }
 
 func usage(w io.Writer) error {
-	fmt.Fprintln(w, "recarto <command>")
-	fmt.Fprintln(w, "  init              configure agents (--agent claude,opencode,copilot  --scope user|repo)")
-	fmt.Fprintln(w, "  config            turn features on or off: interactive in a terminal (or list|enable|disable|path)")
-	fmt.Fprintln(w, "  licenses          print Recarto's licence and the third-party notices")
-	fmt.Fprintln(w, "  serve             run the MCP server over stdio")
-	fmt.Fprintln(w, "  hook <event>      run an agent hook (session-start|post-read|post-edit|augment|stop|shell) [--agent] [--cmd]")
-	fmt.Fprintln(w, "  status            repo id, branch, memory counts, ledger")
-	fmt.Fprintln(w, "  doctor            health checks (db, WAL, integrity, git)")
-	fmt.Fprintln(w, "  repair            rebuild a corrupt store, salvaging memories (--path <store.db>)")
-	fmt.Fprintln(w, "  remember <kind>   record a memory (--title --body --files --symbols --tags --pin --global)")
-	fmt.Fprintln(w, "  forget <id>       hard-delete a memory by id")
-	fmt.Fprintln(w, "  recall [hint]     ranked, budgeted recall (--files --symbols --kind --limit --budget)")
-	fmt.Fprintln(w, "  bug add|search    record or search bug memories")
-	fmt.Fprintln(w, "  feedback          triage cross-repo Recarto bug reports (list|show|resolve) — works anywhere")
-	fmt.Fprintln(w, "  memory show       render all active memory as markdown (--branch)")
-	fmt.Fprintln(w, "  index             build/refresh the code graph for this worktree (--force: full rebuild/heal)")
-	fmt.Fprintln(w, "  graph <sub>       query the code graph (search|grep|callers|callees|impls|annotated|outline|arch|query|snippet)")
-	fmt.Fprintln(w, "  compact           prune/decay memory + sweep dead worktrees (--force --dry-run --budget-tokens --vacuum)")
-	fmt.Fprintln(w, "  snapshot          export|import the committable team memory (.recarto/memory.jsonl)")
-	fmt.Fprintln(w, "  todo list|done    list open todos, or mark one done")
-	fmt.Fprintln(w, "  update            self-update to the latest (or a chosen) release (--version --list --check --yes)")
-	fmt.Fprintln(w, "  sync              manual HTTP memory sync (--pull --push --full); auto-runs at session-start/stop")
-	fmt.Fprintln(w, "  server            run the HTTP memory-sync server (--addr --data-dir --tls-cert --tls-key; needs RECARTO_SERVER_KEY)")
-	fmt.Fprintln(w, "  export            export every project's full memory history to an archive (--out --repo --push --url --key)")
-	fmt.Fprintln(w, "  import [--url --key] <file>  upload a previously written export archive to the sync server")
-	return nil
+	_, err := io.WriteString(w, `recarto <command>
+  init              configure agents (--agent claude,opencode,copilot  --scope user|repo)
+  config            turn features on or off: interactive in a terminal (or list|enable|disable|path)
+  licenses          print Recarto's licence and the third-party notices
+  serve             run the MCP server over stdio
+  hook <event>      run an agent hook (session-start|post-read|post-edit|augment|stop|shell) [--agent] [--cmd]
+  status            repo id, branch, memory counts, ledger
+  doctor            health checks (db, WAL, integrity, git)
+  repair            rebuild a corrupt store, salvaging memories (--path <store.db>)
+  remember <kind>   record a memory (--title --body --files --symbols --tags --pin --global)
+  forget <id>       hard-delete a memory by id
+  recall [hint]     ranked, budgeted recall (--files --symbols --kind --limit --budget)
+  bug add|search    record or search bug memories
+  feedback          triage cross-repo Recarto bug reports (list|show|resolve) — works anywhere
+  memory show       render all active memory as markdown (--branch)
+  index             build/refresh the code graph for this worktree (--force: full rebuild/heal)
+  graph <sub>       query the code graph (search|grep|callers|callees|impls|annotated|outline|arch|query|snippet)
+  compact           prune/decay memory + sweep dead worktrees (--force --dry-run --budget-tokens --vacuum)
+  snapshot          export|import the committable team memory (.recarto/memory.jsonl)
+  todo list|done    list open todos, or mark one done
+  update            self-update to the latest (or a chosen) release (--version --list --check --yes)
+  sync              manual HTTP memory sync (--pull --push --full); auto-runs at session-start/stop
+  server            run the HTTP memory-sync server (--addr --data-dir --tls-cert --tls-key; needs RECARTO_SERVER_KEY)
+  export            export every project's full memory history to an archive (--out --repo --push --url --key)
+  import [--url --key] <file>  upload a previously written export archive to the sync server
+`)
+	return err
 }

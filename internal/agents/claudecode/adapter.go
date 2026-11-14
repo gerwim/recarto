@@ -16,10 +16,13 @@ type Adapter struct{}
 // Event. The grep pattern falls back to the glob query field; the tool output
 // (sized for the read ledger) comes from tool_response, falling back to the
 // tool_result spelling older payloads used. A Bash call carries its command in
-// tool_input and the session's working directory in cwd.
+// tool_input and the session's working directory in cwd. A Read also yields
+// whether it asked for a line range and which lines it returned. A hook fired
+// in a subagent carries its agent_id.
 func (Adapter) Decode(kind agents.EventKind, in io.Reader) (agents.Event, error) {
 	var p struct {
 		SessionID string `json:"session_id"`
+		AgentID   string `json:"agent_id"`
 		Source    string `json:"source"`
 		CWD       string `json:"cwd"`
 		ToolInput struct {
@@ -27,6 +30,8 @@ func (Adapter) Decode(kind agents.EventKind, in io.Reader) (agents.Event, error)
 			Pattern  string `json:"pattern"`
 			Query    string `json:"query"`
 			Command  string `json:"command"`
+			Offset   any    `json:"offset"`
+			Limit    any    `json:"limit"`
 		} `json:"tool_input"`
 		ToolResult     json.RawMessage `json:"tool_result"`
 		ToolResponse   json.RawMessage `json:"tool_response"` // what Claude Code actually sends
@@ -43,10 +48,11 @@ func (Adapter) Decode(kind agents.EventKind, in io.Reader) (agents.Event, error)
 	if len(result) == 0 {
 		result = p.ToolResponse
 	}
-	return agents.Event{
+	ev := agents.Event{
 		Kind:       kind,
 		Agent:      "claude-code",
 		SessionID:  p.SessionID,
+		AgentID:    p.AgentID,
 		Source:     p.Source,
 		FilePath:   p.ToolInput.FilePath,
 		Pattern:    pattern,
@@ -54,7 +60,22 @@ func (Adapter) Decode(kind agents.EventKind, in io.Reader) (agents.Event, error)
 		StopActive: p.StopHookActive,
 		Command:    p.ToolInput.Command,
 		CWD:        p.CWD,
-	}, nil
+	}
+	if kind == agents.KindPostRead {
+		var resp struct {
+			Type string                            `json:"type"`
+			File struct{ StartLine, NumLines int } `json:"file"`
+		}
+		// A result not shaped like a text Read (an image, a notebook, Claude Code's
+		// own "file unchanged" reply, an older string payload) leaves the lines unknown.
+		if json.Unmarshal(result, &resp) == nil && resp.Type == "text" && resp.File.NumLines > 0 {
+			// Claude Code reports startLine 0 for offset 0 but returns from line 1.
+			ev.ReadFirst = max(resp.File.StartLine, 1)
+			ev.ReadLast = ev.ReadFirst + resp.File.NumLines - 1
+		}
+		ev.ReadRanged = p.ToolInput.Offset != nil || p.ToolInput.Limit != nil
+	}
+	return ev, nil
 }
 
 // Encode emits the Claude Code hook output shape: hookSpecificOutput.additionalContext

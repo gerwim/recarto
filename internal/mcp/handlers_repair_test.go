@@ -200,7 +200,11 @@ func TestRecordMemoryOnACorruptStore(t *testing.T) {
 
 	// The next `recarto serve` session: the proactive check repairs at startup.
 	a = openAppIn(t, cacheDir, true)
-	defer a.Close()
+	t.Cleanup(func() {
+		if err := a.Close(); err != nil {
+			t.Error(err)
+		}
+	})
 	out, err := recordMemory(ctx, a, RecordMemoryInput{
 		Kind: "learning",
 		Body: "a completely different subject, recorded while the store is damaged",

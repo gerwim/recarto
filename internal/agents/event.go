@@ -29,9 +29,13 @@ const (
 // Event is the agent-neutral hook input. Adapters populate the fields relevant to
 // the Kind; unused fields stay zero.
 type Event struct {
-	Kind       EventKind
-	Agent      string // sessions.agent: "claude-code" | "opencode" | "copilot"
-	SessionID  string
+	Kind      EventKind
+	Agent     string // sessions.agent: "claude-code" | "opencode" | "copilot"
+	SessionID string
+	// AgentID names the conversation within the session the hook fired in when
+	// the host runs several under one session id (a Claude Code subagent's
+	// agent_id); "" for the session's main conversation.
+	AgentID    string
 	Source     string
 	FilePath   string // absolute path (PostRead/PostEdit)
 	Pattern    string // grep/glob query (Augment)
@@ -48,6 +52,11 @@ type Event struct {
 	// and the absolute paths of the files it prints (Shell).
 	Patterns []string
 	Files    []string
+	// ReadRanged reports that the agent asked a read for a line range.
+	// ReadFirst..ReadLast are the 1-based lines the read returned; both are 0
+	// when the host did not say (PostRead).
+	ReadRanged          bool
+	ReadFirst, ReadLast int
 }
 
 // Result is the agent-neutral hook output. Context is injected as the host's
@@ -144,9 +153,9 @@ func wanted(ev Event, f features.Set) bool {
 
 // idle reports whether ev has nothing to act on, judged from the payload alone.
 // It mirrors the handlers' own early returns, so skipping Handle for it changes
-// neither output nor ledger. A stemless file glob ("*.cs") is idle too:
-// handleAugment injects nothing for it and so never marks it for the
-// repeated-search dedup. A shell line is idle unless it searches or prints a
+// neither output nor ledger. A Grep/Glob pattern that names no identifier
+// (a stemless glob like "*.cs", a path, regex syntax alone) is idle too: it
+// gets no hint and never touches the ledger. A shell line is idle unless it searches or prints a
 // file: builds, tests, git and writes never reach the store.
 func idle(ev Event) bool {
 	switch ev.Kind {
@@ -155,8 +164,7 @@ func idle(ev Event) bool {
 	case KindPostEdit:
 		return !filepath.IsAbs(ev.FilePath) // owningRepo rejects relative paths
 	case KindAugment:
-		_, ok := augmentSearchTerm(ev.Pattern)
-		return ev.Pattern == "" || !ok
+		return len(searchIdentifiers(ev.Pattern)) == 0
 	case KindStop:
 		return ev.SessionID == ""
 	case KindShell:

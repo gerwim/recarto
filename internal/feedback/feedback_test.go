@@ -37,7 +37,11 @@ func TestOpenIsRepoIndependentAndPersists(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer b2.Close()
+	defer func() {
+		if err := b2.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
 	recs, err := b2.Engine.List(ctx, memory.ListFilter{Kind: memory.KindFeedback})
 	if err != nil {
 		t.Fatal(err)

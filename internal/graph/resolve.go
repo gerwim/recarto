@@ -240,7 +240,7 @@ func buildPyModules(ctx context.Context, c store.Conn, worktree string, named ma
 	if err != nil {
 		return err
 	}
-	defer stmt.Close()
+	defer func() { _ = stmt.Close() }() // a statement close frees memory only; the transaction reports write errors
 	for _, f := range files {
 		for _, m := range pyModuleNames(f.path) {
 			if !pyNamed(named, m) {
@@ -567,7 +567,7 @@ SELECT ed.id, ed.src_node_id, ed.dst_name, ed.dst_recv, ed.file_id
 	if err != nil {
 		return err
 	}
-	defer stmt.Close()
+	defer func() { _ = stmt.Close() }() // a statement close frees memory only; the transaction reports write errors
 
 	seen := map[string]struct{}{} // DISTINCT type per edge; reused across edges
 	for i := range edges {
@@ -727,7 +727,7 @@ SELECT ed.id, ed.dst_name, ed.file_id, ed.dst_recv = ''
 	if err != nil {
 		return err
 	}
-	defer stmt.Close()
+	defer func() { _ = stmt.Close() }() // a statement close frees memory only; the transaction reports write errors
 
 	// ranked is a candidate match with its locality keys precomputed relative to
 	// the calling edge, ready for the S5 ordering.
@@ -1006,11 +1006,13 @@ func applyWinners(ctx context.Context, c store.Conn, winners map[string]denormWi
 	}
 	for _, edgeID := range ids {
 		if _, err := stmt.ExecContext(ctx, edgeID, winners[edgeID].dstID); err != nil {
-			stmt.Close()
+			_ = stmt.Close() // the Exec error is the one worth reporting
 			return err
 		}
 	}
-	stmt.Close()
+	if err := stmt.Close(); err != nil {
+		return err
+	}
 	if _, err := c.ExecContext(ctx, `
 UPDATE edges SET dst_node_id = (SELECT b.dst_node_id FROM denorm_best b WHERE b.edge_id = edges.id)
  WHERE id IN (SELECT edge_id FROM denorm_best)`); err != nil {

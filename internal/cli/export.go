@@ -92,7 +92,7 @@ func Export(ctx context.Context, w io.Writer, args []string) error {
 	gw := gzip.NewWriter(f)
 	stats, err := fullexport.ExportAll(ctx, cacheDir, clock.Real{}, gw, fullexport.Options{Only: only, OnlyKey: onlyKey})
 	if err != nil {
-		gw.Close()
+		_ = gw.Close() // the archive is incomplete either way; the export error is the one to report
 		return err
 	}
 	if err := gw.Close(); err != nil {

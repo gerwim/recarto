@@ -56,26 +56,41 @@ func shellHook(t *testing.T, a *app.App, ev Event) string {
 	return out.String()
 }
 
-func recordWidgetBug(t *testing.T, a *app.App) {
+// indexWidgetBug indexes widget.go defining Widget and records the bug
+// "Widget overflow" (fix "clamp") anchored to that symbol.
+func indexWidgetBug(t *testing.T, a *app.App) {
 	t.Helper()
-	if _, _, _, err := a.Engine.Record(context.Background(), memory.NewMemory{
-		Kind: memory.KindBug, Title: "Widget overflow", Body: "Widget overflow — fix: clamp",
-		Source: "cli", Extra: map[string]any{"fix": "clamp"},
-	}); err != nil {
+	indexSource(t, a, "widget.go", "package p\n\nfunc Widget() {}\n")
+	recordBug(t, a, "Widget overflow", "clamp", memory.Ref{Type: memory.RefSymbol, Value: "Widget"})
+}
+
+// indexSource indexes src as rel in a's primary worktree.
+func indexSource(t *testing.T, a *app.App, rel, src string) {
+	t.Helper()
+	if err := a.Graph.IndexFile(context.Background(), a.Git.Worktree, rel, []byte(src), 1, int64(len(src))); err != nil {
 		t.Fatal(err)
 	}
 }
 
-// Each shell search injects exactly what the Grep/Glob tool gives for its
-// pattern — symbols and the matching bug — plus the first-search nudge.
+// recordBug records a bug on a's branch with the given fix and refs.
+func recordBug(t *testing.T, a *app.App, title, fix string, refs ...memory.Ref) string {
+	t.Helper()
+	id, _, _, err := a.Engine.Record(context.Background(), memory.NewMemory{
+		Kind: memory.KindBug, Title: title, Body: title + " — fix: " + fix, Refs: refs,
+		Branch: a.Git.Branch, Source: "cli", Extra: map[string]any{"fix": fix},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
+// A shell search injects exactly what the Grep/Glob tool gives for its
+// pattern — the named symbol and its bug — plus the first-search nudge.
 func TestShellSearchGetsTheGrepHint(t *testing.T) {
 	a, dir := newTreeApp(t)
 	ctx := context.Background()
-	src := []byte("package p\n\nfunc Widget() {}\n")
-	if err := a.Graph.IndexFile(ctx, dir, "widget.go", src, 1, int64(len(src))); err != nil {
-		t.Fatal(err)
-	}
-	recordWidgetBug(t, a)
+	indexWidgetBug(t, a)
 	for i, tc := range []struct{ command, pattern string }{
 		{`grep -rn "Widget" internal/`, "Widget"},
 		{`rg Widget`, "Widget"},
@@ -99,23 +114,21 @@ func TestShellSearchGetsTheGrepHint(t *testing.T) {
 	}
 }
 
-// Several -e patterns are each searched; flag values are not.
+// Several -e patterns are each searched, under one header; flag values are not.
 func TestShellSearchEveryPattern(t *testing.T) {
 	a, dir := newTreeApp(t)
-	ctx := context.Background()
-	for _, title := range []string{"Foo crashes", "Bar leaks", "three misfires"} {
-		if _, _, _, err := a.Engine.Record(ctx, memory.NewMemory{Kind: memory.KindBug, Title: title, Body: title, Source: "cli"}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	got := shellHook(t, a, Event{SessionID: "s", Command: `grep -A 3 -e Foo -e Bar .`, CWD: dir})
-	for _, want := range []string{"Foo crashes", "Bar leaks"} {
+	indexSource(t, a, "x.go", "package p\n\nfunc Foo() {}\n\nfunc Bar() {}\n\nfunc three() {}\n")
+	got := shellHook(t, a, Event{SessionID: "s", Command: `grep --include three -e Foo -e Bar .`, CWD: dir})
+	for _, want := range []string{"] Foo  x.go:3", "] Bar  x.go:5"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("missing %q:\n%s", want, got)
 		}
 	}
-	if strings.Contains(got, "three misfires") {
-		t.Errorf("the -A value was searched:\n%s", got)
+	if n := strings.Count(got, "symbols named in your search"); n != 1 {
+		t.Errorf("%d headers, want 1:\n%s", n, got)
+	}
+	if strings.Contains(got, "three") {
+		t.Errorf("the --include value was searched:\n%s", got)
 	}
 }
 
@@ -123,7 +136,7 @@ func TestShellSearchEveryPattern(t *testing.T) {
 // that search finds nothing; Grep/Glob tool hints never carry it.
 func TestShellSearchNudgeOncePerSession(t *testing.T) {
 	a, dir := newTreeApp(t)
-	recordWidgetBug(t, a)
+	indexWidgetBug(t, a)
 	if got := shellHook(t, a, Event{SessionID: "s", Command: `rg NothingMatches`, CWD: dir}); got != shellSearchNudge {
 		t.Errorf("first shell search = %q, want just the nudge", got)
 	}
@@ -150,7 +163,7 @@ func TestShellSearchNudgeOncePerSession(t *testing.T) {
 // nothing and leaves the session's nudge, bug and view dedup untouched.
 func TestShellRedirectedOutputIsSilent(t *testing.T) {
 	a, dir := newTreeApp(t)
-	recordWidgetBug(t, a)
+	indexWidgetBug(t, a)
 	if _, _, _, err := a.Engine.Record(context.Background(), memory.NewMemory{
 		Kind: memory.KindTodo, Title: "split f.go", Body: "split f.go", Source: "cli", Branch: a.Git.Branch,
 		Refs: []memory.Ref{{Type: memory.RefFile, Value: "f.go"}},
@@ -174,16 +187,16 @@ func TestShellRedirectedOutputIsSilent(t *testing.T) {
 	}
 }
 
-// Grep/Glob and shell searches share the per-session repeat reminder.
+// Grep/Glob and shell searches share the per-session repeat dedup: a repeat adds nothing.
 func TestShellSearchRepeatSharedWithGrep(t *testing.T) {
 	a, dir := newTreeApp(t)
-	recordWidgetBug(t, a)
+	indexWidgetBug(t, a)
 	if _, err := Handle(context.Background(), a, Event{Kind: KindAugment, SessionID: "s", Pattern: "Widget"}); err != nil {
 		t.Fatal(err)
 	}
 	got := shellHook(t, a, Event{SessionID: "s", Command: `rg Widget`, CWD: dir})
-	if !strings.Contains(got, `already searched "Widget"`) || strings.Contains(got, "Widget overflow") {
-		t.Errorf("shell repeat of a Grep search:\n%s", got)
+	if got != shellSearchNudge {
+		t.Errorf("shell repeat of a Grep search = %q, want just the nudge", got)
 	}
 }
 
@@ -226,7 +239,7 @@ func TestShellViewsSurfaceAnchoredMemories(t *testing.T) {
 				t.Errorf("%s: missing %q:\n%s", command, want, first)
 			}
 		}
-		for _, banned := range []string{"already read", "get_file_outline", "search_content"} {
+		for _, banned := range []string{"you already have", "get_file_outline", "search_content"} {
 			if strings.Contains(first, banned) {
 				t.Errorf("%s: a view must not add %q:\n%s", command, banned, first)
 			}

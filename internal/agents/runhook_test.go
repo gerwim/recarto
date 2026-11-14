@@ -38,6 +38,8 @@ var idleEvents = []Event{
 	{Kind: KindAugment, SessionID: "s"},
 	{Kind: KindAugment, SessionID: "s", Pattern: "*.cs"},
 	{Kind: KindAugment, SessionID: "s", Pattern: "src/**/*.go"},
+	{Kind: KindAugment, SessionID: "s", Pattern: "internal/agents"},
+	{Kind: KindAugment, SessionID: "s", Pattern: "\\b.*\\s+"},
 	{Kind: KindStop},
 	{Kind: KindShell, SessionID: "s", Command: "go test ./... | grep FAIL"},
 	{Kind: KindShell, SessionID: "s", Command: "ps aux | grep foo"},
@@ -142,7 +144,7 @@ func TestRunHookHandlerErrorWritesNothing(t *testing.T) {
 		ev  Event
 	}{
 		{ctx, Event{Kind: KindPostEdit, SessionID: "s", FilePath: file}},
-		{cancelled, Event{Kind: KindPostRead, SessionID: "s", FilePath: file}},
+		{cancelled, Event{Kind: KindPostRead, SessionID: "s", FilePath: file, ReadFirst: 1, ReadLast: 3}},
 	} {
 		var out bytes.Buffer
 		if err := RunHook(c.ctx, Opened(a), fixedAdapter{c.ev}, c.ev.Kind, strings.NewReader(""), &out); err == nil || out.Len() != 0 {

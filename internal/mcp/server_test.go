@@ -98,3 +98,12 @@ func TestServerInvalidKindIsRejected(t *testing.T) {
 		t.Errorf("expected invalid kind to be rejected, got res=%+v err=%v", res, err)
 	}
 }
+
+func TestListResultsExplainOmittedName(t *testing.T) {
+	tools := listTools(t, newTestApp(t, "main"))
+	for _, n := range []string{"search_graph", "query_graph", "get_file_outline", "find_implementations", "find_annotated"} {
+		if !strings.Contains(tools[n].Description, "last segment") {
+			t.Errorf("%s description should say results omit name when qualified_name's last segment gives it", n)
+		}
+	}
+}

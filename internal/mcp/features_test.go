@@ -2,17 +2,20 @@ package mcp
 
 import (
 	"context"
+	"regexp"
+	"sort"
 	"strings"
 	"testing"
 
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/gerwim/recarto/internal/agents"
 	"github.com/gerwim/recarto/internal/app"
 	"github.com/gerwim/recarto/internal/features"
 )
 
-// toolNames lists the tools NewServer offers a client for a.
-func toolNames(t *testing.T, a *app.App) map[string]bool {
+// connect connects a client to NewServer(a) over in-memory transports.
+func connect(t *testing.T, a *app.App) *sdk.ClientSession {
 	t.Helper()
 	ctx := context.Background()
 	ct, st := sdk.NewInMemoryTransports()
@@ -24,16 +27,23 @@ func toolNames(t *testing.T, a *app.App) map[string]bool {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = cs.Close(); _ = ss.Wait() }()
-	res, err := cs.ListTools(ctx, nil)
+	// Teardown errors say nothing about the behaviour under test.
+	t.Cleanup(func() { _ = cs.Close(); _ = ss.Wait() })
+	return cs
+}
+
+// listTools lists the tools NewServer offers a client for a, by name.
+func listTools(t *testing.T, a *app.App) map[string]*sdk.Tool {
+	t.Helper()
+	res, err := connect(t, a).ListTools(context.Background(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	names := map[string]bool{}
+	tools := map[string]*sdk.Tool{}
 	for _, tl := range res.Tools {
-		names[tl.Name] = true
+		tools[tl.Name] = tl
 	}
-	return names
+	return tools
 }
 
 func TestToolsFollowFeatures(t *testing.T) {
@@ -46,7 +56,7 @@ func TestToolsFollowFeatures(t *testing.T) {
 		features.IssueReports: {"report_recarto_issue"},
 		features.Todos:        {"complete_todo"},
 	}
-	all := toolNames(t, a)
+	all := listTools(t, a)
 	grouped := map[string]bool{}
 	for _, names := range groups {
 		for _, n := range names {
@@ -60,9 +70,9 @@ func TestToolsFollowFeatures(t *testing.T) {
 	}
 	for f, names := range groups {
 		a.Features = features.Set{f: false}
-		got := toolNames(t, a)
+		got := listTools(t, a)
 		for _, n := range names {
-			if got[n] {
+			if got[n] != nil {
 				t.Errorf("%s off: %s still offered", f.Key, n)
 			}
 		}
@@ -72,11 +82,52 @@ func TestToolsFollowFeatures(t *testing.T) {
 	}
 }
 
+// Hosts that load tool descriptions on demand show the agent only the tool
+// names the instructions give, so the block must name exactly the registered tools.
+func TestInstructionsNameRegisteredTools(t *testing.T) {
+	a := newTestApp(t, "main")
+	toolRef := regexp.MustCompile("`([a-z]+(?:_[a-z]+)+)`")
+	for _, tc := range []struct {
+		off string
+		s   features.Set
+	}{
+		{"nothing", nil},
+		{features.GraphTools.Key, features.Set{features.GraphTools: false}},
+		{features.MemoryTools.Key, features.Set{features.MemoryTools: false}},
+		{features.Todos.Key, features.Set{features.Todos: false}},
+		{features.IssueReports.Key, features.Set{features.IssueReports: false}},
+	} {
+		a.Features = tc.s
+		on := listTools(t, a)
+		named := map[string]bool{}
+		for _, m := range toolRef.FindAllStringSubmatch(agents.Instructions(tc.s), -1) {
+			named[m[1]] = true
+		}
+		delete(named, "candidate_symbols") // a search_graph parameter, not a tool
+		var missing, extra []string
+		for n := range on {
+			if !named[n] {
+				missing = append(missing, n)
+			}
+		}
+		for n := range named {
+			if on[n] == nil {
+				extra = append(extra, n)
+			}
+		}
+		sort.Strings(missing)
+		sort.Strings(extra)
+		if len(missing)+len(extra) > 0 {
+			t.Errorf("%s off: instructions miss %v and name unregistered %v", tc.off, missing, extra)
+		}
+	}
+}
+
 func TestTodosOffRejectsTodoMemories(t *testing.T) {
 	a := newTestApp(t, "main")
 	ctx := context.Background()
 	hasTodo := func() bool {
-		for _, v := range recordMemorySchema(a.Features).Properties["kind"].Enum {
+		for _, v := range recordMemorySchema(a).Properties["kind"].Enum {
 			if v == "todo" {
 				return true
 			}

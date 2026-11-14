@@ -1,20 +1,35 @@
 package mcp
 
 import (
+	"slices"
+
 	"github.com/google/jsonschema-go/jsonschema"
 
+	"github.com/gerwim/recarto/internal/app"
 	"github.com/gerwim/recarto/internal/features"
 	"github.com/gerwim/recarto/internal/memory"
 )
 
-// schemaFor builds the auto-derived input schema for In, panicking on the
+// inputSchema builds the input schema a's server offers for In, panicking on the
 // (compile-time-impossible) reflection error so callers stay expression-simple.
-func schemaFor[In any]() *jsonschema.Schema {
+func inputSchema[In any](a *app.App) *jsonschema.Schema {
 	s, err := jsonschema.For[In](nil)
 	if err != nil {
 		panic(err)
 	}
+	// Without RECARTO_REPOS extras, repo can only name the current repo, so it
+	// would cost every tool definition context for nothing.
+	if len(a.Repos) == 0 {
+		dropProperty(s, "repo")
+	}
 	return s
+}
+
+// dropProperty removes one property from s. Callers only drop omitempty
+// fields, so Required never lists them.
+func dropProperty(s *jsonschema.Schema, name string) {
+	delete(s.Properties, name)
+	s.PropertyOrder = slices.DeleteFunc(s.PropertyOrder, func(p string) bool { return p == name })
 }
 
 // withEnum sets a JSON-Schema enum on one property, turning a free-text string
@@ -40,20 +55,25 @@ func kindStrings(f features.Set) []string {
 	return out
 }
 
-func recordMemorySchema(f features.Set) *jsonschema.Schema {
-	s := withEnum(schemaFor[RecordMemoryInput](), "kind", kindStrings(f)...)
+func recordMemorySchema(a *app.App) *jsonschema.Schema {
+	s := withEnum(inputSchema[RecordMemoryInput](a), "kind", kindStrings(a.Features)...)
+	// scope only chooses a store when a workspace store exists.
+	if a.Workspace == nil {
+		dropProperty(s, "scope")
+		return s
+	}
 	return withEnum(s, "scope", scopeRepo, scopeWorkspace)
 }
 
-func traceCallPathSchema() *jsonschema.Schema {
-	return withEnum(schemaFor[TraceCallPathInput](), "direction", "callers", "callees")
+func traceCallPathSchema(a *app.App) *jsonschema.Schema {
+	return withEnum(inputSchema[TraceCallPathInput](a), "direction", "callers", "callees")
 }
 
-func queryGraphSchema() *jsonschema.Schema {
-	return withEnum(schemaFor[QueryGraphInput](), "edge_direction", "in", "out")
+func queryGraphSchema(a *app.App) *jsonschema.Schema {
+	return withEnum(inputSchema[QueryGraphInput](a), "edge_direction", "in", "out")
 }
 
-func reportRecartoIssueSchema() *jsonschema.Schema {
-	return withEnum(schemaFor[ReportRecartoIssueInput](), "signal_type",
+func reportRecartoIssueSchema(a *app.App) *jsonschema.Schema {
+	return withEnum(inputSchema[ReportRecartoIssueInput](a), "signal_type",
 		"error", "quality", "friction", "gap")
 }

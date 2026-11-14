@@ -369,7 +369,8 @@ func noteBases(ctx context.Context, c store.Conn, old map[baseKey]baseTarget) er
 		if err != nil {
 			return err
 		}
-		defer stmt.Close()
+		// Each Exec reports its own failure; Close only releases the statement.
+		defer func() { _ = stmt.Close() }()
 		for k, t := range old {
 			if _, err := stmt.ExecContext(ctx, k.path, k.class, k.name, k.module, t.path, t.name); err != nil {
 				return err
@@ -773,7 +774,7 @@ func insertValues(ctx context.Context, c store.Conn, stmt string, vals []string)
 	if err != nil {
 		return err
 	}
-	defer ps.Close()
+	defer func() { _ = ps.Close() }() // a statement close frees memory only; the transaction reports write errors
 	for _, v := range vals {
 		if _, err := ps.ExecContext(ctx, v); err != nil {
 			return err

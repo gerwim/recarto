@@ -236,16 +236,11 @@ func (e *Engine) Recall(ctx context.Context, q RecallQuery) (RecallResultSet, er
 			wBranch*sig["branch"]) * r.Confidence
 
 		var dangling []Ref
-		if e.res != nil && q.Worktree != "" {
-			code := codeRefsOf(r.Refs)
-			if len(code) > 0 {
-				if d, derr := e.res.Dangling(ctx, q.Worktree, code); derr == nil && len(d) > 0 {
-					dangling = d
-					privileged := r.Pinned || r.Kind == KindBug
-					if len(d) == len(code) && !privileged {
-						score *= danglingDemotion
-					}
-				}
+		if d, derr := e.Dangling(ctx, q.Worktree, r); derr == nil && len(d) > 0 {
+			dangling = d
+			privileged := r.Pinned || r.Kind == KindBug
+			if len(d) == len(codeRefsOf(r.Refs)) && !privileged {
+				score *= danglingDemotion
 			}
 		}
 		scored = append(scored, RecallResult{Record: r, Score: score, Signals: sig, DanglingRefs: dangling})

@@ -183,6 +183,8 @@ What each agent gets:
 | **OpenCode** | `opencode.json` / `~/.config/opencode/opencode.json` | `.opencode/plugins/recarto.js` / `~/.config/opencode/plugins/recarto.js` (generated) | `AGENTS.md` / `~/.config/opencode/AGENTS.md` |
 | **Copilot CLI** | `.mcp.json` / `~/.copilot/mcp-config.json` | `.github/hooks/recarto.json` / `~/.copilot/hooks/recarto.json` | `AGENTS.md` / `~/.copilot/copilot-instructions.md` |
 
+The instructions are a short block of rules between `<!-- recarto:begin -->` and `<!-- recarto:end -->`: what to record and recall, and which Recarto tool to use instead of reading whole files or grepping. How to use each tool is in the tool's own description. Re-running `recarto init` replaces the block, also one written by an older version, and leaves the rest of the file as it is.
+
 `recarto init` is idempotent — re-running merges only what's missing and preserves
 your existing config.
 
@@ -269,6 +271,51 @@ A misspelled feature or a value other than `true`/`false` is reported with its l
 number by `recarto config` and `recarto doctor`; hooks skip the bad line.
 `RECARTO_SEMANTIC=0` and `RECARTO_AUTO_REPAIR=0` still turn those features off too.
 
+## Read notices
+
+After a file read (Claude Code's `Read`, OpenCode's `read`, Copilot's `view`), Recarto adds the file's anchored notes and at most two notices:
+
+- **Repeat read** (`repeated-reads`). Added when every line the read returned came back in earlier reads of the same file in this conversation, and the file has not changed since. It names the lines when the read returned only part of the file. Once a file changes, reads of its old content no longer count. A read whose lines Recarto can't tell gets no notice. That includes Claude Code's own "file unchanged" reply when the agent repeats its last read.
+- **Large file** (`large-reads`). Added once per conversation, on the first whole-file read of a file with indexed symbols that returns at least 2,000 estimated tokens (`RECARTO_LARGE_READ_TOKENS`). It points to `get_file_outline` and `get_code_snippet`. A read is whole-file when it asked for no line range, even if the host cut the output short, or when the lines it returned cover the whole file. A read of part of a file never gets it.
+
+On a read, an edit or a shell view, a bug note shows the title, the first 200 characters of the fix and, with `memory-tools` on, the `get_memory` call that returns the whole text. Titles longer than 160 characters are cut in these notes, in the session-start memory list and in its list of recent bugs.
+
+`recarto status` counts the notices added under `repeated_reads_blocked` and `large_reads_nudged`. On OpenCode, re-run `recarto init` after upgrading so the plugin passes the read's line range.
+
+## Conversations, compaction and resume
+
+Recarto records what each conversation has been given: the lines it read, the notes it was shown (bugs, do-not-repeats, decisions, learnings, todos), the searches that got a hint, and the one-time large-file and shell-search nudges. The repeat-read notice and the once-only notes and hints follow this record.
+
+- **Subagents.** On Claude Code the main agent and each subagent have their own record, told apart by the hook input's `agent_id`. An OpenCode subagent runs in its own session. Copilot CLI hooks don't name subagents, so a session there has one record.
+- **Compaction.** When Claude Code compacts a conversation, Recarto forgets its reads, notes and searches: a file read before the compaction gets no repeat-read notice, and its notes are shown again. The one-time nudges are not repeated.
+- The Stop hook's capture nudge counts the edits of the whole session.
+
+What session start adds, by its `source`:
+
+| `source` | Added |
+|---|---|
+| `startup`, `fork` (Claude Code); `new`, `startup` (Copilot CLI); none (OpenCode) | The full block: memories, code map, changes since the last session, recent bugs, served repos and the record reminder. |
+| `clear` | The full block. If the session id stays the same, Recarto first forgets the record, as for `compact`. |
+| `compact` | The full block, after forgetting the conversation's reads, notes and searches. Its memories count as shown again. |
+| `resume` | Only the memories the block would show that the conversation has not been shown yet, such as ones recorded or synced since, in the block's format and budget. Nothing when there are none. A session Recarto has no record of gets the full block. |
+
+Every session start also refreshes the code graph, syncs memories, imports the team snapshot and compacts memories, whatever the source. OpenCode's plugin runs session start once per session.
+
+## Search hints
+
+After a Grep or Glob call, or a shell search, Recarto lists the symbols the search names and their known bugs (`search-hints`).
+
+- **Symbols.** A symbol is listed when an identifier in the pattern is exactly its name or qualified name, case included (`handleAugment`, `Engine.Recall`).
+  - Part of a longer identifier, a file name or path (`AGENTS.md`, `internal/agents`) and regex syntax (`\b`, `\s`, `.*`) name nothing.
+  - A file-name glob names its stem (`*Widget*.go` names `Widget`); a stemless glob like `*.go` names nothing.
+  - At most 5, product code before tests and fixtures.
+- **Bugs.** A bug is listed, one line with its title, at most 2, when all of these hold:
+  - it is anchored to a listed symbol or to the file that defines one;
+  - Recarto's branch check does not flag it as referencing code missing from this worktree;
+  - this conversation has not been shown it.
+- **Size.** A search that names no symbol adds nothing. One tool call adds at most 800 characters of hint, however many searches it runs.
+- **Repeats.** A pattern that already got a hint in this conversation, from the shell or Grep/Glob, adds nothing. `recarto status` counts these under `repeated_augments_blocked`.
+
 ## Shell searches and file views
 
 Claude Code's native macOS, Linux and WSL builds (2.1.117 and later) have **no Grep or
@@ -281,8 +328,8 @@ Copilot's `bash` tool. These run in a POSIX shell: bash, sh, zsh, or Git Bash on
 
 | Command | What Recarto adds |
 |---|---|
-| `grep`/`egrep`/`fgrep`, `rg`, `ugrep` or `git grep`, searching a directory or the repo | The hint the Grep tool gives for the same pattern: matching symbols and related bugs. |
-| `find`/`bfs` with `-name`, `-iname` or `-path` | The hint the Glob tool gives. The glob is reduced to its identifier stem; a stemless glob like `*.go` gives nothing. |
+| `grep`/`egrep`/`fgrep`, `rg`, `ugrep` or `git grep`, searching a directory or the repo | The search hint the Grep tool gives for the same pattern (see [Search hints](#search-hints)). |
+| `find`/`bfs` with `-name`, `-iname` or `-path` | The search hint the Glob tool gives. The glob is reduced to its identifier stem; a stemless glob like `*.go` gives nothing. |
 | `cat`, `head`, `tail` or `sed -n` printing files, or a grep over named files | The files' anchored bugs, do-not-repeats, guidance and todos. |
 
 How it reads them:
@@ -295,11 +342,12 @@ How it reads them:
   work too.
   - A file in a `RECARTO_REPOS` repo surfaces that repo's memories.
   - A file outside every served repo surfaces nothing.
-- **Nudge.** A session's first shell search also points the agent at `search_content`
-  and `search_graph`, once per session.
+- **One hint per line.** The searches of one command line share one hint and its 800-character cap. The shell-search nudge and the notes of printed files come on top.
+- **Nudge.** A conversation's first shell search also points the agent at `search_content`
+  and `search_graph`, once per conversation.
 - **Dedup** works as for the tools. A pattern searched again, by the shell or by
-  Grep/Glob, gets the short reminder instead of the hint. A memory already shown at
-  session start, by a Read or by an earlier view is not shown again.
+  Grep/Glob, adds nothing. A memory already shown at
+  session start, by a Read or by an earlier view is not shown again in the same conversation.
 
 Recarto adds nothing to:
 
@@ -315,7 +363,7 @@ Recarto adds nothing to:
   grep/glob/read tools, which Recarto hooks;
 - a command it cannot parse.
 
-Shell views are not counted as reads, so they get no repeated-read warning, large-file
+Shell views are not counted as reads, so they get no repeat-read notice, large-file
 nudge or read count. Recarto never blocks or rewrites a command and never changes its
 output; it only adds the hint.
 
@@ -456,6 +504,8 @@ With it set:
   name-derived bucket key automatically: every machine (or ephemeral sandbox) sharing
   the same `RECARTO_WORKSPACE`, server and key converges.
 
+Without `RECARTO_WORKSPACE`, `record_memory` has no `scope` parameter.
+
 Workspace memories surface at session start and via recall — never through the
 file-anchored just-in-time read/edit hooks, whose repo-relative paths are ambiguous
 across repos.
@@ -477,7 +527,8 @@ repo-less session reads and writes exactly the memories the cd'd sessions see:
 
 - Graph and file tools (`search_graph`, `get_code_snippet`, `get_file_outline`, …)
   take an optional `repo` (name or path) to target a served repo; omitted = the cwd
-  repo, and an unknown name errors with the served list.
+  repo, and an unknown name errors with the served list. Tools offer `repo` only
+  while at least one listed repo besides the cwd repo is served.
 - `recall_memory`/`search_bugs`/`list_memory` merge every served repo's memories
   (hits labeled `repo`); `record_memory`/`record_bug` take `repo` to write into a
   specific repo's store; id lookups resolve across all of them.

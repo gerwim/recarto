@@ -34,7 +34,9 @@ func TestConcurrentWritersAcrossProcessesAndGoroutines(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	st0.Close()
+	if err := st0.Close(); err != nil {
+		t.Fatal(err)
+	}
 
 	bin := buildBinary(t)
 

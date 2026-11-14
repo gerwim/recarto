@@ -127,3 +127,87 @@ func TestShellViewThroughCopilotPayload(t *testing.T) {
 		t.Errorf("output %q (%v), want the anchored todo", out.String(), err)
 	}
 }
+
+// A bash grep lists the exactly named symbol and its bug title through
+// Copilot's payload, and no symbol whose name only contains the pattern.
+func TestShellSearchThroughCopilotPayload(t *testing.T) {
+	root := t.TempDir()
+	a := newTestApp(t, root)
+	ctx := context.Background()
+	src := []byte("package p\nfunc handleAugment(){}\nfunc handleAugmentHelper(){}\n")
+	if err := a.Graph.IndexFile(ctx, a.Git.Worktree, "h.go", src, 1, int64(len(src))); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := a.Engine.Record(ctx, memory.NewMemory{
+		Kind: memory.KindBug, Title: "Widget overflow", Body: "Widget overflow — fix: clamp the size",
+		Refs: []memory.Ref{{Type: memory.RefSymbol, Value: "handleAugment"}}, Source: "cli",
+		Extra: map[string]any{"fix": "clamp the size"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cwd, _ := json.Marshal(root)
+	var out strings.Builder
+	in := `{"sessionId":"s","cwd":` + string(cwd) + `,"toolName":"bash","toolArgs":{"command":"grep -rn \"handleAugment\" ."}}`
+	if err := Shell(ctx, a, strings.NewReader(in), &out); err != nil {
+		t.Fatal(err)
+	}
+	var res struct{ AdditionalContext string }
+	if err := json.Unmarshal([]byte(out.String()), &res); err != nil {
+		t.Fatalf("output %q: %v", out.String(), err)
+	}
+	c := res.AdditionalContext
+	if !strings.Contains(c, "handleAugment  h.go:") || !strings.Contains(c, "Widget overflow") ||
+		strings.Contains(c, "handleAugmentHelper") || strings.Contains(c, "clamp") {
+		t.Errorf("got %q", c)
+	}
+}
+
+func TestPostReadRepeatNoticeThroughView(t *testing.T) {
+	root := t.TempDir()
+	a := newTestApp(t, root)
+	ctx := context.Background()
+	file := filepath.Join(root, "a.go")
+	if err := os.WriteFile(file, []byte("package a\n// 2\n// 3\n// 4\n// 5\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	path, _ := json.Marshal(file)
+	in := `{"sessionId":"s","toolName":"view","toolArgs":{"path":` + string(path) + `,"view_range":[2,3]},` +
+		`"toolResult":{"resultType":"success","textResultForLlm":"2. // 2\n3. // 3"}}`
+	var out strings.Builder
+	for range 2 {
+		out.Reset()
+		if err := PostRead(ctx, a, strings.NewReader(in), &out); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !strings.Contains(out.String(), "you already have lines 2-3") {
+		t.Errorf("second view = %q, want the repeat-read notice", out.String())
+	}
+}
+
+// A resume of a session that already got the block adds nothing when no
+// memory changed since.
+func TestSessionStartResumeAddsNothingNew(t *testing.T) {
+	root := t.TempDir()
+	a := newTestApp(t, root)
+	ctx := context.Background()
+	if _, _, _, err := a.Engine.Record(ctx, memory.NewMemory{
+		Kind: memory.KindLearning, Title: "builds need cgo off", Body: "x", Source: "cli",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	start := func(source string) string {
+		t.Helper()
+		var out strings.Builder
+		if err := SessionStart(ctx, a, strings.NewReader(`{"sessionId":"c1","source":"`+source+`"}`), &out); err != nil {
+			t.Fatal(err)
+		}
+		return out.String()
+	}
+	if got := start("new"); !strings.Contains(got, "additionalContext") || !strings.Contains(got, "builds need cgo off") {
+		t.Fatalf("new session: %q, want the block with the learning", got)
+	}
+	if got := start("resume"); strings.Contains(got, "additionalContext") {
+		t.Errorf("resume: %q, want no context", got)
+	}
+}
