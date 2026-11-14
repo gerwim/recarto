@@ -10,6 +10,7 @@ import (
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/gerwim/recarto/internal/app"
+	"github.com/gerwim/recarto/internal/memory"
 )
 
 // pyJSONLen is the length of v written the way Python's json.dumps(v) writes
@@ -119,8 +120,18 @@ func recordVia(t *testing.T, a *app.App, args map[string]any) string {
 	return id
 }
 
+// stored reports whether eng holds memory id. A failed lookup stops the test:
+// it would otherwise read as "not stored".
+func stored(t *testing.T, eng *memory.Engine, id string) bool {
+	t.Helper()
+	rec, err := eng.GetByID(context.Background(), id)
+	if err != nil {
+		t.Fatalf("GetByID(%s): %v", id, err)
+	}
+	return rec != nil
+}
+
 func TestSetupDependentParameters(t *testing.T) {
-	ctx := context.Background()
 	t.Run("one repo", func(t *testing.T) {
 		tools := listTools(t, newTestApp(t, "main"))
 		if got := toolsWithRepo(tools); len(got) > 0 {
@@ -155,10 +166,10 @@ func TestSetupDependentParameters(t *testing.T) {
 			t.Error("record_memory has scope without a workspace")
 		}
 		id := recordVia(t, a, map[string]any{"kind": "decision", "body": "alpha stays synchronous", "repo": "repo1"})
-		if r, _ := a.Repos[0].Engine.GetByID(ctx, id); r == nil {
+		if !stored(t, a.Repos[0].Engine, id) {
 			t.Error("repo=repo1 memory missing from repo1's store")
 		}
-		if r, _ := a.Engine.GetByID(ctx, id); r != nil {
+		if stored(t, a.Engine, id) {
 			t.Error("repo=repo1 memory landed in the primary store")
 		}
 	})
@@ -178,10 +189,10 @@ func TestSetupDependentParameters(t *testing.T) {
 			}
 		}
 		id := recordVia(t, a, map[string]any{"kind": "preference", "body": "tabs over spaces everywhere", "scope": "workspace"})
-		if r, _ := a.Workspace.Engine.GetByID(ctx, id); r == nil {
+		if !stored(t, a.Workspace.Engine, id) {
 			t.Error("scope=workspace memory missing from the workspace store")
 		}
-		if r, _ := a.Engine.GetByID(ctx, id); r != nil {
+		if stored(t, a.Engine, id) {
 			t.Error("scope=workspace memory landed in the repo store")
 		}
 	})
