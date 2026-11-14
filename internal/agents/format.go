@@ -70,7 +70,9 @@ const memoryHeader = "Recarto memory for this repo/branch:\n"
 // so the just-in-time read/edit hooks do not re-inject a guardrail/bug/todo already
 // sitting in this block — duplicate context is pure token waste. A memory dropped
 // here is deliberately left unmarked so it can still surface when its code is touched.
-// Workspace memories are returned too, so a resume does not show them again.
+// Workspace memories are returned too, so a resume does not show them again,
+// and so are the recent bugs, so a later search hint, read or edit in the
+// conversation does not show them again.
 //
 // With the session-memories feature off in f, the memory header, empty-memory
 // line and record nudge go too, leaving the other tiers; a line pointing at
@@ -129,6 +131,9 @@ func formatSessionContext(results []memory.RecallResult, wsName string, wsResult
 		b.WriteString(":\n")
 		for _, r := range bugs {
 			fmt.Fprintf(&b, "- %s\n", noteTitle(r))
+			if r.ID != "" {
+				emitted = append(emitted, r.ID)
+			}
 		}
 	}
 
