@@ -1006,11 +1006,13 @@ func applyWinners(ctx context.Context, c store.Conn, winners map[string]denormWi
 	}
 	for _, edgeID := range ids {
 		if _, err := stmt.ExecContext(ctx, edgeID, winners[edgeID].dstID); err != nil {
-			stmt.Close()
+			_ = stmt.Close() // the Exec error is the one worth reporting
 			return err
 		}
 	}
-	stmt.Close()
+	if err := stmt.Close(); err != nil {
+		return err
+	}
 	if _, err := c.ExecContext(ctx, `
 UPDATE edges SET dst_node_id = (SELECT b.dst_node_id FROM denorm_best b WHERE b.edge_id = edges.id)
  WHERE id IN (SELECT edge_id FROM denorm_best)`); err != nil {

@@ -40,7 +40,11 @@ func TestReportRecartoIssueWritesToFeedbackStore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer b.Close()
+	t.Cleanup(func() {
+		if err := b.Close(); err != nil {
+			t.Error(err)
+		}
+	})
 	recs, err := b.Engine.List(ctx, memory.ListFilter{Kind: memory.KindFeedback})
 	if err != nil {
 		t.Fatal(err)
