@@ -38,6 +38,8 @@ var idleEvents = []Event{
 	{Kind: KindAugment, SessionID: "s"},
 	{Kind: KindAugment, SessionID: "s", Pattern: "*.cs"},
 	{Kind: KindAugment, SessionID: "s", Pattern: "src/**/*.go"},
+	{Kind: KindAugment, SessionID: "s", Pattern: "internal/agents"},
+	{Kind: KindAugment, SessionID: "s", Pattern: "\\b.*\\s+"},
 	{Kind: KindStop},
 	{Kind: KindShell, SessionID: "s", Command: "go test ./... | grep FAIL"},
 	{Kind: KindShell, SessionID: "s", Command: "ps aux | grep foo"},

@@ -128,6 +128,40 @@ func TestShellViewThroughCopilotPayload(t *testing.T) {
 	}
 }
 
+// A bash grep lists the exactly named symbol and its bug title through
+// Copilot's payload, and no symbol whose name only contains the pattern.
+func TestShellSearchThroughCopilotPayload(t *testing.T) {
+	root := t.TempDir()
+	a := newTestApp(t, root)
+	ctx := context.Background()
+	src := []byte("package p\nfunc handleAugment(){}\nfunc handleAugmentHelper(){}\n")
+	if err := a.Graph.IndexFile(ctx, a.Git.Worktree, "h.go", src, 1, int64(len(src))); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := a.Engine.Record(ctx, memory.NewMemory{
+		Kind: memory.KindBug, Title: "Widget overflow", Body: "Widget overflow — fix: clamp the size",
+		Refs: []memory.Ref{{Type: memory.RefSymbol, Value: "handleAugment"}}, Source: "cli",
+		Extra: map[string]any{"fix": "clamp the size"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cwd, _ := json.Marshal(root)
+	var out strings.Builder
+	in := `{"sessionId":"s","cwd":` + string(cwd) + `,"toolName":"bash","toolArgs":{"command":"grep -rn \"handleAugment\" ."}}`
+	if err := Shell(ctx, a, strings.NewReader(in), &out); err != nil {
+		t.Fatal(err)
+	}
+	var res struct{ AdditionalContext string }
+	if err := json.Unmarshal([]byte(out.String()), &res); err != nil {
+		t.Fatalf("output %q: %v", out.String(), err)
+	}
+	c := res.AdditionalContext
+	if !strings.Contains(c, "handleAugment  h.go:") || !strings.Contains(c, "Widget overflow") ||
+		strings.Contains(c, "handleAugmentHelper") || strings.Contains(c, "clamp") {
+		t.Errorf("got %q", c)
+	}
+}
+
 func TestPostReadRepeatNoticeThroughView(t *testing.T) {
 	root := t.TempDir()
 	a := newTestApp(t, root)

@@ -176,3 +176,48 @@ func TestFormatDeltaTier(t *testing.T) {
 		t.Error("empty delta must render nothing at all")
 	}
 }
+
+func TestFormatBugWarningsCutsFix(t *testing.T) {
+	fix := strings.Repeat("a", 200) + strings.Repeat("b", 700)
+	bug := &memory.Record{ID: "m1", Kind: memory.KindBug, Title: "boom", Extra: map[string]any{"fix": fix}}
+	out := formatBugWarnings("h.go", []*memory.Record{bug}, true)
+	if !strings.Contains(out, "fix: "+fix[:200]+"…") || strings.Contains(out, fix[:201]) {
+		t.Errorf("fix not cut to 200 runes:\n%s", out)
+	}
+	if !strings.HasSuffix(out, "(full text: get_memory id=m1)") {
+		t.Errorf("missing get_memory pointer:\n%s", out)
+	}
+	if out := formatBugWarnings("h.go", []*memory.Record{bug}, false); strings.Contains(out, "get_memory") {
+		t.Errorf("pointer shown with memory tools off:\n%s", out)
+	}
+}
+
+func TestOneLineNotesCutLongTitles(t *testing.T) {
+	title := strings.Repeat("x", 160) + strings.Repeat("y", 170)
+	cut := title[:160] + "…"
+	rec := func(k memory.Kind) *memory.Record { return &memory.Record{ID: string(k), Kind: k, Title: title} }
+	pinnedBody := strings.Repeat("keep ", 100)
+	mem, _ := formatMemories([]memory.RecallResult{
+		{Record: &memory.Record{ID: "l", Kind: memory.KindLearning, Title: title, Body: strings.Repeat("long body ", 400)}},
+		{Record: &memory.Record{ID: "d", Kind: memory.KindDoNotRepeat, Pinned: true, Title: title, Body: pinnedBody}},
+	}, cerebrumReserve+60)
+	recent, _ := formatSessionContext(nil, "", nil, nil, graph.Architecture{}, []*memory.Record{rec(memory.KindBug)}, nil, 0, 0, 1500, nil)
+	for name, out := range map[string]string{
+		"bug warning": formatBugWarnings("h.go", []*memory.Record{rec(memory.KindBug)}, false),
+		"guidance": formatGuidance("h.go", []*memory.Record{
+			rec(memory.KindDoNotRepeat), rec(memory.KindDecision), rec(memory.KindLearning)}),
+		"todo":        formatTodoReminders("h.go", []*memory.Record{rec(memory.KindTodo)}),
+		"recent bugs": recent,
+		"memories":    mem,
+	} {
+		if !strings.Contains(out, cut) || strings.Contains(out, title[:161]) {
+			t.Errorf("%s: title not cut to 160 runes:\n%s", name, out)
+		}
+	}
+	if !strings.Contains(mem, "- [learning] "+cut+"\n- [") || strings.Contains(mem, "long body") {
+		t.Errorf("budget fallback is not the one-line title entry:\n%s", mem)
+	}
+	if !strings.Contains(mem, pinnedBody) {
+		t.Errorf("pinned do-not-repeat body was cut:\n%s", mem)
+	}
+}

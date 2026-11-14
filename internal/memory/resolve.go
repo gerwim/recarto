@@ -21,6 +21,16 @@ type RefResolver interface {
 // SetRefResolver installs the resolvability backend (called once during wiring).
 func (e *Engine) SetRefResolver(r RefResolver) { e.res = r }
 
+// Dangling returns r's code refs that are absent from worktree: nil when no
+// resolver is set, worktree is "" or r has no file/symbol refs.
+func (e *Engine) Dangling(ctx context.Context, worktree string, r *Record) ([]Ref, error) {
+	code := codeRefsOf(r.Refs)
+	if e.res == nil || worktree == "" || len(code) == 0 {
+		return nil, nil
+	}
+	return e.res.Dangling(ctx, worktree, code)
+}
+
 // codeRefsOf returns only file/symbol refs (tags are not code).
 func codeRefsOf(refs []Ref) []Ref {
 	var out []Ref

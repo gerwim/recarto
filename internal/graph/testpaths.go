@@ -99,3 +99,16 @@ func demoteTests(in []SearchResult, protect map[string]bool) []SearchResult {
 	}
 	return append(head, tail...)
 }
+
+// isFixturePath reports whether a repo-relative path lies in a test-fixture
+// directory: a whole path segment testdata, fixture, fixtures or __fixtures__.
+// It is kept apart from isTestPath, whose narrower rule drives search ranking.
+func isFixturePath(p string) bool {
+	for seg := range strings.SplitSeq(strings.ToLower(p), "/") {
+		switch seg {
+		case "testdata", "fixture", "fixtures", "__fixtures__":
+			return true
+		}
+	}
+	return false
+}

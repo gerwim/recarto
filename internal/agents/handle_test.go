@@ -10,7 +10,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gerwim/recarto/internal/app"
 	"github.com/gerwim/recarto/internal/clock"
+	"github.com/gerwim/recarto/internal/features"
 	"github.com/gerwim/recarto/internal/graph"
 	"github.com/gerwim/recarto/internal/memory"
 )
@@ -266,14 +268,7 @@ func TestHandlePostReadNoGraphNudgeForUnindexedFile(t *testing.T) {
 func TestAugmentSuppressesRepeatedPattern(t *testing.T) {
 	a := newTestApp(t, "main")
 	ctx := context.Background()
-	// Record a bug so the augment hook has injectable content (the empty test
-	// graph yields no symbol hits).
-	if _, _, _, err := a.Engine.Record(ctx, memory.NewMemory{
-		Kind: memory.KindBug, Title: "Widget overflow", Body: "Widget overflow — fix: clamp",
-		Source: "cli", Extra: map[string]any{"fix": "clamp"},
-	}); err != nil {
-		t.Fatal(err)
-	}
+	indexWidgetBug(t, a)
 	ev := Event{Kind: KindAugment, SessionID: "s1", Pattern: "Widget"}
 
 	first, err := Handle(ctx, a, ev)
@@ -281,18 +276,15 @@ func TestAugmentSuppressesRepeatedPattern(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !strings.Contains(first.Context, "Widget overflow") {
-		t.Fatalf("first augment should surface the matching bug:\n%s", first.Context)
+		t.Fatalf("first augment should surface the anchored bug:\n%s", first.Context)
 	}
 
 	second, err := Handle(ctx, a, ev)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(second.Context, "Widget overflow") {
-		t.Errorf("repeated augment should not re-inject the same block:\n%s", second.Context)
-	}
-	if !strings.Contains(second.Context, "already searched") {
-		t.Errorf("repeated augment should emit a short reminder:\n%s", second.Context)
+	if second.Context != "" {
+		t.Errorf("repeated augment = %q, want nothing", second.Context)
 	}
 	n, _ := a.Ledger.Get(ctx, "lifetime", "repeated_augments_blocked")
 	if n != 1 {
@@ -313,14 +305,14 @@ func TestAugmentSkipsSemanticEmbedding(t *testing.T) {
 	fake := &augmentCountingEmbedder{}
 	a.Engine.SetEmbedder(fake)
 	ctx := context.Background()
-	if _, _, _, err := a.Engine.Record(ctx, memory.NewMemory{
-		Kind: memory.KindBug, Title: "Widget overflow", Body: "Widget overflow — fix: clamp",
-		Source: "cli", Extra: map[string]any{"fix": "clamp"},
-	}); err != nil {
+	indexWidgetBug(t, a)
+	fake.calls = 0
+	res, err := Handle(ctx, a, Event{Kind: KindAugment, Pattern: "Widget"})
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Handle(ctx, a, Event{Kind: KindAugment, Pattern: "Widget"}); err != nil {
-		t.Fatal(err)
+	if !strings.Contains(res.Context, "Widget overflow") {
+		t.Fatalf("augment should surface the anchored bug:\n%s", res.Context)
 	}
 	if fake.calls != 0 {
 		t.Fatalf("augment Embed calls = %d, want 0", fake.calls)
@@ -330,18 +322,10 @@ func TestAugmentSkipsSemanticEmbedding(t *testing.T) {
 func TestAugmentDedupsBugAlreadySurfacedOnRead(t *testing.T) {
 	a := newTestApp(t, "main")
 	ctx := context.Background()
-	rel := "internal/agents/handle.go"
-	// A bug both anchored to a file (so post-read surfaces it) and matching a
-	// search term (so augment recall finds it).
-	if _, _, _, err := a.Engine.Record(ctx, memory.NewMemory{
-		Kind: memory.KindBug, Title: "Widget overflow", Body: "Widget overflow",
-		Refs: []memory.Ref{{Type: memory.RefFile, Value: rel}}, Branch: a.Git.Branch,
-		Source: "cli", Extra: map[string]any{"fix": "clamp"},
-	}); err != nil {
-		t.Fatal(err)
-	}
+	indexSource(t, a, "widget.go", "package p\n\nfunc Widget() {}\n")
+	recordBug(t, a, "Widget overflow", "clamp", memory.Ref{Type: memory.RefFile, Value: "widget.go"})
 
-	read, err := handlePostRead(ctx, a, Event{Kind: KindPostRead, SessionID: "s1", FilePath: rel, ToolResult: "package agents"})
+	read, err := handlePostRead(ctx, a, Event{Kind: KindPostRead, SessionID: "s1", FilePath: "widget.go", ToolResult: "package p"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -349,39 +333,31 @@ func TestAugmentDedupsBugAlreadySurfacedOnRead(t *testing.T) {
 		t.Fatalf("post-read should surface the anchored bug:\n%s", read.Context)
 	}
 
-	// A later search matching the same bug must NOT re-inject it — it is already
-	// sitting in the transcript from the read. Pure token waste otherwise.
+	// The bug already sits in the transcript from the read.
 	aug, err := Handle(ctx, a, Event{Kind: KindAugment, SessionID: "s1", Pattern: "Widget"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(aug.Context, "Widget overflow") {
-		t.Fatalf("augment must not re-inject a bug already surfaced on read:\n%s", aug.Context)
+	if !strings.Contains(aug.Context, "widget.go:3") || strings.Contains(aug.Context, "Widget overflow") {
+		t.Fatalf("augment must list the symbol but not a bug already surfaced on read:\n%s", aug.Context)
 	}
 }
 
 func TestPostReadDedupsBugAlreadySurfacedByAugment(t *testing.T) {
 	a := newTestApp(t, "main")
 	ctx := context.Background()
-	rel := "internal/agents/handle.go"
-	if _, _, _, err := a.Engine.Record(ctx, memory.NewMemory{
-		Kind: memory.KindBug, Title: "Widget overflow", Body: "Widget overflow",
-		Refs: []memory.Ref{{Type: memory.RefFile, Value: rel}}, Branch: a.Git.Branch,
-		Source: "cli", Extra: map[string]any{"fix": "clamp"},
-	}); err != nil {
-		t.Fatal(err)
-	}
+	indexSource(t, a, "widget.go", "package p\n\nfunc Widget() {}\n")
+	recordBug(t, a, "Widget overflow", "clamp", memory.Ref{Type: memory.RefFile, Value: "widget.go"})
 
 	aug, err := Handle(ctx, a, Event{Kind: KindAugment, SessionID: "s1", Pattern: "Widget"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(aug.Context, "Widget overflow") {
-		t.Fatalf("augment should surface the matching bug:\n%s", aug.Context)
+		t.Fatalf("augment should surface the bug anchored to the symbol's file:\n%s", aug.Context)
 	}
 
-	// Reading the anchored file must NOT re-inject a bug the search already showed.
-	read, err := handlePostRead(ctx, a, Event{Kind: KindPostRead, SessionID: "s1", FilePath: rel, ToolResult: "package agents"})
+	read, err := handlePostRead(ctx, a, Event{Kind: KindPostRead, SessionID: "s1", FilePath: "widget.go", ToolResult: "package p"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -393,12 +369,7 @@ func TestPostReadDedupsBugAlreadySurfacedByAugment(t *testing.T) {
 func TestAugmentNoDedupWithoutSession(t *testing.T) {
 	a := newTestApp(t, "main")
 	ctx := context.Background()
-	if _, _, _, err := a.Engine.Record(ctx, memory.NewMemory{
-		Kind: memory.KindBug, Title: "Widget overflow", Body: "Widget overflow — fix: clamp",
-		Source: "cli", Extra: map[string]any{"fix": "clamp"},
-	}); err != nil {
-		t.Fatal(err)
-	}
+	indexWidgetBug(t, a)
 	ev := Event{Kind: KindAugment, Pattern: "Widget"} // no SessionID → cannot scope dedup
 
 	for i := range 2 {
@@ -408,6 +379,135 @@ func TestAugmentNoDedupWithoutSession(t *testing.T) {
 		}
 		if !strings.Contains(res.Context, "Widget overflow") {
 			t.Fatalf("call %d without a session should still inject:\n%s", i, res.Context)
+		}
+	}
+}
+
+func grepHint(t *testing.T, a *app.App, session, pattern string) string {
+	t.Helper()
+	res, err := Handle(context.Background(), a, Event{Kind: KindAugment, SessionID: session, Pattern: pattern})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return res.Context
+}
+
+func TestSearchHintListsExactNamesOnly(t *testing.T) {
+	a := newTestApp(t, "main")
+	indexSource(t, a, "w.go", "package p\n\nfunc Widget() {}\n\nfunc WidgetFactory() {}\n\nfunc widget() {}\n\nfunc Project() {}\n\nfunc Reference() {}\n")
+	for _, p := range []string{"Widget", `\.Widget\b`} {
+		got := grepHint(t, a, "", p)
+		if strings.Count(got, "\n- [") != 1 || !strings.Contains(got, "] Widget  w.go:3") {
+			t.Errorf("%q should list Widget only:\n%s", p, got)
+		}
+	}
+	for _, p := range []string{"ProjectReference", "AGENTS.md|CLAUDE.md"} {
+		if got := grepHint(t, a, "", p); got != "" {
+			t.Errorf("%q listed %q, want nothing", p, got)
+		}
+	}
+}
+
+func TestSearchHintCapsSymbolsProductFirst(t *testing.T) {
+	a := newTestApp(t, "main")
+	for _, f := range []string{"a.go", "b.go", "c.go", "d.go", "x_test.go", "testdata/f.go"} {
+		indexSource(t, a, f, "package p\n\nfunc Run() {}\n")
+	}
+	got := grepHint(t, a, "", "Run")
+	if n := strings.Count(got, "\n- ["); n != 5 {
+		t.Fatalf("%d symbols listed, want 5:\n%s", n, got)
+	}
+	last := strings.LastIndex(got, "\n- [")
+	for _, f := range []string{"a.go", "b.go", "c.go", "d.go"} {
+		if i := strings.Index(got, "  "+f+":"); i < 0 || i > last {
+			t.Errorf("product %s missing or after the test/fixture line:\n%s", f, got)
+		}
+	}
+}
+
+func TestSearchHintListsValidAnchoredBugs(t *testing.T) {
+	a := newTestApp(t, "main")
+	indexSource(t, a, "h.go", "package p\n\nfunc handleAugment() {}\n")
+	title := strings.Repeat("t", 330)
+	fix := strings.Repeat("f", 900)
+	recordBug(t, a, title, fix, memory.Ref{Type: memory.RefSymbol, Value: "handleAugment"})
+	recordBug(t, a, "handleAugment overflow", "keyword only")
+	recordBug(t, a, "gone code bug", "stale", memory.Ref{Type: memory.RefSymbol, Value: "handleAugment"},
+		memory.Ref{Type: memory.RefFile, Value: "gone.go"})
+
+	got := grepHint(t, a, "s", "handleAugment")
+	if !strings.Contains(got, "\n- ⚠ "+title[:160]+"…") {
+		t.Errorf("anchored bug missing or not cut to 160 runes:\n%s", got)
+	}
+	if strings.Count(got, "- ⚠") != 1 || strings.Contains(got, "fff") ||
+		strings.Contains(got, "handleAugment overflow") || strings.Contains(got, "gone code bug") {
+		t.Errorf("want only the anchored bug's title, no fix, no keyword or flagged bug:\n%s", got)
+	}
+}
+
+func TestSearchHintBugCapAndMarksOnlyPrinted(t *testing.T) {
+	a := newTestApp(t, "main")
+	ctx := context.Background()
+	indexSource(t, a, "h.go", "package p\n\nfunc Handle() {}\n")
+	titles := []string{"bug one", "bug two", "bug three"}
+	for _, ti := range titles {
+		recordBug(t, a, ti, "fix", memory.Ref{Type: memory.RefFile, Value: "h.go"})
+	}
+	hint := grepHint(t, a, "s", "Handle")
+	if n := strings.Count(hint, "- ⚠"); n != 2 {
+		t.Fatalf("%d bugs listed, want 2:\n%s", n, hint)
+	}
+	read, err := handlePostRead(ctx, a, Event{Kind: KindPostRead, SessionID: "s", FilePath: "h.go", ToolResult: "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ti := range titles {
+		if strings.Contains(hint, ti) == strings.Contains(read.Context, ti) {
+			t.Errorf("%q should show exactly once across hint and read:\nhint: %s\nread: %s", ti, hint, read.Context)
+		}
+	}
+}
+
+func TestSearchHintSizeCap(t *testing.T) {
+	a, dir := newTreeApp(t)
+	long := strings.Repeat("deep/", 12)
+	names := []string{"AlphaWidgetFactoryServiceProvider", "BetaWidgetFactoryServiceProvider",
+		"GammaWidgetFactoryServiceProvider", "DeltaWidgetFactoryServiceProvider",
+		"EpsilonWidgetFactoryServiceProvider", "ZetaWidgetFactoryServiceProvider"}
+	for i := 0; i < 3; i++ {
+		rel := fmt.Sprintf("%sfile_with_a_rather_long_name_%d.go", long, i)
+		indexSource(t, a, rel, fmt.Sprintf("package p\n\nfunc %s() {}\n\nfunc %s() {}\n", names[2*i], names[2*i+1]))
+		recordBug(t, a, strings.Repeat(string(rune('a'+i)), 330), "fix", memory.Ref{Type: memory.RefFile, Value: rel})
+	}
+	cmd := fmt.Sprintf("rg -e '%s|%s' . && grep -rn '%s\\|%s' . && git grep -n '%s|%s'",
+		names[0], names[1], names[2], names[3], names[4], names[5])
+	got := shellHook(t, a, Event{Command: cmd, CWD: dir})
+	if len(got) > 800 {
+		t.Errorf("hint is %d bytes, want ≤ 800:\n%s", len(got), got)
+	}
+	if n := strings.Count(got, "\n- ["); n == 0 || n > hintSymbolMax {
+		t.Errorf("%d symbols listed:\n%s", n, got)
+	}
+	// Uncapped, five symbol lines and two bug titles alone pass the cap.
+	if 5*len("\n- [function] "+names[0]+"  "+long+"file_with_a_rather_long_name_0.go:3")+2*330 <= 800 {
+		t.Fatal("setup no longer exceeds the cap")
+	}
+}
+
+func TestSearchHintFitsTheCapExactly(t *testing.T) {
+	const header = "Recarto: symbols named in your search:"
+	for _, extra := range []int{0, 1} {
+		a := newTestApp(t, "main")
+		a.Features = off(features.GraphTools)
+		lineFixed := len("\n- [function] Widget  ") + len(".go:3")
+		rel := strings.Repeat("p", hintMax-len(header)-lineFixed+extra) + ".go"
+		indexSource(t, a, rel, "package p\n\nfunc Widget() {}\n")
+		got := grepHint(t, a, "", "Widget")
+		if extra == 0 && len(got) != hintMax {
+			t.Errorf("hint at the cap is %d bytes, want %d:\n%s", len(got), hintMax, got)
+		}
+		if extra == 1 && got != "" {
+			t.Errorf("a symbol line one byte over the cap was listed:\n%s", got)
 		}
 	}
 }

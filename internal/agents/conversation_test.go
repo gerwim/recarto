@@ -56,7 +56,7 @@ func TestNoteShownToSubagentIsShownToMainAgent(t *testing.T) {
 
 func TestSearchHintedInSubagentIsHintedInMainAgent(t *testing.T) {
 	a, dir := newTreeApp(t)
-	recordWidgetBug(t, a)
+	indexWidgetBug(t, a)
 	search := func(agent string) string {
 		return shellHook(t, a, Event{SessionID: "s", AgentID: agent, Command: "rg Widget", CWD: dir})
 	}
@@ -65,8 +65,8 @@ func TestSearchHintedInSubagentIsHintedInMainAgent(t *testing.T) {
 			t.Errorf("agent %q: first search lacks the hint or the nudge:\n%s", agent, got)
 		}
 	}
-	if got := search(""); !strings.Contains(got, "already searched") || strings.Contains(got, "search_content") {
-		t.Errorf("main agent's second search:\n%s", got)
+	if got := search(""); got != "" {
+		t.Errorf("main agent's second search = %q, want nothing", got)
 	}
 }
 
@@ -228,5 +228,27 @@ func TestSubagentEditsCountForStopNudge(t *testing.T) {
 	}
 	if !res.Block {
 		t.Errorf("3 edits across conversations did not nudge: %+v", res)
+	}
+}
+
+func TestSearchHintSkipsBugShownInRecentBugs(t *testing.T) {
+	a, dir := newTreeApp(t)
+	// On disk: session start reconciles the graph from the tree.
+	if err := os.WriteFile(filepath.Join(dir, "h.go"), []byte("package x\n\nfunc handleAugment() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	const title = "recent-only bug on handleAugment"
+	recordBug(t, a, title, "guard", memory.Ref{Type: memory.RefSymbol, Value: "handleAugment"})
+	a.Features = off(features.SessionMemories)
+
+	if got := start(t, a, "s", "startup"); !strings.Contains(got, "Recent bugs") || !strings.Contains(got, title) {
+		t.Fatalf("session start lacks the bug in Recent bugs:\n%s", got)
+	}
+	hint := handle(t, a, Event{Kind: KindAugment, SessionID: "s", Pattern: "handleAugment"})
+	if !strings.Contains(hint, "handleAugment  h.go:3") {
+		t.Fatalf("search no longer lists the symbol:\n%s", hint)
+	}
+	if strings.Contains(hint, title) || strings.Contains(hint, "Known bugs in this code") {
+		t.Errorf("search repeats a bug session start showed:\n%s", hint)
 	}
 }

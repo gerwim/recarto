@@ -1,46 +1,36 @@
 package agents
 
-import "testing"
+import (
+	"fmt"
+	"testing"
+)
 
-func TestAugmentSearchTerm(t *testing.T) {
+func TestSearchIdentifiers(t *testing.T) {
 	cases := []struct {
-		name     string
-		pattern  string
-		wantTerm string
-		wantOK   bool
+		pattern string
+		want    []string
 	}{
-		// Plain identifiers / Grep regexes pass through unchanged: no file-glob
-		// shape, so the augment symbol search must behave exactly as before.
-		{"plain identifier", "AddProjection", "AddProjection", true},
-		{"regex with star", "Add.*Projection", "Add.*Projection", true},
-		{"trailing quantifier", "foo*", "foo*", true},
-		{"path literal no wildcard", "config/app.json", "config/app.json", true},
-		// A Grep regex ending in an escaped-dot extension (the idiomatic way to
-		// match a literal dot — "import.*\.proto", "foo.*\.go") must NOT be mistaken
-		// for a file glob: the backslash before the extension dot is a regex tell, so
-		// the pattern passes through to symbol search unchanged.
-		{"regex escaped extension", "foo.*\\.go", "foo.*\\.go", true},
-		{"regex escaped ext with prefix", "import.*\\.proto", "import.*\\.proto", true},
-
-		// Pure-extension / stemless file globs carry no symbol signal: skip.
-		{"bare extension glob", "*.cs", "", false},
-		{"json extension glob", "*.json", "", false},
-		{"recursive extension glob", "**/*.ts", "", false},
-		{"path extension glob", "src/**/*.go", "", false},
-		{"recursive dir glob", "internal/**", "", false},
-
-		// File globs with a meaningful basename stem reduce to that stem.
-		{"stemmed basename glob", "**/*Projection*.cs", "Projection", true},
-		{"prefix glob", "Address*.cs", "Address", true},
-		{"infix wildcard glob", "*Foo*.ts", "Foo", true},
+		{"handleAugment", []string{"handleAugment"}},
+		{"AGENTS.md|CLAUDE.md", []string{"AGENTS.md", "CLAUDE.md"}},
+		{"ProjectReference", []string{"ProjectReference"}},
+		{`\.Source\b`, []string{"Source"}},
+		{`\bfoo\s+bar\b`, []string{"foo", "bar"}},
+		{"Add.*Projection", []string{"Add", "Projection"}},
+		{`Engine\.Recall`, []string{"Engine.Recall"}},
+		{"recarto init", []string{"recarto", "init"}},
+		{"internal/agents/handle.go", nil},
+		{"search-hints", nil},
+		{`[a-z]+_\d{2}`, nil},
+		{"404", nil},
+		{"**/*Projection*.cs", []string{"Projection"}},
+		{"Address*.cs", []string{"Address"}},
+		{"*.cs", nil},
+		{"src/**/*.go", nil},
+		{"internal/**", nil},
 	}
 	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			term, ok := augmentSearchTerm(tc.pattern)
-			if ok != tc.wantOK || term != tc.wantTerm {
-				t.Fatalf("augmentSearchTerm(%q) = (%q, %v), want (%q, %v)",
-					tc.pattern, term, ok, tc.wantTerm, tc.wantOK)
-			}
-		})
+		if got := searchIdentifiers(tc.pattern); fmt.Sprint(got) != fmt.Sprint(tc.want) {
+			t.Errorf("searchIdentifiers(%q) = %q, want %q", tc.pattern, got, tc.want)
+		}
 	}
 }

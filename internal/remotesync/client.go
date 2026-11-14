@@ -40,7 +40,8 @@ func (c *Client) Healthz(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	// Only the status is read; closing the body cannot change the answer.
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("recarto sync: healthz: %s", resp.Status)
 	}

@@ -102,7 +102,7 @@ func TestPostEditSurfacesBugForEditedFile(t *testing.T) {
 	}
 }
 
-func TestAugmentSurfacesBugsMatchingPattern(t *testing.T) {
+func TestAugmentSurfacesBugsOfNamedSymbol(t *testing.T) {
 	a := newTestApp(t, "main")
 	wt := t.TempDir()
 	a.Git.Worktree = wt
@@ -111,6 +111,7 @@ func TestAugmentSurfacesBugsMatchingPattern(t *testing.T) {
 	PostEdit(ctx, a, strings.NewReader(`{"session_id":"s1","tool_input":{"file_path":"`+filepath.Join(wt, "a.go")+`"}}`), &bytes.Buffer{})
 	if _, _, _, err := a.Engine.Record(ctx, memory.NewMemory{
 		Kind: memory.KindBug, Title: "Authenticate bypass", Body: "Authenticate bypass when token empty — fix: reject",
+		Refs:   []memory.Ref{{Type: memory.RefSymbol, Value: "Authenticate"}},
 		Source: "cli", Extra: map[string]any{"fix": "reject"},
 	}); err != nil {
 		t.Fatal(err)
@@ -123,23 +124,30 @@ func TestAugmentSurfacesBugsMatchingPattern(t *testing.T) {
 	if !strings.Contains(s, "Authenticate") { // graph symbol match (existing behavior)
 		t.Errorf("augment lost its symbol match:\n%s", s)
 	}
-	if !strings.Contains(s, "Authenticate bypass") { // new: matching bug
-		t.Errorf("augment should surface the matching bug:\n%s", s)
+	if !strings.Contains(s, "Authenticate bypass") {
+		t.Errorf("augment should surface the bug anchored to the named symbol:\n%s", s)
 	}
 }
 
 // A Bash grep reaches the shell hook as Claude Code sends it and injects the
-// Grep tool's hint plus the first-search nudge as PostToolUse context.
+// Grep tool's hint — the exactly named symbol and its bug title — plus the
+// first-search nudge as PostToolUse context.
 func TestShellSearchThroughClaudePayload(t *testing.T) {
 	a := newTestApp(t, "main")
 	ctx := context.Background()
+	src := []byte("package p\nfunc handleAugment(){}\nfunc handleAugmentHelper(){}\n")
+	if err := a.Graph.IndexFile(ctx, a.Git.Worktree, "h.go", src, 1, int64(len(src))); err != nil {
+		t.Fatal(err)
+	}
 	if _, _, _, err := a.Engine.Record(ctx, memory.NewMemory{
-		Kind: memory.KindBug, Title: "Widget overflow", Body: "Widget overflow", Source: "cli",
+		Kind: memory.KindBug, Title: "Widget overflow", Body: "Widget overflow — fix: clamp the size",
+		Refs: []memory.Ref{{Type: memory.RefSymbol, Value: "handleAugment"}}, Source: "cli",
+		Extra: map[string]any{"fix": "clamp the size"},
 	}); err != nil {
 		t.Fatal(err)
 	}
 	in := `{"session_id":"s1","cwd":"/repo","hook_event_name":"PostToolUse","tool_name":"Bash",` +
-		`"tool_input":{"command":"cd internal && grep -rn \"Widget\" . | head -20","description":"search"},` +
+		`"tool_input":{"command":"grep -rn \"handleAugment\" .","description":"search"},` +
 		`"tool_response":{"stdout":"","stderr":"","interrupted":false}}`
 	var out bytes.Buffer
 	if err := Shell(ctx, a, strings.NewReader(in), &out); err != nil {
@@ -152,7 +160,9 @@ func TestShellSearchThroughClaudePayload(t *testing.T) {
 		t.Fatalf("output %q: %v", out.String(), err)
 	}
 	h := res.HookSpecificOutput
-	if h.HookEventName != "PostToolUse" || !strings.Contains(h.AdditionalContext, "Widget overflow") || !strings.Contains(h.AdditionalContext, "search_content") {
+	c := h.AdditionalContext
+	if h.HookEventName != "PostToolUse" || !strings.Contains(c, "handleAugment  h.go:") || !strings.Contains(c, "Widget overflow") ||
+		!strings.Contains(c, "search_content") || strings.Contains(c, "handleAugmentHelper") || strings.Contains(c, "clamp") {
 		t.Errorf("got %+v", h)
 	}
 }

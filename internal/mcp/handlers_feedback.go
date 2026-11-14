@@ -45,7 +45,8 @@ func reportRecartoIssue(ctx context.Context, a *app.App, in ReportRecartoIssueIn
 	if err != nil {
 		return ReportRecartoIssueOutput{}, err
 	}
-	defer b.Close()
+	// The report is committed before Close, so a close failure loses nothing.
+	defer func() { _ = b.Close() }()
 
 	source := a.Git.RepoName
 	if source == "" {
