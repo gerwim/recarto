@@ -7,7 +7,7 @@ import (
 )
 
 func TestRecordMemorySchemaHasKindEnum(t *testing.T) {
-	sc := recordMemorySchema(nil)
+	sc := recordMemorySchema(newTestApp(t, "main"))
 	p := sc.Properties["kind"]
 	if p == nil {
 		t.Fatal("no kind property")
@@ -25,10 +25,11 @@ func TestRecordMemorySchemaHasKindEnum(t *testing.T) {
 }
 
 func TestTraceAndQueryEnums(t *testing.T) {
-	if got := traceCallPathSchema().Properties["direction"].Enum; len(got) != 2 {
+	a := newTestApp(t, "main")
+	if got := traceCallPathSchema(a).Properties["direction"].Enum; len(got) != 2 {
 		t.Errorf("direction enum = %v, want 2 values", got)
 	}
-	if got := queryGraphSchema().Properties["edge_direction"].Enum; len(got) != 2 {
+	if got := queryGraphSchema(a).Properties["edge_direction"].Enum; len(got) != 2 {
 		t.Errorf("edge_direction enum = %v, want 2 values", got)
 	}
 }

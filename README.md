@@ -504,6 +504,8 @@ With it set:
   name-derived bucket key automatically: every machine (or ephemeral sandbox) sharing
   the same `RECARTO_WORKSPACE`, server and key converges.
 
+Without `RECARTO_WORKSPACE`, `record_memory` has no `scope` parameter.
+
 Workspace memories surface at session start and via recall — never through the
 file-anchored just-in-time read/edit hooks, whose repo-relative paths are ambiguous
 across repos.
@@ -525,7 +527,8 @@ repo-less session reads and writes exactly the memories the cd'd sessions see:
 
 - Graph and file tools (`search_graph`, `get_code_snippet`, `get_file_outline`, …)
   take an optional `repo` (name or path) to target a served repo; omitted = the cwd
-  repo, and an unknown name errors with the served list.
+  repo, and an unknown name errors with the served list. Tools offer `repo` only
+  while at least one listed repo besides the cwd repo is served.
 - `recall_memory`/`search_bugs`/`list_memory` merge every served repo's memories
   (hits labeled `repo`); `record_memory`/`record_bug` take `repo` to write into a
   specific repo's store; id lookups resolve across all of them.

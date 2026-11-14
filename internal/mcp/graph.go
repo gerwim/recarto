@@ -87,10 +87,10 @@ func joinHints(a, b string) string {
 // --- search_graph ---
 
 type SearchGraphInput struct {
-	Repo             string   `json:"repo,omitempty" jsonschema:"which repo to target when several are served (RECARTO_REPOS): a served repo's name or path; omit for the current one"`
-	Query            string   `json:"query" jsonschema:"the concept or symbol name to find, in plain natural language"`
-	CandidateSymbols []string `json:"candidate_symbols,omitempty" jsonschema:"the identifier names you expect to exist for this concept (3-8 best guesses). Any form is accepted and matched leniently: PascalCase (AddressLookup), interface-prefixed (IAddressLookupService), snake_case (address_lookup), plain phrases (address lookup), or partial/qualified names. Provide these whenever searching by concept rather than an exact known name."`
-	Kind             string   `json:"kind,omitempty" jsonschema:"restrict to a node kind (function, method, class, …)"`
+	Repo             string   `json:"repo,omitempty" jsonschema:"a served repo's name or path; omit for the current one"`
+	Query            string   `json:"query" jsonschema:"the concept or symbol name, in plain words"`
+	CandidateSymbols []string `json:"candidate_symbols,omitempty" jsonschema:"3-8 identifier names you expect for the concept, in any form: PascalCase, snake_case, plain words or partial names"`
+	Kind             string   `json:"kind,omitempty" jsonschema:"restrict to a node kind (function, method, class, ...)"`
 	Language         string   `json:"language,omitempty" jsonschema:"restrict to a language (go, csharp, typescript, tsx, javascript, rust, python)"`
 	Limit            int      `json:"limit,omitempty" jsonschema:"max results"`
 }
@@ -157,11 +157,11 @@ func searchGraph(ctx context.Context, a *app.App, in SearchGraphInput) (SearchGr
 // --- trace_call_path ---
 
 type TraceCallPathInput struct {
-	Repo          string  `json:"repo,omitempty" jsonschema:"which repo to target when several are served (RECARTO_REPOS): a served repo's name or path; omit for the current one"`
+	Repo          string  `json:"repo,omitempty" jsonschema:"a served repo's name or path; omit for the current one"`
 	Symbol        string  `json:"symbol" jsonschema:"the symbol to trace from (name or qualified name)"`
 	Direction     string  `json:"direction,omitempty" jsonschema:"callers or callees (default callees)"`
 	Depth         int     `json:"depth,omitempty" jsonschema:"max chain depth (default 3)"`
-	MinConfidence float64 `json:"min_confidence,omitempty" jsonschema:"confidence floor 0-1. Default 0 = adaptive: confident hops are shown and low-confidence/ambiguous ones surface only when nothing better exists. Raise toward 1 to keep only high-confidence hops."`
+	MinConfidence float64 `json:"min_confidence,omitempty" jsonschema:"confidence floor 0-1; default 0 shows confident hops, and low-confidence ones only when nothing better exists"`
 }
 
 // TraceHop is one annotated hop in a call chain. Resolution/Confidence/Receiver
@@ -279,9 +279,9 @@ func traceCallPath(ctx context.Context, a *app.App, in TraceCallPathInput) (Trac
 // --- get_architecture ---
 
 type GetArchitectureInput struct {
-	Repo  string `json:"repo,omitempty" jsonschema:"which repo to target when several are served (RECARTO_REPOS): a served repo's name or path; omit for the current one"`
-	Scope string `json:"scope,omitempty" jsonschema:"restrict to paths under this prefix — the drill-down path for detail a budgeted top-level map omits"`
-	Limit int    `json:"limit,omitempty" jsonschema:"max modules and max dependency edges to return (0 = default 80). The map keeps the highest-signal entries (largest modules, heaviest dependencies); module_count/dep_count report the full pre-cap totals."`
+	Repo  string `json:"repo,omitempty" jsonschema:"a served repo's name or path; omit for the current one"`
+	Scope string `json:"scope,omitempty" jsonschema:"only paths under this prefix"`
+	Limit int    `json:"limit,omitempty" jsonschema:"max modules and max dependencies (default 80)"`
 }
 type ArchModule struct {
 	Name    string `json:"name"`
@@ -337,7 +337,7 @@ func getArchitecture(ctx context.Context, a *app.App, in GetArchitectureInput) (
 // --- query_graph ---
 
 type QueryGraphInput struct {
-	Repo          string `json:"repo,omitempty" jsonschema:"which repo to target when several are served (RECARTO_REPOS): a served repo's name or path; omit for the current one"`
+	Repo          string `json:"repo,omitempty" jsonschema:"a served repo's name or path; omit for the current one"`
 	Kind          string `json:"kind,omitempty" jsonschema:"node kind filter"`
 	NameContains  string `json:"name_contains,omitempty" jsonschema:"substring match on name/qualified_name"`
 	Path          string `json:"path,omitempty" jsonschema:"exact file path filter"`
@@ -382,15 +382,15 @@ func queryGraph(ctx context.Context, a *app.App, in QueryGraphInput) (QueryGraph
 // --- search_content ---
 
 type SearchContentInput struct {
-	Repo       string `json:"repo,omitempty" jsonschema:"which repo to target when several are served (RECARTO_REPOS): a served repo's name or path; omit for the current one"`
-	Pattern    string `json:"pattern" jsonschema:"the text to find. Literal substring by default; set regex=true to treat it as a regular expression (RE2 syntax)."`
-	Regex      bool   `json:"regex,omitempty" jsonschema:"treat pattern as a regular expression instead of a literal substring"`
+	Repo       string `json:"repo,omitempty" jsonschema:"a served repo's name or path; omit for the current one"`
+	Pattern    string `json:"pattern" jsonschema:"the text to find: a literal substring, or an RE2 regex with regex=true"`
+	Regex      bool   `json:"regex,omitempty" jsonschema:"treat pattern as a regular expression"`
 	IgnoreCase bool   `json:"ignore_case,omitempty" jsonschema:"case-insensitive match"`
-	PathGlob   string `json:"path_glob,omitempty" jsonschema:"restrict to files whose path matches this glob (e.g. *.cs, src/**). A glob without a slash matches the filename."`
-	Language   string `json:"language,omitempty" jsonschema:"restrict to a language (go, csharp, typescript, tsx, javascript, rust, python). NOTE: this scopes the search to indexed code of that language; omit it to also search config/docs/data files (.csproj, .json, .yaml, .md, …)."`
+	PathGlob   string `json:"path_glob,omitempty" jsonschema:"only files matching this glob (e.g. src/**); a glob without a slash matches the file name"`
+	Language   string `json:"language,omitempty" jsonschema:"only indexed code in this language (go, csharp, typescript, tsx, javascript, rust, python); omit it to include config, docs and data files"`
 	Limit      int    `json:"limit,omitempty" jsonschema:"max matches (default 50)"`
-	MaxPerFile int    `json:"max_per_file,omitempty" jsonschema:"max matches per file (default 5) so one file cannot dominate the page"`
-	Offset     int    `json:"offset,omitempty" jsonschema:"skip the first N matches of the stable result order — page with offset+limit instead of re-fetching with a bigger limit. Pages the returned (per-file-capped) order: when per_file_capped is true, the withheld same-file matches are reached by raising max_per_file, not by paging deeper"`
+	MaxPerFile int    `json:"max_per_file,omitempty" jsonschema:"max matches per file (default 5)"`
+	Offset     int    `json:"offset,omitempty" jsonschema:"skip the first N matches, to page with offset+limit"`
 }
 type ContentMatch struct {
 	Path   string `json:"path"`
@@ -439,10 +439,10 @@ func searchContent(ctx context.Context, a *app.App, in SearchContentInput) (Sear
 // --- get_code_snippet ---
 
 type GetCodeSnippetInput struct {
-	Repo    string   `json:"repo,omitempty" jsonschema:"which repo to target when several are served (RECARTO_REPOS): a served repo's name or path; omit for the current one"`
-	File    string   `json:"file,omitempty" jsonschema:"repo-relative file path. Optional: omit it to resolve the symbol by name across the repo — the common case right after a search returns a name."`
-	Symbol  string   `json:"symbol,omitempty" jsonschema:"symbol name or qualified name"`
-	Symbols []string `json:"symbols,omitempty" jsonschema:"up to 10 symbols to fetch in one call — the batch form of symbol, resolved identically and returned in order under snippets. Use after a search returns several relevant names instead of one call per symbol."`
+	Repo    string   `json:"repo,omitempty" jsonschema:"a served repo's name or path; omit for the current one"`
+	File    string   `json:"file,omitempty" jsonschema:"optional repo-relative path; without it the symbol is resolved across the repo"`
+	Symbol  string   `json:"symbol,omitempty" jsonschema:"a bare name, a qualified name or a Type.Method suffix, as search and trace results print it"`
+	Symbols []string `json:"symbols,omitempty" jsonschema:"up to 10 symbols, returned in order under snippets; extras are listed in skipped"`
 }
 type SnippetCandidate struct {
 	Path          string `json:"path"`
@@ -556,7 +556,7 @@ func getCodeSnippet(ctx context.Context, a *app.App, in GetCodeSnippetInput) (Ge
 // --- get_file_outline ---
 
 type GetFileOutlineInput struct {
-	Repo string `json:"repo,omitempty" jsonschema:"which repo to target when several are served (RECARTO_REPOS): a served repo's name or path; omit for the current one"`
+	Repo string `json:"repo,omitempty" jsonschema:"a served repo's name or path; omit for the current one"`
 	File string `json:"file" jsonschema:"repo-relative file path to outline"`
 }
 type OutlineSym struct {
@@ -608,9 +608,9 @@ func getFileOutline(ctx context.Context, a *app.App, in GetFileOutlineInput) (Ge
 // --- find_implementations ---
 
 type FindImplementationsInput struct {
-	Repo      string `json:"repo,omitempty" jsonschema:"which repo to target when several are served (RECARTO_REPOS): a served repo's name or path; omit for the current one"`
-	Symbol    string `json:"symbol" jsonschema:"the interface/base type's bare or qualified name"`
-	Direction string `json:"direction,omitempty" jsonschema:"down (default) = implementers/subtypes of the type; up = the supertypes the type extends"`
+	Repo      string `json:"repo,omitempty" jsonschema:"a served repo's name or path; omit for the current one"`
+	Symbol    string `json:"symbol" jsonschema:"the type's bare or qualified name"`
+	Direction string `json:"direction,omitempty" jsonschema:"down (default) or up (supertypes)"`
 	Limit     int    `json:"limit,omitempty" jsonschema:"max results (default 50)"`
 }
 type ImplSymbol struct {
@@ -655,8 +655,8 @@ func findImplementations(ctx context.Context, a *app.App, in FindImplementations
 // --- find_annotated ---
 
 type FindAnnotatedInput struct {
-	Repo      string `json:"repo,omitempty" jsonschema:"which repo to target when several are served (RECARTO_REPOS): a served repo's name or path; omit for the current one"`
-	Attribute string `json:"attribute" jsonschema:"the attribute/annotation/decorator name as written at the use site (e.g. ExtendObjectType, Component, Obsolete); the C# Attribute suffix is optional"`
+	Repo      string `json:"repo,omitempty" jsonschema:"a served repo's name or path; omit for the current one"`
+	Attribute string `json:"attribute" jsonschema:"the name as written at the use site; the C# Attribute suffix is optional"`
 	Limit     int    `json:"limit,omitempty" jsonschema:"max results (default 50)"`
 }
 type AnnotatedSym struct {
@@ -697,8 +697,8 @@ func findAnnotated(ctx context.Context, a *app.App, in FindAnnotatedInput) (Find
 // --- find_references ---
 
 type FindReferencesInput struct {
-	Repo   string `json:"repo,omitempty" jsonschema:"which repo to target when several are served (RECARTO_REPOS): a served repo's name or path; omit for the current one"`
-	Symbol string `json:"symbol" jsonschema:"the symbol whose references to find (bare, qualified, or Type.Method form)"`
+	Repo   string `json:"repo,omitempty" jsonschema:"a served repo's name or path; omit for the current one"`
+	Symbol string `json:"symbol" jsonschema:"bare, qualified or Type.Method form"`
 	Limit  int    `json:"limit,omitempty" jsonschema:"max references (default 50)"`
 }
 type ReferenceOut struct {
@@ -746,8 +746,8 @@ func findReferences(ctx context.Context, a *app.App, in FindReferencesInput) (Fi
 // --- get_graph_delta ---
 
 type GetGraphDeltaInput struct {
-	Repo  string `json:"repo,omitempty" jsonschema:"which repo to target when several are served (RECARTO_REPOS): a served repo's name or path; omit for the current one"`
-	Limit int    `json:"limit,omitempty" jsonschema:"max symbol-level changes to return (default 50)"`
+	Repo  string `json:"repo,omitempty" jsonschema:"a served repo's name or path; omit for the current one"`
+	Limit int    `json:"limit,omitempty" jsonschema:"max symbol changes to return (default 50)"`
 }
 type GraphDeltaEntry struct {
 	Path          string `json:"path"`

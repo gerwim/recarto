@@ -23,17 +23,21 @@ func NewServer(a *app.App) *sdk.Server {
 	s := sdk.NewServer(&sdk.Implementation{Name: "recarto", Version: version.Version}, nil)
 	f := a.Features
 	if f.On(features.MemoryTools) {
-		addToolSchema(s, a, "record_memory",
-			"Record (or reinforce a near-duplicate of) a memory: a preference, learning, decision, do_not_repeat, bug, or todo (open work that resurfaces until done). When the new memory looks like it may contradict an existing one (same topic, different claim — or anchored to the same code), the response lists conflict_candidates with a resolution note; review them rather than leaving both claims standing. When a workspace is configured (RECARTO_WORKSPACE), scope=\"workspace\" stores it in the cross-repo workspace store instead of this repo's — use that for preferences and knowledge that apply beyond this one repo.",
-			recordMemorySchema(f), recordMemory)
+		// Without a workspace, record_memory has no scope and recall finds no
+		// workspace memories, so neither description mentions the store.
+		recordDesc := "Record a memory, or reinforce a near-duplicate of one. The result's conflict_candidates are existing memories the new one may contradict: review them, then forget_memory the one that no longer holds or re-record with supersedes_id."
+		recallDesc := "Recall the memories most relevant to a task, ranked and token-budgeted. An empty result means nothing stored is relevant. Each memory reports matched_on, the signals that matched it; the result reports truncated and budget_used."
+		if a.Workspace != nil {
+			recordDesc += recordWorkspace
+			recallDesc += recallWorkspace
+		}
+		addToolSchema(s, a, "record_memory", recordDesc, recordMemorySchema(a), recordMemory)
 		addTool(s, a, "record_bug",
-			"Record a bug with its error message, root cause, and fix (a convenience wrapper over record_memory).",
+			"Record a bug with its error message, root cause and fix (a wrapper over record_memory).",
 			recordBug)
-		addTool(s, a, "recall_memory",
-			"Recall the most relevant memories for the current task — hybrid lexical (BM25) + semantic ranking plus structural refs, branch-aware and token-budgeted. Returns nothing when no stored memory is relevant to the task. Each memory reports matched_on (the signals behind it); the result reports truncated/budget_used. When a workspace is configured (RECARTO_WORKSPACE), cross-repo workspace memories are searched too and carry scope=\"workspace\".",
-			recallMemory)
+		addTool(s, a, "recall_memory", recallDesc, recallMemory)
 		addTool(s, a, "search_bugs",
-			"Search recorded bugs (keywords or a plain-words description) before attempting a fix.",
+			"Search recorded bugs before you attempt a fix.",
 			searchBugs)
 		addTool(s, a, "get_memory",
 			"Fetch a single memory by id.",
@@ -43,52 +47,52 @@ func NewServer(a *app.App) *sdk.Server {
 			listMemory)
 		if f.On(features.Todos) {
 			addTool(s, a, "complete_todo",
-				"Mark a todo memory done (active → done) so it stops surfacing. No-op if the id is not an active todo.",
+				"Mark a todo done so it stops surfacing. No-op if the id is not an active todo.",
 				completeTodo)
 		}
 		addTool(s, a, "forget_memory",
-			"Delete a memory recorded in error (hard delete; the memory is gone). No-op if the id is unknown. To replace rather than remove, record a new memory with supersedes_id.",
+			"Delete a memory recorded in error, permanently. No-op for an unknown id. To replace a memory instead, record the new one with supersedes_id.",
 			forgetMemory)
 	}
 	if f.On(features.GraphTools) {
 		addTool(s, a, "search_graph",
-			"Search the code graph for symbols (functions, methods, classes, types). Pass `query` as the concept in plain words; when searching by concept, also pass `candidate_symbols` — the identifier names you expect to exist (e.g. AddressLookup, Geocode). The names you supply are what make concept search land; any form works (PascalCase, interface-prefixed, snake_case, or plain words). Each result carries a one-line signature. Product code ranks above tests, generated code and namespace declarations."+omittedName,
+			"Find symbols (functions, methods, types) by name or concept, ranked, each with a one-line signature; product code ranks above tests and generated code. When searching by concept, pass candidate_symbols: the names you expect are what make the search land. For text inside code, comments or config, use search_content."+omittedName,
 			searchGraph)
 		addToolSchema(s, a, "trace_call_path",
-			"Trace call chains to/from a symbol (direction: callers or callees). Every chain reads in the calls direction — entry n calls entry n+1 — in BOTH modes: callees list the symbol first then what it calls; callers list the outer caller first and the queried symbol last. The `legend` field restates this on each result, so a chain is never read backwards. Each hop past the root is annotated with `resolution` (self/typed/static/iface/name — how the call was bound) and `confidence` (high/medium/low). Ambiguous low-confidence hops carry the `receiver` expression, appear as sibling branches (the candidate alternatives), and are not expanded further. By default confident hops are shown and low-confidence ones surface only when nothing better exists; set `min_confidence` (0–1) to raise the floor. Trust high/typed/self hops; treat low/name hops as candidates to verify with get_code_snippet. Hops in test files carry is_test; when every caller of a symbol is test code the hint says so (production usually reaches it through a wrapper — find_references sees what the trace cannot). Tracing a type (class/interface/record) dead-ends with a `hint`: calls target its methods, not its declaration, so use find_implementations for implementers and find_references for references. A symbol that resolves but has no edges returns a single root-only chain (plus a `hint`), never an empty result — so empty `chains` always means the symbol is unknown (see `suggestions`), while a root-only chain means it exists but has no callers/callees here (an entrypoint, or dynamically-bound sites): use find_references to find the references the call edges miss.",
-			traceCallPathSchema(), traceCallPath)
+			"Trace the call chains from a symbol: what it calls (callees) or what calls it (callers). Every chain reads in the calls direction in both modes: entry n calls entry n+1, so a callers chain ends with the symbol. Each hop after the root has a resolution and a confidence; low-confidence hops are candidates to verify with get_code_snippet. Empty chains means the symbol is unknown (see suggestions); a single root-only chain means it has no callers or callees in the graph, so try find_references. Tracing a type dead-ends, since calls target its methods: use find_implementations or find_references.",
+			traceCallPathSchema(a), traceCallPath)
 		addTool(s, a, "get_architecture",
-			"Summarize the codebase structure: modules with file/symbol counts and the heaviest inter-module dependencies. The map is budgeted to the highest-signal entries (default 80 each; module_count/dep_count report the full totals, truncated flags a cap); raise `limit` for more or pass `scope` to drill into a subtree.",
+			"Summarize the codebase to orient in unfamiliar code: modules with file and symbol counts, and the heaviest dependencies between them. Only the top entries are listed: module_count and dep_count give the totals, and truncated flags a cap. Pass scope to drill into a subtree.",
 			getArchitecture)
 		addToolSchema(s, a, "query_graph",
-			"Run a structured query over the code graph: AND-combined node filters (kind, name_contains, path, language) plus an optional edge traversal (edge_kind/edge_direction). Use it for exact structured lookups — \"every class in this file\", \"all methods that emit a `calls` edge\" — where search_graph's relevance ranking isn't what you want. At least one filter is REQUIRED: an all-empty query is rejected (it would return the first page of the entire graph ordered by qualified name — i.e. vendored/generated noise — never an answer). For concept/identifier discovery use search_graph instead."+omittedName,
-			queryGraphSchema(), queryGraph)
+			"Exact structured lookup in the code graph, e.g. every class in one file: node filters (kind, name_contains, path, language) combined with AND, plus an optional edge filter. At least one filter is required. To discover symbols by concept or name, use search_graph."+omittedName,
+			queryGraphSchema(a), queryGraph)
 		addTool(s, a, "search_content",
-			"Full-text search across the whole worktree — a complete replacement for the external grep/search tool. Honors .gitignore and covers not just parsed code but config, build, docs and data files the code graph never indexes (.csproj, .json, .yaml, .md, …), so you never have to shell out for a file kind the graph happens not to cover. Finds arbitrary text that search_graph cannot: string/error-message literals, config keys, magic constants, attribute/annotation usages, comments, and call sites inside method bodies. Each match returns its file, line, and the matching line text; matches inside indexed code also carry their enclosing symbol (kind + qualified_name) from the code graph, while matches in unparsed files read as file scope. Literal substring by default; set regex=true for RE2 regex. Filter with path_glob/language (language restricts to indexed code of that language); generated-file matches are demoted; binary files are skipped. The result reports `total` (every matching line) and `truncated`/`per_file_capped` so you know when the page is partial — page deeper with offset+limit (the result order is stable) or narrow the filters, rather than treating a capped page as complete — but when per_file_capped is true, the withheld same-file matches are reached by raising max_per_file, not by offset. Prefer this over the external grep/search tool so codebase search stays in one place.",
+			"Text search over the whole worktree, honouring .gitignore: code, and also the config, docs and data files the graph doesn't index. Use it instead of grep. Each match has its path, line and text, and in indexed code its enclosing symbol. total counts every match. The page is partial when truncated (page with offset) or per_file_capped (raise max_per_file for the rest of a file's matches).",
 			searchContent)
 		addTool(s, a, "get_code_snippet",
-			"Return the exact source of a symbol instead of reading the whole file. Pass `symbol` alone (file optional) to resolve it by name across the repo — the common case right after a search returns a name, with no need to know the path. `symbol` accepts a bare name, a fully-qualified name, or a `Type.Method` suffix (e.g. `DefaultRequestExecutor.ExecuteAsync`) — the same identifier form trace_call_path/callers/callees emit, so a name copied from a trace resolves as-is. Supply `file` too to pin it. Returns the definition's path and line range, or found=false (not an error) when the symbol is unknown. When the bare name is ambiguous it returns found=false with `candidates` (each path/line/qualified_name) so you can re-query with a qualified name (usually unique) or the file. Overloads of one method (same qualified name, same file — which neither a name nor a file can tell apart) instead come back together: found=true with every body in one snippet, each prefixed by its `// path:line`. Fetch several symbols in one call with symbols (≤10; overflow is listed in skipped, in input order under snippets) — one call replaces N when a search returned several relevant hits.",
+			"Return a symbol's source with its path and line range, instead of reading the whole file. found=false means the symbol is unknown or, with candidates, ambiguous: re-query with a qualified name or the file. Overloads come back together in one snippet. Pass symbols to fetch several in one call.",
 			getCodeSnippet)
 		addTool(s, a, "get_file_outline",
-			"List the symbols defined in one file — kind, name, signature, and line range — in source order, so you grasp a file's structure WITHOUT reading the whole thing, then pull just the symbol you need with get_code_snippet. This is the structural alternative to opening a large file with the Read tool: an outline of a 400-line file costs a handful of lines. Nested symbols carry their `parent`. Prefer this over reading a whole file to find your way around it."+omittedName,
+			"List the symbols of one file with kind, signature and line range, in source order, nested ones with their parent: its structure without reading the whole file. Then fetch the symbol you need with get_code_snippet."+omittedName,
 			getFileOutline)
 		addTool(s, a, "find_implementations",
-			"Find the types that implement or subclass a given interface/base type (direction=down, default), or the supertypes a type extends (direction=up), from the graph's inheritance edges. This is the structural answer to the classic interface grep — \"what implements IRequestExecutor\" — that search_graph cannot give, because implementers don't share the interface's name. Pass `symbol` as the type's bare or qualified name. Prefer this over grepping for `: TypeName` so codebase navigation stays in recarto."+omittedName,
+			"Find the implementers and subtypes of a type, or its supertypes, from inheritance edges. Grep and search_graph can't answer this: implementers don't share the type's name."+omittedName,
 			findImplementations)
 		addTool(s, a, "find_annotated",
-			"Find every symbol decorated with a given attribute/annotation/decorator — e.g. all `[ExtendObjectType]` classes in C#, every `@Component` in TS. This is the structural answer to the attribute grep that search_graph cannot give (the decorated class shares no name with the attribute) and that plain text grep pollutes (it also matches the attribute's own definition, doc comments, and string literals). Each result is the decorated symbol itself (class/method/property) with its kind and location. Matching is C# `Attribute`-suffix tolerant. Pass `attribute` as the name written at the use site. Prefer this over grepping for `[Attr` so codebase navigation stays in recarto."+omittedName,
+			"Find the symbols that carry an attribute, annotation or decorator, such as every @Component class. Each result is the decorated symbol with its kind and location. search_graph can't find these, since a symbol doesn't share its attribute's name, and grep also matches the attribute's definition, comments and strings."+omittedName,
 			findAnnotated)
 		addTool(s, a, "find_references",
-			"Find every place a symbol is used — call sites, type usages, imports, annotations — from the graph's edges, plus a word-boundary text sweep for references the graph cannot see (comments, config, unparsed files, dynamically-bound sites), deduplicated by path:line. Each hit carries its file/line, the referencing symbol (`from`), an edge kind (`calls`, `extends`, … or `text` for grep-only hits), and `is_test` so test usages are tell-apart-able at a glance. `resolved` reports whether the symbol matched a graph node at all — false means hits are text-only. NOTE: bare-name queries on common method names (Get, Close, String) can match unrelated same-named call sites among unresolved edges — pass a Type.Method form to narrow. Prefer this over hand-rolling a `\\bName\\b` regex in search_content: one call, structurally ranked, already deduplicated.",
+			"Find every use of a symbol: call sites, type usages, imports and annotations from graph edges, plus a word-boundary text sweep for what the graph can't see, deduplicated by path:line. Use it instead of a search_content regex for the name. Each hit has its kind (text for sweep-only hits), the referencing symbol and is_test. resolved=false means the symbol matched no graph node, so every hit is text-only. A common bare method name, such as Close, can match unrelated call sites: pass Type.Method.",
 			findReferences)
 		addTool(s, a, "get_graph_delta",
-			"List what changed in the code graph since your last working session here — the symbol-level detail behind the session-start 'Changed since…' block (same baseline: the last session that actually changed the graph, so /clear or idle sessions don't reset it). Each entry is a symbol with its path, kind, and disposition relative to that baseline: added, removed, or changed; a symbol both added and removed within the window nets out, and a deleted-then-recreated file (branch switch, stash pop) reads as changed. CAVEAT: a renamed file reads as removals at the OLD path — the new path has no journal history — so verify a surprising 'removed' with search_graph before trusting it. Use it to reorient on a branch before trusting recalled knowledge about code that may have moved. total/truncated report completeness; raise limit for more.",
+			"List the symbols added, removed or changed in the code graph since the last session here that changed it. Check it before you trust recalled knowledge about code that may have moved. A renamed file reads as removals at its old path: verify a surprising removal with search_graph. total and truncated report completeness.",
 			getGraphDelta)
 	}
 	if f.On(features.IssueReports) {
 		addToolSchema(s, a, "report_recarto_issue",
-			"Report a problem with Recarto ITSELF (not the user's code) so the maintainer can fix it: a tool that errored, ranked/returned the wrong thing, was confusing to use, or lacked a capability you needed. Routes to a global cross-repo queue. Describe the Recarto interaction and a minimal repro — not proprietary source from this repo.",
-			reportRecartoIssueSchema(), reportRecartoIssue)
+			"Report a problem with Recarto itself, not with the user's code, to the maintainer's cross-repo queue. Describe the Recarto interaction and a minimal repro, without proprietary source from this repo.",
+			reportRecartoIssueSchema(a), reportRecartoIssue)
 	}
 	return s
 }
@@ -96,17 +100,18 @@ func NewServer(a *app.App) *sdk.Server {
 // Keep the canonical-identifier explanation identical across list tools.
 const omittedName = " Results omit name when it equals qualified_name or its last segment."
 
+const (
+	recordWorkspace = " scope=workspace stores it in the cross-repo workspace store, for knowledge that applies beyond this repo."
+	recallWorkspace = " Memories in the cross-repo workspace store are searched too and carry scope=workspace."
+)
+
 // addTool adapts an SDK-free handler func(ctx, *app.App, In) (Out, error) into the
-// SDK's typed tool handler. Confining the SDK signature to this one adapter keeps
-// every handler transport-agnostic and unit-testable.
+// SDK's typed tool handler, with the input schema a's setup calls for. Confining
+// the SDK signature to this one adapter keeps every handler transport-agnostic
+// and unit-testable.
 func addTool[In, Out any](s *sdk.Server, a *app.App, name, desc string,
 	fn func(context.Context, *app.App, In) (Out, error)) {
-	sdk.AddTool(s, &sdk.Tool{Name: name, Description: desc},
-		func(ctx context.Context, _ *sdk.CallToolRequest, in In) (*sdk.CallToolResult, Out, error) {
-			out, err := fn(ctx, a, in)
-			// A non-nil err is surfaced by the SDK as a tool error result.
-			return nil, out, err
-		})
+	addToolSchema(s, a, name, desc, inputSchema[In](a), fn)
 }
 
 // addToolSchema is addTool with an explicit InputSchema, used where a field needs
