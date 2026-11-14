@@ -146,6 +146,32 @@ func TestPostReadWarnsOnRepeat(t *testing.T) {
 	}
 }
 
+// A subagent's reads are its own: the main agent's first read of the same
+// lines gets no repeat notice.
+func TestSubagentReadsDoNotCountForMainAgent(t *testing.T) {
+	a := newTestApp(t, "main")
+	ctx := context.Background()
+	file := filepath.Join(t.TempDir(), "f.go")
+	if err := os.WriteFile(file, []byte(strings.Repeat("x\n", 200)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	text := fmt.Sprintf(`{"type":"text","file":{"filePath":%q,"content":"x","numLines":50,"startLine":100,"totalLines":200}}`, file)
+	for i, c := range []struct {
+		agent string
+		want  bool
+	}{{`"agent_id":"sub-1",`, false}, {"", false}, {"", true}} {
+		in := fmt.Sprintf(`{"session_id":"sess-1",%s"tool_name":"Read",`+
+			`"tool_input":{"file_path":%q,"offset":100,"limit":50},"tool_response":%s}`, c.agent, file, text)
+		var out bytes.Buffer
+		if err := PostRead(ctx, a, strings.NewReader(in), &out); err != nil {
+			t.Fatal(err)
+		}
+		if got := strings.Contains(out.String(), "you already have lines 100-149"); got != c.want {
+			t.Errorf("read %d: notice = %v, want %v:\n%s", i+1, got, c.want, out.String())
+		}
+	}
+}
+
 func TestSessionStartRunsCompaction(t *testing.T) {
 	a := newTestApp(t, "main")
 	ctx := context.Background()

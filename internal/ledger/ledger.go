@@ -63,6 +63,21 @@ func (l *Ledger) Metrics(ctx context.Context, scope, prefix string) ([]string, e
 	return out, rows.Err()
 }
 
+// Delete removes scope's metrics that start with any of prefixes.
+func (l *Ledger) Delete(ctx context.Context, scope string, prefixes ...string) error {
+	return l.st.WriteTx(ctx, func(c store.Conn) error {
+		for _, p := range prefixes {
+			// substr, not LIKE, so % and _ in a file path match literally.
+			if _, err := c.ExecContext(ctx,
+				`DELETE FROM counters WHERE scope = ? AND substr(metric, 1, length(?)) = ?`,
+				scope, p, p); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
 // Claim sets counters[scope, metric] to 1 unless it already exists and reports
 // whether this call created it: of concurrent callers, in this process or
 // another, exactly one gets true.

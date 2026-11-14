@@ -130,9 +130,33 @@ func within(wt, abs string) (string, bool) {
 	return filepath.ToSlash(r), true
 }
 
+// Metric prefixes of what a conversation has in its context. A compaction
+// forgets them; the one-time nudges and blockMetric stay.
+const (
+	readMetric   = "lines:"
+	shownMetric  = "surfaced:"
+	searchMetric = "augment:"
+)
+
+// blockMetric marks a conversation that got the full session-start block.
+const blockMetric = "session_block"
+
+// conversation returns the ledger scope of what ev's conversation was shown:
+// the session's main agent, or the subagent ev names. "" without a session.
+func conversation(ev Event) string {
+	if ev.SessionID == "" {
+		return ""
+	}
+	if ev.AgentID == "" {
+		return "session:" + ev.SessionID
+	}
+	return "session:" + ev.SessionID + "/agent:" + ev.AgentID
+}
+
 // handleSessionStart opens/creates the session row, warms the code graph, runs
 // gated compaction, recalls a token-budgeted slice for this branch, and returns it
-// as injectable context plus a record nudge.
+// as injectable context plus a record nudge. A resume of a conversation that
+// already got the block returns only the memories it has not been shown yet.
 func handleSessionStart(ctx context.Context, a *app.App, ev Event) (Result, error) {
 	now := a.Clock.Now().UnixMilli()
 	if ev.SessionID != "" {
@@ -148,7 +172,126 @@ func handleSessionStart(ctx context.Context, a *app.App, ev Event) (Result, erro
 		}
 	}
 	_ = a.Ledger.Incr(ctx, "lifetime", "sessions", 1)
+	scope := conversation(ev)
+	// Forget before the upkeep, so a hook the host kills mid-upkeep still leaves a
+	// compacted conversation's record cleared.
+	resumed, err := applySource(ctx, a, scope, ev.Source)
+	if err != nil {
+		return Result{}, err
+	}
+	sessionStartUpkeep(ctx, a)
 
+	budget := sessionBudget()
+	repoBudget := budget
+	// The workspace tier borrows a third of the session budget rather than
+	// growing the block: RECARTO_SESSION_BUDGET stays the whole block's bound.
+	var results, wsResults []memory.RecallResult
+	if a.Features.On(features.SessionMemories) {
+		if a.Workspace != nil {
+			wsBudget := budget / 3
+			repoBudget = budget - wsBudget
+			if wsSet, err := a.Workspace.Engine.Recall(ctx, memory.RecallQuery{
+				Baseline:    true,
+				TokenBudget: wsBudget,
+			}); err == nil {
+				wsResults = wsSet.Results
+			}
+		}
+		set, err := a.Engine.Recall(ctx, memory.RecallQuery{
+			Branch:      a.Git.Branch,
+			Worktree:    a.Git.Worktree,
+			Baseline:    true,
+			TokenBudget: repoBudget,
+		})
+		if err != nil {
+			return Result{}, err
+		}
+		results = set.Results
+	}
+	if !a.Features.On(features.Todos) {
+		isTodo := func(r memory.RecallResult) bool { return r.Record.Kind == memory.KindTodo }
+		results, wsResults = slices.DeleteFunc(results, isTodo), slices.DeleteFunc(wsResults, isTodo)
+	}
+	// "What changed since you were last here": baseline = the last session that
+	// journaled deltas, so /clear and open-and-close sessions are transparent
+	// (the same delta keeps showing until a context has lived alongside it).
+	var deltas []graph.Delta
+	var deltaTotal int
+	var deltaBaseline int64
+	if at, ok, err := a.Graph.DeltaBaseline(ctx, a.Git.Worktree, now); err == nil && ok {
+		deltaBaseline = at
+		if a.Features.On(features.RecentChanges) {
+			deltas, deltaTotal, _ = a.Graph.DeltasSince(ctx, a.Git.Worktree, at, 200)
+		}
+	}
+	// Retention: drop journal rows no baseline walk can reach (best-effort).
+	// The walk is unbounded — it skips no-op sessions all the way back to the
+	// last delta-bearing one — so the cutoff must never pass the current
+	// baseline: any run of consecutive /clear or read-only sessions, however
+	// long, must not erase the deltas the tier is still reporting. Past that,
+	// rows older than the 10th-most-recent session are unreachable.
+	if cutoff, err := tenthSessionStart(ctx, a); err == nil && cutoff > 0 {
+		if deltaBaseline > 0 && deltaBaseline < cutoff {
+			cutoff = deltaBaseline
+		}
+		_ = a.Graph.PruneDeltas(ctx, a.Git.Worktree, cutoff)
+	}
+
+	wsName := ""
+	if a.Workspace != nil {
+		wsName = a.Workspace.Name
+	}
+	if resumed {
+		return resumeContext(ctx, a, scope, results, wsName, wsResults, repoBudget)
+	}
+	// Orientation map + recent bugs are best-effort tiers; failure omits the tier.
+	var arch graph.Architecture
+	if a.Features.On(features.CodeMap) {
+		arch, _ = a.Graph.Architecture(ctx, a.Git.Worktree, "")
+	}
+	var bugs []*memory.Record
+	if a.Features.On(features.RecentBugs) {
+		bugs, _ = a.Engine.RecentBugs(ctx, a.Git.Branch, recentBugLimit)
+	}
+
+	var extraRepos []string
+	for _, rc := range a.Repos {
+		extraRepos = append(extraRepos, rc.Git.RepoName)
+	}
+	out, emitted := formatSessionContext(results, wsName, wsResults, extraRepos, arch, bugs, deltas, deltaTotal, deltaBaseline, repoBudget, a.Features)
+	// Mark every memory rendered into this block as surfaced for the conversation, so the
+	// just-in-time read/edit hooks won't re-inject a guardrail/bug/todo the agent can
+	// already see here. Memories dropped under budget stay unmarked and still surface
+	// when their code is touched.
+	markSurfaced(ctx, a, scope, emitted)
+	if scope != "" {
+		// A lost mark only costs the next resume a full block, as before.
+		_ = a.Ledger.Incr(ctx, scope, blockMetric, 1)
+	}
+	return Result{Context: out}, nil
+}
+
+// applySource applies a session start's source to the record of what scope's
+// conversation was shown, and reports whether it resumes a conversation that
+// already got the block.
+func applySource(ctx context.Context, a *app.App, scope, source string) (resumed bool, err error) {
+	if scope == "" {
+		return false, nil
+	}
+	switch source {
+	case "compact", "clear":
+		return false, a.Ledger.Delete(ctx, scope, readMetric, shownMetric, searchMetric)
+	case "resume":
+		n, err := a.Ledger.Get(ctx, scope, blockMetric)
+		return n > 0, err
+	}
+	return false, nil
+}
+
+// sessionStartUpkeep warms the code graph, syncs memories, imports the team
+// snapshot and runs gated memory compaction. Every session start runs it,
+// whatever its source.
+func sessionStartUpkeep(ctx context.Context, a *app.App) {
 	// Warm the code graph for this worktree — best-effort and budget-bounded: a
 	// first index of a large repo would otherwise block the host's hook (and the
 	// user's first message) for minutes. The budget is HARD: the reconcile runs
@@ -233,118 +376,71 @@ func handleSessionStart(ctx context.Context, a *app.App, ev Event) (Result, erro
 	if a.Features.On(features.AutoCompact) {
 		_, _ = a.Engine.Compact(ctx, memory.CompactOptions{})
 	}
+}
 
-	budget := sessionBudget()
-	repoBudget := budget
-	// The workspace tier borrows a third of the session budget rather than
-	// growing the block: RECARTO_SESSION_BUDGET stays the whole block's bound.
-	var results, wsResults []memory.RecallResult
-	if a.Features.On(features.SessionMemories) {
-		if a.Workspace != nil {
-			wsBudget := budget / 3
-			repoBudget = budget - wsBudget
-			if wsSet, err := a.Workspace.Engine.Recall(ctx, memory.RecallQuery{
-				Baseline:    true,
-				TokenBudget: wsBudget,
-			}); err == nil {
-				wsResults = wsSet.Results
-			}
-		}
-		set, err := a.Engine.Recall(ctx, memory.RecallQuery{
-			Branch:      a.Git.Branch,
-			Worktree:    a.Git.Worktree,
-			Baseline:    true,
-			TokenBudget: repoBudget,
-		})
-		if err != nil {
-			return Result{}, err
-		}
-		results = set.Results
+// resumeContext returns, rendered as the block renders them, the memories the
+// full block would show now that scope's conversation has not been shown, and
+// marks them shown. No context when there are none.
+func resumeContext(ctx context.Context, a *app.App, scope string, results []memory.RecallResult,
+	wsName string, wsResults []memory.RecallResult, budget int) (Result, error) {
+	// A memory the block drops for its budget stays out on a resume too, as it
+	// did at startup; otherwise every resume would inject it.
+	_, inBlock := formatMemories(results, budget)
+	results = slices.DeleteFunc(results, func(r memory.RecallResult) bool { return !slices.Contains(inBlock, r.Record.ID) })
+	results, err := unshown(ctx, a, scope, results)
+	if err != nil {
+		return Result{}, err
 	}
-	if !a.Features.On(features.Todos) {
-		isTodo := func(r memory.RecallResult) bool { return r.Record.Kind == memory.KindTodo }
-		results, wsResults = slices.DeleteFunc(results, isTodo), slices.DeleteFunc(wsResults, isTodo)
+	wsResults, err = unshown(ctx, a, scope, wsResults)
+	if err != nil {
+		return Result{}, err
 	}
-	// Orientation map + recent bugs are best-effort tiers; failure omits the tier.
-	var arch graph.Architecture
-	if a.Features.On(features.CodeMap) {
-		arch, _ = a.Graph.Architecture(ctx, a.Git.Worktree, "")
-	}
-	var bugs []*memory.Record
-	if a.Features.On(features.RecentBugs) {
-		bugs, _ = a.Engine.RecentBugs(ctx, a.Git.Branch, recentBugLimit)
-	}
-
-	// "What changed since you were last here": baseline = the last session that
-	// journaled deltas, so /clear and open-and-close sessions are transparent
-	// (the same delta keeps showing until a context has lived alongside it).
-	var deltas []graph.Delta
-	var deltaTotal int
-	var deltaBaseline int64
-	if at, ok, err := a.Graph.DeltaBaseline(ctx, a.Git.Worktree, now); err == nil && ok {
-		deltaBaseline = at
-		if a.Features.On(features.RecentChanges) {
-			deltas, deltaTotal, _ = a.Graph.DeltasSince(ctx, a.Git.Worktree, at, 200)
-		}
-	}
-	// Retention: drop journal rows no baseline walk can reach (best-effort).
-	// The walk is unbounded — it skips no-op sessions all the way back to the
-	// last delta-bearing one — so the cutoff must never pass the current
-	// baseline: any run of consecutive /clear or read-only sessions, however
-	// long, must not erase the deltas the tier is still reporting. Past that,
-	// rows older than the 10th-most-recent session are unreachable.
-	if cutoff, err := tenthSessionStart(ctx, a); err == nil && cutoff > 0 {
-		if deltaBaseline > 0 && deltaBaseline < cutoff {
-			cutoff = deltaBaseline
-		}
-		_ = a.Graph.PruneDeltas(ctx, a.Git.Worktree, cutoff)
-	}
-
-	wsName := ""
-	if a.Workspace != nil {
-		wsName = a.Workspace.Name
-	}
-	var extraRepos []string
-	for _, rc := range a.Repos {
-		extraRepos = append(extraRepos, rc.Git.RepoName)
-	}
-	out, emitted := formatSessionContext(results, wsName, wsResults, extraRepos, arch, bugs, deltas, deltaTotal, deltaBaseline, repoBudget, a.Features)
-	// Mark every memory rendered into this block as surfaced for the session, so the
-	// just-in-time read/edit hooks won't re-inject a guardrail/bug/todo the agent can
-	// already see here. Memories dropped under budget stay unmarked and still surface
-	// when their code is touched.
-	markSurfaced(ctx, a, ev.SessionID, emitted)
+	out, emitted := formatResumeContext(results, wsName, wsResults, budget)
+	markSurfaced(ctx, a, scope, emitted)
 	return Result{Context: out}, nil
 }
 
-// markSurfaced records each memory id as surfaced for the session, mirroring the
+// unshown returns the results whose memory scope's conversation has not been shown.
+func unshown(ctx context.Context, a *app.App, scope string, rs []memory.RecallResult) ([]memory.RecallResult, error) {
+	var out []memory.RecallResult
+	for _, r := range rs {
+		n, err := a.Ledger.Get(ctx, scope, shownMetric+r.Record.ID)
+		if err != nil {
+			return nil, err
+		}
+		if n == 0 {
+			out = append(out, r)
+		}
+	}
+	return out, nil
+}
+
+// markSurfaced records each memory id as shown to scope's conversation, mirroring the
 // per-id key dedupSurfaced consults so a later just-in-time hook treats them as
-// already shown. A no-op without a session (matching dedupSurfaced's passthrough).
-func markSurfaced(ctx context.Context, a *app.App, sessionID string, ids []string) {
-	if sessionID == "" {
+// already shown. A no-op without a conversation (matching dedupSurfaced's passthrough).
+func markSurfaced(ctx context.Context, a *app.App, scope string, ids []string) {
+	if scope == "" {
 		return
 	}
-	scope := "session:" + sessionID
 	for _, id := range ids {
-		_ = a.Ledger.Incr(ctx, scope, "surfaced:"+id, 1)
+		_ = a.Ledger.Incr(ctx, scope, shownMetric+id, 1)
 	}
 }
 
-// dedupSurfaced filters recs to those not yet surfaced in this session, marking the
-// returned ones as surfaced. A file/symbol-anchored memory re-found on every read or
+// dedupSurfaced filters recs to those not yet shown to scope's conversation, marking the
+// returned ones as shown. A file/symbol-anchored memory re-found on every read or
 // edit of the same code would otherwise re-inject a block already sitting in the
 // transcript — pure token waste; this keeps each memory's just-in-time surfacing to
-// once per session. It is keyed by memory id, so a memory anchored to several files
-// surfaces at most once regardless of which file triggers it. With no session to
+// once per conversation. It is keyed by memory id, so a memory anchored to several files
+// surfaces at most once regardless of which file triggers it. With no conversation to
 // scope to it is a passthrough (mirrors the augment dedup).
-func dedupSurfaced(ctx context.Context, a *app.App, sessionID string, recs []*memory.Record) []*memory.Record {
-	if sessionID == "" || len(recs) == 0 {
+func dedupSurfaced(ctx context.Context, a *app.App, scope string, recs []*memory.Record) []*memory.Record {
+	if scope == "" || len(recs) == 0 {
 		return recs
 	}
-	scope := "session:" + sessionID
 	out := make([]*memory.Record, 0, len(recs))
 	for _, r := range recs {
-		metric := "surfaced:" + r.ID
+		metric := shownMetric + r.ID
 		if n, err := a.Ledger.Get(ctx, scope, metric); err == nil && n > 0 {
 			continue
 		}
@@ -365,11 +461,13 @@ func handlePostRead(ctx context.Context, a *app.App, ev Event) (Result, error) {
 	if file == "" {
 		return Result{}, nil
 	}
-	scope := "session:" + ev.SessionID
+	scope := conversation(ev)
 	tokens := int64(ledger.EstimateTokens(ev.ToolResult))
 
 	_ = a.Ledger.Incr(ctx, "lifetime", "reads", 1)
-	_ = a.Ledger.Incr(ctx, scope, "reads", 1)
+	if scope != "" {
+		_ = a.Ledger.Incr(ctx, scope, "reads", 1)
+	}
 
 	// Route the file to the served repo that owns it — a session reading a
 	// sibling repo's file (a verifier in a scratch dir, RECARTO_REPOS) must
@@ -382,7 +480,7 @@ func handlePostRead(ctx context.Context, a *app.App, ev Event) (Result, error) {
 
 	first, last := ev.ReadFirst, ev.ReadLast
 	var msgs []string
-	if ev.SessionID != "" && first >= 1 && last >= first && a.Features.On(features.RepeatedReads) {
+	if scope != "" && first >= 1 && last >= first && a.Features.On(features.RepeatedReads) {
 		repeat, err := readBefore(ctx, a, scope, file, first, last)
 		if err != nil {
 			return Result{}, err
@@ -400,7 +498,7 @@ func handlePostRead(ctx context.Context, a *app.App, ev Event) (Result, error) {
 	}
 	// A read starting past line 1 asked for a range, whatever the host reported.
 	ranged := ev.ReadRanged || first > 1
-	if ev.SessionID != "" && tokens >= int64(largeReadThreshold()) &&
+	if scope != "" && tokens >= int64(largeReadThreshold()) &&
 		a.Features.On(features.LargeReads) && a.Features.On(features.GraphTools) {
 		// The Get only skips work once the session's nudge is given; Claim decides.
 		nudged, err := a.Ledger.Get(ctx, scope, "large_read_nudged")
@@ -424,7 +522,7 @@ func handlePostRead(ctx context.Context, a *app.App, ev Event) (Result, error) {
 			}
 		}
 	}
-	msgs = append(msgs, anchoredNotes(ctx, a, ev.SessionID, target, rel)...)
+	msgs = append(msgs, anchoredNotes(ctx, a, scope, target, rel)...)
 	if len(msgs) == 0 {
 		return Result{}, nil
 	}
@@ -432,27 +530,27 @@ func handlePostRead(ctx context.Context, a *app.App, ev Event) (Result, error) {
 }
 
 // anchoredNotes returns the bug, guidance and todo blocks anchored to rel in
-// target that this session has not seen yet, marking them seen. It matches
+// target that scope's conversation has not seen yet, marking them seen. It matches
 // stored refs by path, so the file need not exist on disk.
-func anchoredNotes(ctx context.Context, a *app.App, sessionID string, target *app.RepoContext, rel string) []string {
+func anchoredNotes(ctx context.Context, a *app.App, scope string, target *app.RepoContext, rel string) []string {
 	var msgs []string
 	if a.Features.On(features.BugWarnings) {
 		if found, err := target.Engine.BugsForCode(ctx, target.Git.Branch, []string{rel}, nil); err == nil {
-			if found = dedupSurfaced(ctx, a, sessionID, found); len(found) > 0 {
+			if found = dedupSurfaced(ctx, a, scope, found); len(found) > 0 {
 				msgs = append(msgs, formatBugWarnings(rel, found))
 			}
 		}
 	}
 	if a.Features.On(features.Guidance) {
 		if found, err := target.Engine.GuidanceForCode(ctx, target.Git.Branch, []string{rel}, nil); err == nil {
-			if found = dedupSurfaced(ctx, a, sessionID, found); len(found) > 0 {
+			if found = dedupSurfaced(ctx, a, scope, found); len(found) > 0 {
 				msgs = append(msgs, formatGuidance(rel, found))
 			}
 		}
 	}
 	if a.Features.On(features.Todos) {
 		if found, err := target.Engine.TodosForCode(ctx, target.Git.Branch, []string{rel}, nil); err == nil {
-			if found = dedupSurfaced(ctx, a, sessionID, found); len(found) > 0 {
+			if found = dedupSurfaced(ctx, a, scope, found); len(found) > 0 {
 				msgs = append(msgs, formatTodoReminders(rel, found))
 			}
 		}
@@ -484,7 +582,7 @@ func handlePostEdit(ctx context.Context, a *app.App, ev Event) (Result, error) {
 
 	// Surface any prior bug/guidance/todo tied to this file before re-indexing
 	// (best-effort), each deduped per session so repeated edits don't re-inject.
-	res := Result{Context: strings.Join(anchoredNotes(ctx, a, ev.SessionID, target, rel), "\n")}
+	res := Result{Context: strings.Join(anchoredNotes(ctx, a, conversation(ev), target, rel), "\n")}
 	content, err := os.ReadFile(abs)
 	if err != nil {
 		return res, nil // file vanished between edit and hook; ignore
@@ -512,9 +610,9 @@ func handleAugment(ctx context.Context, a *app.App, ev Event) (Result, error) {
 	// a symbol/bug block already sitting earlier in the transcript — pure token
 	// waste. Suppress the repeat (mirrors the repeated-read path) and nudge the
 	// agent to rely on the earlier injection instead.
-	scope := "session:" + ev.SessionID
-	metric := "augment:" + pattern
-	if ev.SessionID != "" {
+	scope := conversation(ev)
+	metric := searchMetric + pattern
+	if scope != "" {
 		if n, err := a.Ledger.Get(ctx, scope, metric); err == nil && n > 0 {
 			_ = a.Ledger.Incr(ctx, "lifetime", "repeated_augments_blocked", 1)
 			return Result{Context: fmt.Sprintf("You already searched %q this session — the matching symbols/bugs were surfaced earlier. "+
@@ -589,7 +687,7 @@ func handleAugment(ctx context.Context, a *app.App, ev Event) (Result, error) {
 			bugRecs = append(bugRecs, r.Record)
 		}
 		fresh := make(map[string]bool, len(bugRecs))
-		for _, r := range dedupSurfaced(ctx, a, ev.SessionID, bugRecs) {
+		for _, r := range dedupSurfaced(ctx, a, scope, bugRecs) {
 			fresh[r.ID] = true
 		}
 		var bugLines []string
@@ -623,7 +721,7 @@ func handleAugment(ctx context.Context, a *app.App, ev Event) (Result, error) {
 	// Mark the pattern as injected so a later repeat in this session is deduped.
 	// Only record when content was actually injected and the session is scoped,
 	// so the reminder never fires for an empty first result.
-	if out != "" && ev.SessionID != "" {
+	if out != "" && scope != "" {
 		_ = a.Ledger.Incr(ctx, scope, metric, 1)
 	}
 	return Result{Context: out}, nil
@@ -647,7 +745,7 @@ func handleShell(ctx context.Context, a *app.App, ev Event) (Result, error) {
 	}
 	var msgs []string
 	for _, p := range ev.Patterns {
-		res, err := handleAugment(ctx, a, Event{Kind: KindAugment, SessionID: ev.SessionID, Pattern: p})
+		res, err := handleAugment(ctx, a, Event{Kind: KindAugment, SessionID: ev.SessionID, AgentID: ev.AgentID, Pattern: p})
 		if err != nil {
 			return Result{}, err
 		}
@@ -655,8 +753,8 @@ func handleShell(ctx context.Context, a *app.App, ev Event) (Result, error) {
 			msgs = append(msgs, res.Context)
 		}
 	}
-	if len(ev.Patterns) > 0 && ev.SessionID != "" && a.Features.On(features.GraphTools) {
-		scope := "session:" + ev.SessionID
+	scope := conversation(ev)
+	if len(ev.Patterns) > 0 && scope != "" && a.Features.On(features.GraphTools) {
 		if n, err := a.Ledger.Get(ctx, scope, "shell_search_nudged"); err == nil && n == 0 {
 			_ = a.Ledger.Incr(ctx, scope, "shell_search_nudged", 1)
 			msgs = append(msgs, shellSearchNudge)
@@ -664,7 +762,7 @@ func handleShell(ctx context.Context, a *app.App, ev Event) (Result, error) {
 	}
 	for _, f := range ev.Files {
 		if target, rel, ok := owningRepo(a, f); ok {
-			msgs = append(msgs, anchoredNotes(ctx, a, ev.SessionID, target, rel)...)
+			msgs = append(msgs, anchoredNotes(ctx, a, scope, target, rel)...)
 		}
 	}
 	return Result{Context: strings.Join(msgs, "\n")}, nil

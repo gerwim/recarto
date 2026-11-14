@@ -17,10 +17,12 @@ type Adapter struct{}
 // (sized for the read ledger) comes from tool_response, falling back to the
 // tool_result spelling older payloads used. A Bash call carries its command in
 // tool_input and the session's working directory in cwd. A Read also yields
-// whether it asked for a line range and which lines it returned.
+// whether it asked for a line range and which lines it returned. A hook fired
+// in a subagent carries its agent_id.
 func (Adapter) Decode(kind agents.EventKind, in io.Reader) (agents.Event, error) {
 	var p struct {
 		SessionID string `json:"session_id"`
+		AgentID   string `json:"agent_id"`
 		Source    string `json:"source"`
 		CWD       string `json:"cwd"`
 		ToolInput struct {
@@ -50,6 +52,7 @@ func (Adapter) Decode(kind agents.EventKind, in io.Reader) (agents.Event, error)
 		Kind:       kind,
 		Agent:      "claude-code",
 		SessionID:  p.SessionID,
+		AgentID:    p.AgentID,
 		Source:     p.Source,
 		FilePath:   p.ToolInput.FilePath,
 		Pattern:    pattern,

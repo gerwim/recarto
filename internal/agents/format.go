@@ -53,6 +53,9 @@ func largeReadThreshold() int {
 	return largeReadTokens
 }
 
+// memoryHeader opens the repo memory tier of the session-start block.
+const memoryHeader = "Recarto memory for this repo/branch:\n"
+
 // formatSessionContext renders the tiered session-start block: pinned do_not_repeat
 // (always, full body), cerebrum memories (title + trimmed body, degrading to
 // titles-only then dropping under budget pressure), an optional cross-repo
@@ -65,8 +68,7 @@ func largeReadThreshold() int {
 // so the just-in-time read/edit hooks do not re-inject a guardrail/bug/todo already
 // sitting in this block — duplicate context is pure token waste. A memory dropped
 // here is deliberately left unmarked so it can still surface when its code is touched.
-// Workspace memories are never marked: the just-in-time hooks only serve the repo
-// store, so there is nothing to dedup against.
+// Workspace memories are returned too, so a resume does not show them again.
 //
 // With the session-memories feature off in f, the memory header, empty-memory
 // line and record nudge go too, leaving the other tiers; a line pointing at
@@ -77,9 +79,86 @@ func formatSessionContext(results []memory.RecallResult, wsName string, wsResult
 	var b strings.Builder
 	memories := f.On(features.SessionMemories)
 	if memories {
-		b.WriteString("Recarto memory for this repo/branch:\n")
+		b.WriteString(memoryHeader)
+	}
+	mem, emitted := formatMemories(results, budget)
+	b.WriteString(mem)
+	if len(results) == 0 && memories {
+		b.WriteString("(no prior memories yet)\n")
+	}
+	ws, wsEmitted := formatWorkspaceMemories(wsName, wsResults)
+	b.WriteString(ws)
+	emitted = append(emitted, wsEmitted...)
+
+	// One line, not a tier: the extra repos' memories reach the agent through
+	// recall (merged automatically) and the file-anchored read/edit hooks, so
+	// session start only needs to say they are served and how to target them.
+	if len(extraRepos) > 0 {
+		fmt.Fprintf(&b, "\nAlso serving repos: %s — graph/memory tools accept repo:\"<name>\"; recall and file-anchored surfacing cover them automatically.\n",
+			strings.Join(extraRepos, ", "))
 	}
 
+	if len(arch.Modules) > 0 {
+		// Select the highest-signal modules/deps for the map rather than the
+		// alphabetically-first ones: rank product modules by file count and the
+		// heaviest dependency edges by reference count, demoting test projects.
+		mods, deps := graph.MapArchitecture(arch, archModuleLimit)
+		b.WriteString("\nCode map (modules):\n")
+		for _, m := range mods {
+			fmt.Fprintf(&b, "- %s: %d files, %d symbols\n", m.Name, m.Files, m.Symbols)
+		}
+		for _, d := range deps {
+			fmt.Fprintf(&b, "  %s → %s (%d)\n", d.From, d.To, d.Count)
+		}
+		if f.On(features.GraphTools) {
+			b.WriteString("Query the code graph (search/snippet/callers) instead of reading whole files; grep/glob auto-injects matching symbols.\n")
+		}
+	}
+
+	if tier := formatDeltaTier(deltas, deltaTotal, deltaBaselineMs, f.On(features.GraphTools)); tier != "" {
+		b.WriteString(tier)
+	}
+
+	if len(bugs) > 0 {
+		b.WriteString("\nRecent bugs")
+		if f.On(features.MemoryTools) {
+			b.WriteString(" (search_bugs for detail)")
+		}
+		b.WriteString(":\n")
+		for _, r := range bugs {
+			t := r.Title
+			if t == "" {
+				t = "(untitled)"
+			}
+			fmt.Fprintf(&b, "- %s\n", t)
+		}
+	}
+
+	if memories && f.On(features.MemoryTools) {
+		b.WriteString("\nRecord new learnings with the record_memory tool and bug fixes with record_bug.")
+	}
+	return strings.TrimSpace(b.String()), emitted
+}
+
+// formatResumeContext renders the memory tiers alone, for a resumed conversation:
+// the repo memories under memoryHeader, then the workspace tier. It returns the
+// IDs it rendered, and "" when there are none.
+func formatResumeContext(results []memory.RecallResult, wsName string, wsResults []memory.RecallResult, budget int) (string, []string) {
+	var b strings.Builder
+	mem, emitted := formatMemories(results, budget)
+	if mem != "" {
+		b.WriteString(memoryHeader)
+		b.WriteString(mem)
+	}
+	ws, wsEmitted := formatWorkspaceMemories(wsName, wsResults)
+	b.WriteString(ws)
+	return strings.TrimSpace(b.String()), append(emitted, wsEmitted...)
+}
+
+// formatMemories renders the repo memory entries within budget and returns the
+// IDs of those it rendered.
+func formatMemories(results []memory.RecallResult, budget int) (string, []string) {
+	var b strings.Builder
 	var emitted []string
 	markEmitted := func(r memory.RecallResult) {
 		if r.Record != nil && r.Record.ID != "" {
@@ -132,73 +211,30 @@ func formatSessionContext(results []memory.RecallResult, wsName string, wsResult
 			markEmitted(r)
 		}
 	}
-	if len(results) == 0 && memories {
-		b.WriteString("(no prior memories yet)\n")
-	}
+	return b.String(), emitted
+}
 
-	// The cross-repo workspace tier: already token-budgeted by its own recall
-	// (a slice of the session budget carved out by the caller), so it renders
-	// without further cap math — uniform title + trimmed body, like the
-	// cerebrum tier's compact form.
-	if len(wsResults) > 0 {
-		fmt.Fprintf(&b, "\nWorkspace memory (%s, shared across repos):\n", wsName)
-		for _, r := range wsResults {
-			title := r.Record.Title
-			if title == "" {
-				title = "(untitled)"
-			}
-			fmt.Fprintf(&b, "- [%s] %s\n  %s\n", r.Record.Kind, title, trimOneLine(r.Record.Body))
-		}
+// formatWorkspaceMemories renders the cross-repo workspace tier and returns the
+// IDs it rendered. The tier is already token-budgeted by its own recall (a
+// slice of the session budget carved out by the caller), so it renders without
+// further cap math — uniform title + trimmed body, like the cerebrum tier's
+// compact form.
+func formatWorkspaceMemories(name string, rs []memory.RecallResult) (string, []string) {
+	if len(rs) == 0 {
+		return "", nil
 	}
-
-	// One line, not a tier: the extra repos' memories reach the agent through
-	// recall (merged automatically) and the file-anchored read/edit hooks, so
-	// session start only needs to say they are served and how to target them.
-	if len(extraRepos) > 0 {
-		fmt.Fprintf(&b, "\nAlso serving repos: %s — graph/memory tools accept repo:\"<name>\"; recall and file-anchored surfacing cover them automatically.\n",
-			strings.Join(extraRepos, ", "))
-	}
-
-	if len(arch.Modules) > 0 {
-		// Select the highest-signal modules/deps for the map rather than the
-		// alphabetically-first ones: rank product modules by file count and the
-		// heaviest dependency edges by reference count, demoting test projects.
-		mods, deps := graph.MapArchitecture(arch, archModuleLimit)
-		b.WriteString("\nCode map (modules):\n")
-		for _, m := range mods {
-			fmt.Fprintf(&b, "- %s: %d files, %d symbols\n", m.Name, m.Files, m.Symbols)
+	var b strings.Builder
+	var emitted []string
+	fmt.Fprintf(&b, "\nWorkspace memory (%s, shared across repos):\n", name)
+	for _, r := range rs {
+		title := r.Record.Title
+		if title == "" {
+			title = "(untitled)"
 		}
-		for _, d := range deps {
-			fmt.Fprintf(&b, "  %s → %s (%d)\n", d.From, d.To, d.Count)
-		}
-		if f.On(features.GraphTools) {
-			b.WriteString("Query the code graph (search/snippet/callers) instead of reading whole files; grep/glob auto-injects matching symbols.\n")
-		}
+		fmt.Fprintf(&b, "- [%s] %s\n  %s\n", r.Record.Kind, title, trimOneLine(r.Record.Body))
+		emitted = append(emitted, r.Record.ID)
 	}
-
-	if tier := formatDeltaTier(deltas, deltaTotal, deltaBaselineMs, f.On(features.GraphTools)); tier != "" {
-		b.WriteString(tier)
-	}
-
-	if len(bugs) > 0 {
-		b.WriteString("\nRecent bugs")
-		if f.On(features.MemoryTools) {
-			b.WriteString(" (search_bugs for detail)")
-		}
-		b.WriteString(":\n")
-		for _, r := range bugs {
-			t := r.Title
-			if t == "" {
-				t = "(untitled)"
-			}
-			fmt.Fprintf(&b, "- %s\n", t)
-		}
-	}
-
-	if memories && f.On(features.MemoryTools) {
-		b.WriteString("\nRecord new learnings with the record_memory tool and bug fixes with record_bug.")
-	}
-	return strings.TrimSpace(b.String()), emitted
+	return b.String(), emitted
 }
 
 // formatBugWarnings renders prior bugs tied to a code location as advisory lines.

@@ -150,3 +150,30 @@ func TestPostReadRepeatNoticeThroughView(t *testing.T) {
 		t.Errorf("second view = %q, want the repeat-read notice", out.String())
 	}
 }
+
+// A resume of a session that already got the block adds nothing when no
+// memory changed since.
+func TestSessionStartResumeAddsNothingNew(t *testing.T) {
+	root := t.TempDir()
+	a := newTestApp(t, root)
+	ctx := context.Background()
+	if _, _, _, err := a.Engine.Record(ctx, memory.NewMemory{
+		Kind: memory.KindLearning, Title: "builds need cgo off", Body: "x", Source: "cli",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	start := func(source string) string {
+		t.Helper()
+		var out strings.Builder
+		if err := SessionStart(ctx, a, strings.NewReader(`{"sessionId":"c1","source":"`+source+`"}`), &out); err != nil {
+			t.Fatal(err)
+		}
+		return out.String()
+	}
+	if got := start("new"); !strings.Contains(got, "additionalContext") || !strings.Contains(got, "builds need cgo off") {
+		t.Fatalf("new session: %q, want the block with the learning", got)
+	}
+	if got := start("resume"); strings.Contains(got, "additionalContext") {
+		t.Errorf("resume: %q, want no context", got)
+	}
+}
