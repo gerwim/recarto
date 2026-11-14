@@ -183,6 +183,8 @@ What each agent gets:
 | **OpenCode** | `opencode.json` / `~/.config/opencode/opencode.json` | `.opencode/plugins/recarto.js` / `~/.config/opencode/plugins/recarto.js` (generated) | `AGENTS.md` / `~/.config/opencode/AGENTS.md` |
 | **Copilot CLI** | `.mcp.json` / `~/.copilot/mcp-config.json` | `.github/hooks/recarto.json` / `~/.copilot/hooks/recarto.json` | `AGENTS.md` / `~/.copilot/copilot-instructions.md` |
 
+The instructions are a short block of rules between `<!-- recarto:begin -->` and `<!-- recarto:end -->`: what to record and recall, and which Recarto tool to use instead of reading whole files or grepping. How to use each tool is in the tool's own description. Re-running `recarto init` replaces the block, also one written by an older version, and leaves the rest of the file as it is.
+
 `recarto init` is idempotent — re-running merges only what's missing and preserves
 your existing config.
 

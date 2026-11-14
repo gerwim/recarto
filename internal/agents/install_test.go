@@ -64,6 +64,28 @@ func TestWriteInstructionsBlockIdempotent(t *testing.T) {
 	}
 }
 
+func TestWriteInstructionsBlockReplaces17Block(t *testing.T) {
+	old, err := os.ReadFile("testdata/instructions-1.7.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, after := "# My rules\n\nkeep me\n\n", "\n\n## Also mine\n\nand me\n"
+	p := filepath.Join(t.TempDir(), "CLAUDE.md")
+	if err := os.WriteFile(p, []byte(before+recartoBlockBegin+"\n"+string(old)+recartoBlockEnd+after), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteInstructionsBlock(p, nil); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := before + recartoBlockBegin + "\n" + Instructions(nil) + "\n" + recartoBlockEnd + after; string(got) != want {
+		t.Errorf("1.7.x block not replaced cleanly:\ngot  %q\nwant %q", got, want)
+	}
+}
+
 func TestWriteInstructionsBlockCreatesFileWithParents(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "nested", "AGENTS.md")

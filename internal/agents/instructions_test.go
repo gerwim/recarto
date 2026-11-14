@@ -40,48 +40,16 @@ func TestInstructionsExplainJustInTimeAnchoring(t *testing.T) {
 	// refs) is what makes bugs, do-not-repeats and decisions resurface the moment
 	// that code is touched — otherwise they record guidance with no refs and it
 	// never fires just-in-time.
-	for _, want := range []string{"anchor", "do-not-repeat", "decision"} {
+	for _, want := range []string{"anchor", "do-not-repeat", "decision", "read or edited"} {
 		if !strings.Contains(strings.ToLower(Instructions(nil)), want) {
 			t.Errorf("Instructions should explain just-in-time anchoring; missing %q", want)
 		}
 	}
 }
 
-func TestInstructionsWarnAboutLargeWholeFileReads(t *testing.T) {
-	// Agents should know Recarto nudges them toward the graph when they read a large
-	// indexed file whole, so the nudge reads as a known guardrail rather than noise.
-	lower := strings.ToLower(Instructions(nil))
-	if !strings.Contains(lower, "whole-file") || !strings.Contains(lower, "nudge") {
-		t.Error("Instructions should warn that a large whole-file read is wasteful and Recarto will nudge toward the graph")
-	}
-}
-
-func TestInstructionsExplainQualifiedNameCanonical(t *testing.T) {
-	// List results omit the redundant short `name` and carry `qualified_name` as the
-	// canonical identifier (its last segment is the short name). Agents must know to
-	// read qualified_name and feed it back to the symbol-taking tools, rather than
-	// expecting a separate `name` field on every row.
-	lower := strings.ToLower(Instructions(nil))
-	if !strings.Contains(lower, "last segment") || !strings.Contains(lower, "qualified_name") {
-		t.Error("Instructions should explain results carry qualified_name as the canonical identifier whose last segment is the short name")
-	}
-}
-
-func TestInstructionsMentionReportTool(t *testing.T) {
-	if !strings.Contains(Instructions(nil), "report_recarto_issue") {
-		t.Fatal("Instructions should encourage report_recarto_issue")
-	}
-}
-
-func TestInstructionsAdvertiseFullToolset(t *testing.T) {
-	for _, want := range []string{
-		"get_architecture", "query_graph", "list_memory", "get_memory",
-		"forget_memory", "confidence", "find_implementations",
-		"search_content", "get_file_outline", "find_annotated",
-	} {
-		if !strings.Contains(Instructions(nil), want) {
-			t.Errorf("Instructions block missing %q", want)
-		}
+func TestInstructionsFitBudget(t *testing.T) {
+	if n := len(recartoBlockBegin + "\n" + Instructions(nil) + "\n" + recartoBlockEnd); n > 2500 {
+		t.Errorf("instructions block is %d characters with every feature on, want at most 2500", n)
 	}
 }
 
@@ -109,7 +77,7 @@ func TestInstructionsFollowFeatures(t *testing.T) {
 	graphNames := []string{
 		"search_graph", "trace_call_path", "get_architecture", "query_graph",
 		"search_content", "get_code_snippet", "get_file_outline",
-		"find_implementations", "find_annotated", "find_references", "find_*",
+		"find_implementations", "find_annotated", "find_references", "get_graph_delta",
 	}
 	for _, tc := range []struct {
 		name    string
@@ -120,13 +88,13 @@ func TestInstructionsFollowFeatures(t *testing.T) {
 		{
 			name:    "memory-tools",
 			f:       off(features.MemoryTools),
-			absent:  append(memoryNames, "Capture preferences", "**Anchor**", "reinforces near-duplicate"),
-			present: []string{"search_graph", "report_recarto_issue", "At session start"},
+			absent:  append(memoryNames, "**Record**", "**Anchor**", "Near-duplicates"),
+			present: []string{"search_graph", "report_recarto_issue", "persists across sessions"},
 		},
 		{
 			name:    "todos",
 			f:       off(features.Todos),
-			absent:  []string{"complete_todo", "Track open work"},
+			absent:  []string{"complete_todo", "Track open work", "`todo`"},
 			present: []string{"record_memory", "recall_memory", "search_graph"},
 		},
 		{
@@ -145,13 +113,13 @@ func TestInstructionsFollowFeatures(t *testing.T) {
 			name:    "memory-tools and graph-tools",
 			f:       off(features.MemoryTools, features.GraphTools),
 			absent:  append(append([]string{}, memoryNames...), graphNames...),
-			present: []string{"# Recarto", "At session start", "report_recarto_issue"},
+			present: []string{"# Recarto", "persists across sessions", "report_recarto_issue"},
 		},
 		{
 			name:    "memory-tools, graph-tools and issue-reports",
 			f:       off(features.MemoryTools, features.GraphTools, features.IssueReports),
 			absent:  append(append(append([]string{}, memoryNames...), graphNames...), "report_recarto_issue"),
-			present: []string{"# Recarto", "At session start"},
+			present: []string{"# Recarto", "persists across sessions"},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
