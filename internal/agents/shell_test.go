@@ -155,11 +155,21 @@ func TestGitBashPath(t *testing.T) {
 
 // The paths a line's searches name decide which served repos its hint covers.
 func TestParseShellSearchPaths(t *testing.T) {
-	dir := shellTree(t)
-	home := t.TempDir()
+	// The paths come back resolved: resolve the temp dirs too, which may sit
+	// behind a link (macOS).
+	var dir, home, o string
+	for _, d := range []struct {
+		p   *string
+		raw string
+	}{{&dir, shellTree(t)}, {&home, t.TempDir()}, {&o, t.TempDir()}} {
+		r, err := filepath.EvalSymlinks(d.raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		*d.p = r
+	}
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
-	o := t.TempDir()
 	so := filepath.ToSlash(o) // a shell word: backslashes would be escapes
 	in := filepath.Join(dir, "internal")
 	for _, tc := range []struct {
@@ -187,5 +197,25 @@ func TestParseShellSearchPaths(t *testing.T) {
 		if got := parseShell(tc.cmd, tc.cwd).paths; !reflect.DeepEqual(got, tc.want) {
 			t.Errorf("%s: paths %q, want %q", tc.cmd, got, tc.want)
 		}
+	}
+}
+
+// A link loop ends realPath instead of recursing until the stack overflows,
+// which would crash the hook process.
+func TestRealPathEndsOnALinkLoop(t *testing.T) {
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	l1, l2 := filepath.Join(base, "l1"), filepath.Join(base, "l2")
+	if err := os.Symlink(l2, l1); err != nil {
+		t.Skipf("no symlinks here: %v", err)
+	}
+	if err := os.Symlink(l1, l2); err != nil {
+		t.Fatal(err)
+	}
+	got := realPath(filepath.Join(l1, "x"))
+	if _, in := within(base, got); !in {
+		t.Errorf("realPath = %q, want a path in %s", got, base)
 	}
 }

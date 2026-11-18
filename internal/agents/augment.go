@@ -137,18 +137,23 @@ const (
 // paths reaches: the repo each path lies in (the innermost, as owningRepo picks
 // it) and every repo a path contains. nil paths reach every served repo; paths
 // outside all of them reach none. Reaches is its store-free form. The contexts
-// come from one AllRepos call: hint hits are matched to them by pointer.
+// come from one AllRepos call: hint hits are matched to them by pointer. The
+// paths are where the searches lead (Event.SearchPaths); the worktrees are
+// compared resolved too.
 func searchRepos(a *app.App, paths []string) []*app.RepoContext {
 	all := a.AllRepos() // fresh contexts per call
 	if paths == nil {
 		return all
 	}
+	wts := make([]string, len(all))
+	for i, rc := range all {
+		wts[i] = realPath(rc.Git.Worktree)
+	}
 	var out []*app.RepoContext
-	for _, rc := range all {
+	for i, rc := range all {
 		if slices.ContainsFunc(paths, func(p string) bool {
-			owner, _, ok := owningRepo(all, p)
-			_, contains := within(p, rc.Git.Worktree)
-			return ok && owner == rc || contains
+			_, contains := within(p, wts[i])
+			return innermost(wts, p) == i || contains
 		}) {
 			out = append(out, rc)
 		}

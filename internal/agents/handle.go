@@ -91,14 +91,28 @@ func agentOrDefault(s string) string {
 // belongs to the inner repo). ok=false when no served worktree contains the
 // file, or the path is not absolute.
 func owningRepo(repos []*app.RepoContext, abs string) (rc *app.RepoContext, rel string, ok bool) {
-	bestLen := -1
-	for _, cand := range repos {
-		wt := cand.Git.Worktree
-		if r, in := within(wt, abs); in && len(wt) > bestLen {
-			rc, rel, ok, bestLen = cand, r, true, len(wt)
+	wts := make([]string, len(repos))
+	for i, cand := range repos {
+		wts[i] = cand.Git.Worktree
+	}
+	i := innermost(wts, abs)
+	if i < 0 {
+		return nil, "", false
+	}
+	rel, _ = within(wts[i], abs)
+	return repos[i], rel, true
+}
+
+// innermost returns the index of the worktree in wts that abs lies in, -1 when
+// none does. The longest wins: a nested checkout belongs to the inner repo.
+func innermost(wts []string, abs string) int {
+	best := -1
+	for i, wt := range wts {
+		if _, in := within(wt, abs); in && (best < 0 || len(wt) > len(wts[best])) {
+			best = i
 		}
 	}
-	return
+	return best
 }
 
 // Owned reports whether an absolute path lies in one of the worktrees — the
@@ -112,11 +126,14 @@ func Owned(worktrees []string, abs string) bool {
 	return false
 }
 
-// Reaches reports whether a search over the absolute path abs reaches one of
-// the worktrees: abs lies in one or contains one. It is the store-free form of
-// searchRepos, against app.Worktrees: true exactly when searchRepos finds a repo.
+// Reaches reports whether a search over abs reaches one of the worktrees: abs
+// lies in one or contains one. abs is where the search leads, as
+// Event.SearchPaths holds it; the worktrees are resolved here. It is the
+// store-free form of searchRepos, against app.Worktrees: true exactly when
+// searchRepos finds a repo.
 func Reaches(worktrees []string, abs string) bool {
 	for _, wt := range worktrees {
+		wt = realPath(wt)
 		_, in := within(wt, abs)
 		_, contains := within(abs, wt)
 		if in || contains {
@@ -124,6 +141,46 @@ func Reaches(worktrees []string, abs string) bool {
 		}
 	}
 	return false
+}
+
+// maxLinks bounds the dangling links realPath follows, so a link loop ends. It
+// matches Linux's limit on the links one lookup follows.
+const maxLinks = 40
+
+// realPath returns where a search over abs leads: abs with its symlinks
+// resolved in path order, so "link/.." is the parent of the link's target.
+// Search scope compares paths and worktrees in this form, because git names a
+// worktree by its real path while the host names searched paths, and a non-git
+// worktree, as it reached them. Past the last part that exists the path stays
+// as named, except that a dangling link there still leads to its target.
+func realPath(abs string) string {
+	links := maxLinks
+	var resolve func(string) string
+	resolve = func(abs string) string {
+		if r, err := filepath.EvalSymlinks(abs); err == nil {
+			return r
+		}
+		// The parent is resolved on its own, so the parts that exist still count
+		// where they lead.
+		root := len(filepath.VolumeName(abs)) + 1
+		i := strings.LastIndexAny(abs, "/"+string(filepath.Separator))
+		if len(abs) <= root || i < 0 {
+			return abs
+		}
+		dir := resolve(abs[:max(i, root)])
+		p := filepath.Join(dir, abs[i+1:])
+		// A dangling link still leads to its target; anything else that does not
+		// resolve (missing, unreadable, a loop past maxLinks) stays as named.
+		if t, err := os.Readlink(p); err == nil && links > 0 {
+			links--
+			if !filepath.IsAbs(t) {
+				t = dir + string(filepath.Separator) + t
+			}
+			return resolve(t)
+		}
+		return p
+	}
+	return resolve(abs)
 }
 
 // within returns abs relative to worktree wt (slash-separated), ok=false when

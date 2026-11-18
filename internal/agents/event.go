@@ -55,9 +55,10 @@ type Event struct {
 	// and the absolute paths of the files it prints (Shell).
 	Patterns []string
 	Files    []string
-	// SearchPaths are the absolute paths the searches name, as RunHook read them
-	// from Path (Augment) or Command (Shell). nil when a search names none, or one
-	// RunHook cannot resolve: the hint then covers every served repo.
+	// SearchPaths are where the searches lead: the absolute paths RunHook read
+	// from Path (Augment) or Command (Shell), with their symlinks resolved
+	// (realPath). nil when a search names none, or one RunHook cannot resolve:
+	// the hint then covers every served repo.
 	SearchPaths []string
 	// ReadRanged reports that the agent asked a read for a line range.
 	// ReadFirst..ReadLast are the 1-based lines the read returned; both are 0
