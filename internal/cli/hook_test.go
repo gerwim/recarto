@@ -172,7 +172,10 @@ func TestRunHookSearchThroughSymlink(t *testing.T) {
 		t.Setenv(k, "")
 	}
 	payload := func(input map[string]string) string {
-		b, _ := json.Marshal(map[string]any{"session_id": "s", "cwd": cwd, "tool_input": input})
+		b, err := json.Marshal(map[string]any{"session_id": "s", "cwd": cwd, "tool_input": input})
+		if err != nil {
+			t.Fatal(err)
+		}
 		return string(b)
 	}
 	for _, tc := range []struct {
@@ -191,7 +194,10 @@ func TestRunHookSearchThroughSymlink(t *testing.T) {
 		if !tc.opens && buf.Len() != 0 {
 			t.Errorf("%s: output %q", tc.name, buf.String())
 		}
-		entries, _ := os.ReadDir(cache)
+		entries, err := os.ReadDir(cache)
+		if err != nil {
+			t.Fatal(err)
+		}
 		opened := slices.ContainsFunc(entries, func(e os.DirEntry) bool { return e.Name() != "gitctx" })
 		if opened != tc.opens {
 			t.Errorf("%s: opened a store = %v, want %v", tc.name, opened, tc.opens)
