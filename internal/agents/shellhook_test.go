@@ -3,6 +3,7 @@ package agents
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -43,14 +44,20 @@ func newTreeApp(t *testing.T) (*app.App, string) {
 func newUnservedTreeApp(t *testing.T) (*app.App, string) {
 	t.Helper()
 	dir := shellTree(t)
+	return openTreeApp(t, dir), dir
+}
+
+// openTreeApp serves root as a fresh app's primary worktree.
+func openTreeApp(t *testing.T, root string) *app.App {
+	t.Helper()
 	clearRecartoEnv(t)
 	t.Setenv("RECARTO_CACHE_DIR", t.TempDir())
-	a, err := app.Open(app.Config{CWD: dir, Runner: fakeGit{branch: "main", root: dir}, Clock: clock.NewFake(time.UnixMilli(1_700_000_000_000))})
+	a, err := app.Open(app.Config{CWD: root, Runner: fakeGit{branch: "main", root: root}, Clock: clock.NewFake(time.UnixMilli(1_700_000_000_000))})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = a.Close() })
-	return a, dir
+	return a
 }
 
 // shellHook runs a shell tool call through RunHook, as a host hook does, and
@@ -380,5 +387,50 @@ func TestShellSearchOutsideServedRepos(t *testing.T) {
 		if got := shellHook(t, a, Event{SessionID: command, Command: command, CWD: dir}); !strings.Contains(got, "widget.go:3") {
 			t.Errorf("%s: no hint:\n%s", command, got)
 		}
+	}
+}
+
+// A shell search counts where its paths lead: through a link into the served
+// tree it gets the hint the real path gets, through a link that leads outside
+// it gets nothing. The worktree may itself be named through a link, as a
+// non-git folder entered through one is.
+func TestShellSearchThroughSymlink(t *testing.T) {
+	dir := shellTree(t)
+	link := symlinkTo(t, dir)
+	toInternal := symlinkTo(t, filepath.Join(dir, "internal"))
+	// The cleaned spelling of toInternal/../internal is this regular file; grep
+	// takes ".." from the link's target and searches dir/internal.
+	if err := os.WriteFile(filepath.Join(filepath.Dir(toInternal), "internal"), []byte("Widget\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	outLink := symlinkTo(t, t.TempDir())
+	if err := os.Symlink(filepath.Join(t.TempDir(), "missing"), filepath.Join(dir, "vendor")); err != nil {
+		t.Skipf("no symlinks here: %v", err)
+	}
+	slash := filepath.ToSlash
+	for _, root := range []struct{ name, path string }{{"dir", dir}, {"link", link}} {
+		t.Run("worktree named "+root.name, func(t *testing.T) {
+			a := openTreeApp(t, root.path)
+			markServing(t, a)
+			indexWidgetBug(t, a)
+			want := shellHook(t, a, Event{SessionID: "real", Command: "grep -rn Widget " + slash(dir) + "/internal", CWD: dir})
+			if !strings.Contains(want, "widget.go:3") {
+				t.Fatalf("real-path search lacks the hint:\n%s", want)
+			}
+			for i, tc := range []struct{ command, cwd string }{
+				{"grep -rn Widget " + slash(link) + "/internal", dir},
+				{"grep -rn Widget internal", link},
+				{"grep -rn Widget " + slash(toInternal) + "/../internal", dir},
+			} {
+				if got := shellHook(t, a, Event{SessionID: fmt.Sprint("in", i), Command: tc.command, CWD: tc.cwd}); got != want {
+					t.Errorf("%s from %s:\n got %q\nwant %q", tc.command, tc.cwd, got, want)
+				}
+			}
+			for i, command := range []string{"rg Widget " + slash(outLink), "rg Widget vendor"} {
+				if got := shellHook(t, a, Event{SessionID: fmt.Sprint("out", i), Command: command, CWD: link}); got != "" {
+					t.Errorf("%s: got %q, want nothing", command, got)
+				}
+			}
+		})
 	}
 }

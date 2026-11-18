@@ -326,7 +326,7 @@ After a Grep or Glob call, or a shell search, Recarto lists the symbols the sear
   - it is anchored to a listed symbol or to the file that defines one;
   - Recarto's branch check does not flag it as referencing code missing from this worktree;
   - this conversation has not been shown it.
-- **Scope.** A search that names paths lists symbols and bugs only from the served repos (this worktree and the `RECARTO_REPOS` repos) its paths lie in or contain. If all its paths lie outside them, it adds nothing and does not count as a repeat. A search with no path covers every served repo.
+- **Scope.** A search that names paths lists symbols and bugs only from the served repos (this worktree and the `RECARTO_REPOS` repos) its paths lie in or contain. A path counts where its symlinks lead: through a link into a served repo it is inside that repo, and through a link that leads outside them it is outside. If all its paths lie outside them, it adds nothing and does not count as a repeat. A search with no path covers every served repo.
 - **Size.** A search that names no symbol adds nothing. One tool call adds at most 800 characters of hint, however many searches it runs.
 - **Repeats.** A pattern that already got a hint in this conversation, from the shell or Grep/Glob, adds nothing. `recarto status` counts these under `repeated_augments_blocked`.
 

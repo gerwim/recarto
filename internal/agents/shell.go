@@ -169,7 +169,8 @@ func (w *shellWalker) call(c *syntax.CallExpr, cwd string, piped, printed bool) 
 // search reads a grep-family content search. Operands that are directories or
 // globs make it a search; a search over regular files only is a view of them.
 // With no file operand it searches only when the tool searches by default:
-// git grep always, rg and grep -r unless they read piped input.
+// git grep always, rg and grep -r unless they read piped input. Operands are
+// stat'ed the way the tool opens them, links before "..".
 func (w *shellWalker) search(key string, args []shellWord, cwd string, piped bool) {
 	short, long := grepShort, grepLong
 	switch key {
@@ -213,7 +214,7 @@ func (w *shellWalker) search(key string, args []shellWord, cwd string, piped boo
 			scoped = true
 			continue
 		}
-		if fi, err := os.Stat(shellPath(o.val, cwd)); err == nil {
+		if fi, err := os.Stat(argPath(o.val, cwd)); err == nil {
 			if fi.IsDir() {
 				scoped = true
 			} else if fi.Mode().IsRegular() {
@@ -328,7 +329,7 @@ func (w *shellWalker) scope(paths []shellWord, cwd string) {
 		v := p.val
 		if p.glob {
 			// Cut on "/" in the raw word: filepath.Dir would turn a Git Bash
-			// /c/x into \c\x on Windows before shellPath could map it.
+			// /c/x into \c\x on Windows before argPath could map it.
 			v = v[:strings.IndexAny(v, "*?[")]
 			if i := strings.LastIndexByte(v, '/'); i >= 0 {
 				v = v[:i+1]
@@ -338,11 +339,11 @@ func (w *shellWalker) scope(paths []shellWord, cwd string) {
 		}
 		abs := ""
 		if !p.dyn {
-			abs = shellPath(v, cwd)
+			abs = argPath(v, cwd)
 		}
 		if abs == "" {
 			w.unscoped = true
-		} else if !slices.Contains(w.plan.paths, abs) {
+		} else if abs = realPath(abs); !slices.Contains(w.plan.paths, abs) {
 			w.plan.paths = append(w.plan.paths, abs)
 		}
 	}
@@ -438,19 +439,29 @@ func cd(args []shellWord, cwd string) string {
 	return shellPath(args[0].val, cwd)
 }
 
-// shellPath resolves a path argument against cwd; "" when it is relative to an
-// unknown cwd.
+// shellPath resolves a path argument against cwd, ".." taken lexically as a
+// shell's cd takes it; "" when it is relative to an unknown cwd.
 func shellPath(p, cwd string) string {
+	if p = argPath(p, cwd); p == "" {
+		return ""
+	}
+	return filepath.Clean(p)
+}
+
+// argPath makes a path argument absolute against cwd without cleaning it: a
+// search tool follows a path's links in order, so "link/.." must reach the
+// stat and realPath intact. "" when the path is relative to an unknown cwd.
+func argPath(p, cwd string) string {
 	if goos == "windows" {
 		p = gitBashPath(p)
 	}
 	if filepath.IsAbs(p) {
-		return filepath.Clean(p)
+		return p
 	}
 	if cwd == "" {
 		return ""
 	}
-	return filepath.Join(cwd, p)
+	return cwd + string(filepath.Separator) + p
 }
 
 // expandHome replaces a leading "~" or "~/" with the home directory; ok=false
@@ -468,14 +479,17 @@ func expandHome(p string) (string, bool) {
 
 // searchPath resolves the path a Grep/Glob call names the way the shell hook
 // resolves a path word: ~ is the home directory, a Git Bash /c/… path is a
-// drive path on Windows, a relative path is taken from cwd. "" when it cannot
-// be resolved.
+// drive path on Windows, a relative path is taken from cwd, and returns where
+// the search leads (realPath). "" when it cannot be resolved.
 func searchPath(p, cwd string) string {
 	p, ok := expandHome(p)
 	if !ok {
 		return ""
 	}
-	return shellPath(p, cwd)
+	if p = argPath(p, cwd); p == "" {
+		return ""
+	}
+	return realPath(p)
 }
 
 // gitBashPath maps a Git Bash drive path (/c/Users/…) to its Windows form

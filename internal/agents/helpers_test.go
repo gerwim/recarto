@@ -3,6 +3,7 @@ package agents
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -105,4 +106,15 @@ func finishIndex(t *testing.T, a *app.App, root string) {
 	if err := a.Graph.ReconcileIfStale(context.Background(), a.Git.Worktree, graph.FSSource{Root: root}, "test-token"); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// symlinkTo returns a new link to target, skipping the test where symlinks
+// can't be made.
+func symlinkTo(t *testing.T, target string) string {
+	t.Helper()
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("no symlinks here: %v", err)
+	}
+	return link
 }

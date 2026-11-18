@@ -156,6 +156,55 @@ func TestRunHookOutsideServedReposOpensNoStore(t *testing.T) {
 	}
 }
 
+// A search counts where its path leads, and the worktree where it leads: a
+// non-git cwd entered through a link is served under the link's name.
+func TestRunHookSearchThroughSymlink(t *testing.T) {
+	repo, outside, links := t.TempDir(), t.TempDir(), t.TempDir()
+	cwd, out := filepath.Join(links, "cwd"), filepath.Join(links, "out")
+	if err := os.Symlink(repo, cwd); err != nil {
+		t.Skipf("no symlinks here: %v", err)
+	}
+	if err := os.Symlink(outside, out); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(cwd)
+	for _, k := range []string{"RECARTO_WORKSPACE", "RECARTO_REPOS", "RECARTO_SYNC_URL", "RECARTO_SYNC_KEY"} {
+		t.Setenv(k, "")
+	}
+	payload := func(input map[string]string) string {
+		b, err := json.Marshal(map[string]any{"session_id": "s", "cwd": cwd, "tool_input": input})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+	for _, tc := range []struct {
+		name, event, payload string
+		opens                bool
+	}{
+		{"grep at the real path", "augment", payload(map[string]string{"pattern": "Foo", "path": repo}), true},
+		{"shell search through the cwd link", "shell", payload(map[string]string{"command": "rg Foo " + filepath.ToSlash(cwd)}), true},
+		{"shell search through a link outside", "shell", payload(map[string]string{"command": "rg Foo " + filepath.ToSlash(out)}), false},
+	} {
+		cache := t.TempDir()
+		t.Setenv("RECARTO_CACHE_DIR", cache)
+		t.Setenv("RECARTO_CONFIG", filepath.Join(t.TempDir(), "config.toml"))
+		var buf bytes.Buffer
+		runHook(context.Background(), strings.NewReader(tc.payload), &buf, []string{tc.event})
+		if !tc.opens && buf.Len() != 0 {
+			t.Errorf("%s: output %q", tc.name, buf.String())
+		}
+		entries, err := os.ReadDir(cache)
+		if err != nil {
+			t.Fatal(err)
+		}
+		opened := slices.ContainsFunc(entries, func(e os.DirEntry) bool { return e.Name() != "gitctx" })
+		if opened != tc.opens {
+			t.Errorf("%s: opened a store = %v, want %v", tc.name, opened, tc.opens)
+		}
+	}
+}
+
 // A shell call that neither searches nor prints a served repo's file — or
 // whose search another per-command hook answers — opens no store.
 func TestRunHookShellWithNothingToDoOpensNoStore(t *testing.T) {
