@@ -153,6 +153,62 @@ func (s *scratch) stop(a *app.App, id string) {
 	handle(s.t, a, Event{Kind: KindStop, SessionID: id, StopActive: true})
 }
 
+// startResult is what a session start returned.
+type startResult struct {
+	res Result
+	err error
+}
+
+// startOrGiveUp runs a session start in a goroutine and awaits it with the
+// hang-only timeout. giveUp ends everything the test holds the start on: its
+// fake first-index deadline, source gates and held writers. A cleanup calls
+// giveUp and waits for the start to return, so a start that hangs fails the
+// test and has returned before the test's App closes.
+func startOrGiveUp(t *testing.T, a *app.App, session, source string, giveUp func()) string {
+	t.Helper()
+	got := make(chan startResult, 1)
+	returned := make(chan struct{})
+	go func() {
+		defer close(returned)
+		res, err := Handle(context.Background(), a, Event{Kind: KindSessionStart, Agent: "claude-code", SessionID: session, Source: source})
+		got <- startResult{res, err}
+	}()
+	t.Cleanup(func() {
+		giveUp()
+		select {
+		case <-returned:
+		case <-time.After(hang):
+			t.Errorf("session start %s still running after giving up", source)
+		}
+	})
+	r := await(t, "session start "+source, got)
+	if r.err != nil {
+		t.Fatal(r.err)
+	}
+	if r.res.Failure != nil {
+		t.Fatalf("reported failure: %v", r.res.Failure)
+	}
+	return r.res.Context
+}
+
+// waitIdle registers a cleanup that calls giveUp and waits, within the
+// hang-only timeout, for the test's fake index goroutines in bg.
+func waitIdle(t *testing.T, bg *sync.WaitGroup, giveUp func()) {
+	t.Cleanup(func() {
+		giveUp()
+		idle := make(chan struct{})
+		go func() {
+			bg.Wait()
+			close(idle)
+		}()
+		select {
+		case <-idle:
+		case <-time.After(hang):
+			t.Errorf("the fake indexes did not end")
+		}
+	})
+}
+
 func TestScratchOneServedRepoIsTheInRepoBlock(t *testing.T) {
 	for name, big := range map[string]bool{"default": false, "large": true} {
 		t.Run(name, func(t *testing.T) {
@@ -434,15 +490,24 @@ func TestScratchFirstIndexesSideBySide(t *testing.T) {
 			a := s.open(s.folder, repos...)
 			remember(t, rc(t, a, second), memory.KindLearning, "NoSuchHelper wraps the retries", "x", memory.Ref{Type: memory.RefSymbol, Value: "NoSuchHelper"})
 			src := newGated(graph.NewSource(big), false)
+			stop := make(chan struct{})
+			openGate := sync.OnceFunc(func() { close(src.gate) })
+			giveUp := sync.OnceFunc(func() { close(stop); openGate() })
 			secondDone := make(chan struct{})
 			var secondOnce sync.Once
 			ch := make(chan struct{})
 			go func() {
-				<-secondDone
-				<-src.entered
-				close(ch)
+				defer close(ch)
+				for _, sig := range []chan struct{}{secondDone, src.entered} {
+					select {
+					case <-sig:
+					case <-stop:
+						return
+					}
+				}
 			}()
 			endWaitWhen(t, ch)
+			var bg sync.WaitGroup
 			bigRan := make(chan error, 1)
 			var mu sync.Mutex
 			starts := map[string]int{}
@@ -452,7 +517,7 @@ func TestScratchFirstIndexesSideBySide(t *testing.T) {
 				mu.Unlock()
 				done := make(chan error, 1)
 				x := rc(t, a, wt)
-				go func() {
+				bg.Go(func() {
 					switch wt {
 					case big:
 						err := x.Graph.ReconcileIfIdle(context.Background(), wt, src, func(at string) string { return graph.WorktreeToken(wt, at) })
@@ -465,10 +530,11 @@ func TestScratchFirstIndexesSideBySide(t *testing.T) {
 						}
 						done <- nil
 					}
-				}()
+				})
 				return done, nil
 			}
-			b := start(t, a, "s", "startup")
+			waitIdle(t, &bg, giveUp)
+			b := startOrGiveUp(t, a, "s", "startup", giveUp)
 			for _, w := range []string{"- second: 1 files", "\nbig: " + indexingLine, "references code not present in this worktree"} {
 				if !strings.Contains(b, w) {
 					t.Errorf("block lacks %q", w)
@@ -480,13 +546,14 @@ func TestScratchFirstIndexesSideBySide(t *testing.T) {
 			if t.Failed() {
 				t.Fatalf("block:\n%s", b)
 			}
-			close(src.gate)
+			openGate()
 			if err := await(t, "big's index", bigRan); err != nil {
 				t.Fatal(err)
 			}
-			// Nothing waits now; an open deadline keeps the folder's code check from running out.
-			endWaitWhen(t, make(chan struct{}))
-			if b := start(t, a, "s2", "startup"); !strings.Contains(b, "- big: 1 files") || strings.Contains(b, indexingLine) {
+			// Nothing waits now; the deadline ends only if the test gives up, so the
+			// folder's code check cannot run out.
+			endWaitWhen(t, stop)
+			if b := startOrGiveUp(t, a, "s2", "startup", giveUp); !strings.Contains(b, "- big: 1 files") || strings.Contains(b, indexingLine) {
 				t.Fatalf("after big's index:\n%s", b)
 			}
 		})
@@ -620,24 +687,14 @@ func TestScratchRosterRowsAfterTheRoster(t *testing.T) {
 	t0 := s.clk.Now().UnixMilli()
 
 	release := holdWriter(t, rr.Store)
-	got := make(chan Result, 1)
-	go func() {
-		res, _ := Handle(context.Background(), a, Event{Kind: KindSessionStart, SessionID: "s", Source: "startup"})
-		got <- res
-	}()
 	// A busy writer is not reported: warm writes the row.
-	if b := await(t, "the start", got); !strings.Contains(b.Context, alsoServing([]string{"recarto"})) || b.Failure != nil {
-		t.Fatalf("failure %v, block:\n%s", b.Failure, b.Context)
+	if b := startOrGiveUp(t, a, "s", "startup", release); !strings.Contains(b, alsoServing([]string{"recarto"})) {
+		t.Fatalf("block:\n%s", b)
 	}
 	if rows := sessionRows(t, rr, "s"); len(rows) != 0 {
 		t.Fatalf("a row written past the held writer: %+v", rows)
 	}
-	res := make(chan string, 1)
-	go func() {
-		r, _ := Handle(context.Background(), a, Event{Kind: KindSessionStart, SessionID: "s", Source: "resume"})
-		res <- r.Context
-	}()
-	await(t, "a resume while the writer is held", res)
+	startOrGiveUp(t, a, "s", "resume", release)
 
 	attempted, goOn := make(chan struct{}), make(chan struct{})
 	prev := rosterRetryWait
@@ -793,25 +850,30 @@ func TestScratchReposIndexSideBySide(t *testing.T) {
 	// x, listed first, has its writer held and an index start that never ends.
 	release := holdWriter(t, rx.Store)
 	defer release()
-	yDone := make(chan struct{})
-	endWaitWhen(t, yDone)
+	yDone, stop, ch := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(ch)
+		select {
+		case <-yDone:
+		case <-stop:
+		}
+	}()
+	endWaitWhen(t, ch)
+	giveUp := sync.OnceFunc(func() { close(stop); release() })
+	var bg sync.WaitGroup
 	a.StartIndex = func(wt string) (<-chan error, error) {
 		done := make(chan error, 1)
 		if wt == y {
-			go func() {
+			bg.Go(func() {
 				index(t, ry)
 				close(yDone)
 				done <- nil
-			}()
+			})
 		}
 		return done, nil
 	}
-	got := make(chan string, 1)
-	go func() {
-		res, _ := Handle(context.Background(), a, Event{Kind: KindSessionStart, SessionID: "s", Source: "startup"})
-		got <- res.Context
-	}()
-	b := await(t, "the start while x's writer is held", got)
+	waitIdle(t, &bg, giveUp)
+	b := startOrGiveUp(t, a, "s", "startup", giveUp)
 	if !strings.Contains(b, "- y: 1 files") || !strings.Contains(b, "\nx: "+unbuiltLine) {
 		t.Fatalf("block:\n%s", b)
 	}
@@ -865,18 +927,30 @@ func TestScratchRefreshEndingInTheWaitShowsItsMap(t *testing.T) {
 	index(t, rx)
 	writeTree(t, x, map[string]string{"x/b.go": "package x\n\nfunc B() {}\n"})
 	src := newGated(graph.FSSource{Root: x}, true)
-	refreshed := make(chan error, 1)
+	refreshDone := make(chan struct{})
+	var refreshErr error
 	go func() {
-		refreshed <- rx.Graph.ReconcileIfStale(context.Background(), x, src, graph.WorktreeToken(x, ""))
+		defer close(refreshDone)
+		refreshErr = rx.Graph.ReconcileIfStale(context.Background(), x, src, graph.WorktreeToken(x, ""))
 	}()
+	stop := make(chan struct{})
+	openGate := sync.OnceFunc(func() { close(src.gate) })
+	giveUp := sync.OnceFunc(func() { close(stop); openGate() })
+	t.Cleanup(func() {
+		giveUp()
+		select {
+		case <-refreshDone:
+		case <-time.After(hang):
+			t.Errorf("the refresh did not end")
+		}
+	})
 	await(t, "the refresh", src.entered)
 
-	var open sync.Once
 	prev := tierDecided
 	t.Cleanup(func() { tierDecided = prev })
 	tierDecided = func(tr *mapTier) {
 		if tr.rc.Git.Worktree == x && tr.line == indexingLine {
-			open.Do(func() { close(src.gate) })
+			openGate()
 		}
 	}
 	yStarted := make(chan struct{})
@@ -888,14 +962,21 @@ func TestScratchRefreshEndingInTheWaitShowsItsMap(t *testing.T) {
 	}
 	end := make(chan struct{})
 	go func() {
-		if err := <-refreshed; err != nil {
-			t.Errorf("refresh: %v", err)
+		defer close(end)
+		for _, sig := range []chan struct{}{refreshDone, yStarted} {
+			select {
+			case <-sig:
+			case <-stop:
+				return
+			}
 		}
-		<-yStarted
-		close(end)
 	}()
 	endWaitWhen(t, end)
-	b := start(t, a, "s", "startup")
+	b := startOrGiveUp(t, a, "s", "startup", giveUp)
+	await(t, "the refresh", refreshDone)
+	if refreshErr != nil {
+		t.Fatalf("refresh: %v", refreshErr)
+	}
 	if !strings.Contains(b, "\nx: 2 files, 2 symbols\n") || !strings.Contains(b, "- x: 2 files") {
 		t.Fatalf("block:\n%s", b)
 	}
@@ -945,12 +1026,7 @@ func TestScratchMarkdownRepoAddsNoWait(t *testing.T) {
 		done <- fmt.Errorf("no index")
 		return done, nil
 	}
-	got := make(chan string, 1)
-	go func() {
-		res, _ := Handle(context.Background(), a, Event{Kind: KindSessionStart, SessionID: "s", Source: "startup"})
-		got <- res.Context
-	}()
-	b := await(t, "the start", got)
+	b := startOrGiveUp(t, a, "s", "startup", func() {})
 	mu.Lock()
 	defer mu.Unlock()
 	if !strings.Contains(b, "\ndocs: 0 files, 0 symbols\n") || strings.Contains(b, "- docs:") ||
