@@ -290,12 +290,13 @@ func handleSessionStart(ctx context.Context, a *app.App, ev Event) (Result, erro
 		tier = startMapTier(ctx, skip, a)
 		defer tier.close()
 	}
-	// Writes that miss skip's bound are skipped; the next session start or Stop
-	// redoes them.
-	sessionStartUpkeep(skip, a)
+	// The first-index wait comes before upkeep, so a slow sync does not use up its budget.
 	tier.settle(ctx, skip, a)
 	// The wait used up the first bound; the writes after it get their own.
 	skip = store.WithWriteDeadline(ctx, time.Now().Add(writeGrace))
+	// Writes that miss skip's bound are skipped; the next session start or Stop
+	// redoes them.
+	sessionStartUpkeep(skip, a)
 
 	budget := sessionBudget()
 	repoBudget := budget

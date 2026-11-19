@@ -20,72 +20,9 @@ import (
 
 	"github.com/gerwim/recarto/internal/app"
 	"github.com/gerwim/recarto/internal/clock"
+	"github.com/gerwim/recarto/internal/gitwrap"
 	"github.com/gerwim/recarto/internal/graph"
 )
-
-// gitScript writes a git into a new directory, which it returns for the front
-// of PATH. That git runs the shell snippet hook, then the real git.
-func gitScript(t *testing.T, hook string) string {
-	t.Helper()
-	realGit, err := exec.LookPath("git")
-	if err != nil {
-		t.Fatal(err)
-	}
-	dir := t.TempDir()
-	script := "#!/bin/sh\n" + hook + "\nexec '" + realGit + "' \"$@\"\n"
-	if err := os.WriteFile(filepath.Join(dir, "git"), []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	return dir
-}
-
-// indexRecipe is a git first on PATH that logs each index attempt's marker
-// (see graph.AttemptEnv) and, while failing is on, fails each marked ls-files.
-// Discovery calls carry no marker and always run the real git.
-type indexRecipe struct{ dir, path string }
-
-func newIndexRecipe(t *testing.T) indexRecipe {
-	t.Helper()
-	d := t.TempDir()
-	dir := gitScript(t, `m="$`+graph.AttemptEnv+`"
-if [ -n "$m" ]; then
-	printf '%s\n' "$m" >> '`+d+`/attempts'
-	case " $* " in *" ls-files "*) [ -e '`+d+`/fail' ] && exit 1 ;; esac
-fi`)
-	return indexRecipe{dir: d, path: dir + string(os.PathListSeparator) + os.Getenv("PATH")}
-}
-
-// failing switches the recipe's failures on or off.
-func (r indexRecipe) failing(t *testing.T, on bool) {
-	t.Helper()
-	p := filepath.Join(r.dir, "fail")
-	var err error
-	if on {
-		err = os.WriteFile(p, nil, 0o644)
-	} else {
-		err = os.Remove(p)
-	}
-	if err != nil {
-		t.Fatal(err)
-	}
-}
-
-// attempts counts the distinct index attempts logged so far.
-func (r indexRecipe) attempts(t *testing.T) int {
-	t.Helper()
-	b, err := os.ReadFile(filepath.Join(r.dir, "attempts"))
-	if os.IsNotExist(err) {
-		return 0
-	}
-	if err != nil {
-		t.Fatal(err)
-	}
-	seen := map[string]bool{}
-	for _, m := range strings.Fields(string(b)) {
-		seen[m] = true
-	}
-	return len(seen)
-}
 
 // TestWarmLimitHelper is the `recarto warm` process TestWarmStopsAtItsLimit
 // runs. Its limit fires when SIGUSR1 arrives, unless Run stopped it first.
@@ -123,7 +60,7 @@ func TestWarmStopsAtItsLimit(t *testing.T) {
 	t.Setenv("RECARTO_CONFIG", filepath.Join(t.TempDir(), "config.toml"))
 
 	// The fake git fires the limit once the run is inside the index, then hangs.
-	fakeDir := gitScript(t, `for a in "$@"; do if [ "$a" = ls-files ]; then kill -USR1 $PPID; exec sleep 3600; fi; done`)
+	fakeDir := gitwrap.Script(t, `for a in "$@"; do if [ "$a" = ls-files ]; then kill -USR1 $PPID; exec sleep 3600; fi; done`)
 
 	cmd := exec.Command(os.Args[0], "-test.run=^TestWarmLimitHelper$")
 	cmd.Dir = repo
@@ -211,7 +148,7 @@ func TestWarmLeavesAWorktreeAnotherProcessIndexes(t *testing.T) {
 	// lock would run this git status; the shim records that instead of hanging.
 	eager := filepath.Join(t.TempDir(), "eager-status")
 	hook := `if [ "$1" = -C ] && [ "$2" = '` + wt + `' ] && [ "$3" = status ]; then : > '` + eager + `'; exit 1; fi`
-	t.Setenv("PATH", gitScript(t, hook)+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("PATH", gitwrap.Script(t, hook)+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	held := heldSource{Source: graph.NewSource(wt), listing: make(chan struct{}), gate: make(chan struct{})}
 	indexed := make(chan error, 1)

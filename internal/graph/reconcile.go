@@ -100,7 +100,8 @@ func (e *Engine) Reconcile(ctx context.Context, worktree string, src Source, opt
 	// indexes are physically missing (aborted bulk load, possibly under an older
 	// binary that wrote no marker), or an explicit WithForce all force the
 	// rebuild-indexes + full-resolve path below even when no file changed.
-	pending := o.force || e.resolvePending(ctx, worktree) || e.graphIndexesMissing(ctx)
+	marked := e.resolvePending(ctx, worktree)
+	pending := o.force || marked || e.graphIndexesMissing(ctx)
 
 	entries, err := src.List()
 	if err != nil {
@@ -203,7 +204,8 @@ func (e *Engine) Reconcile(ctx context.Context, worktree string, src Source, opt
 	// that all skip on content hash still pays the marker (it is cleared, without
 	// a resolve, at the end); actual mutation cannot be known before parsing.
 	willMutate := len(worklist) > 0 || deletions > 0
-	if willMutate && !pending {
+	// A forced run or an index rebuild rewrites the resolution even when no file changed, so it marks too.
+	if (willMutate || pending) && !marked {
 		if err := e.setResolvePending(ctx, worktree); err != nil {
 			return err
 		}
@@ -599,6 +601,11 @@ func (e *Engine) reconcileLocked(ctx context.Context, worktree string, src Sourc
 	}
 	// A lost count only understates the runs; the index itself goes ahead.
 	_ = e.led.Incr(ctx, "lifetime", "graph_index_runs", 1)
+	if token == "" {
+		if err := e.markBuiltIfFinished(ctx, worktree); err != nil {
+			return err
+		}
+	}
 	if err := e.Reconcile(ctx, worktree, src, opts...); err != nil {
 		return err
 	}
@@ -621,6 +628,27 @@ func (e *Engine) reconcileLocked(ctx context.Context, worktree string, src Sourc
 	// Outside git no token records that an index finished, and file rows alone
 	// may be a cut-short first index; the mark tells a session start this
 	// worktree needs no first-index wait.
+	return e.writeBuilt(ctx, worktree)
+}
+
+// markBuiltIfFinished writes worktree's built mark when its stored graph, outside
+// git, is a finished index without one. An earlier version wrote no built mark
+// outside git, and a refresh's pending marker would hide that this graph
+// finished, sending session starts to the first-index wait.
+func (e *Engine) markBuiltIfFinished(ctx context.Context, worktree string) error {
+	s, err := readIndexState(ctx, e.st.DB, worktree)
+	if err != nil || s.built {
+		return err
+	}
+	done, err := codeMapDone(ctx, e.st.DB, worktree, true, s)
+	if err != nil || !done {
+		return err
+	}
+	return e.writeBuilt(ctx, worktree)
+}
+
+// writeBuilt writes worktree's built mark.
+func (e *Engine) writeBuilt(ctx context.Context, worktree string) error {
 	return e.st.WriteTx(ctx, func(c store.Conn) error {
 		_, err := c.ExecContext(ctx,
 			`INSERT INTO meta(key, value) VALUES (?, '1') ON CONFLICT(key) DO NOTHING`, builtKey(worktree))
@@ -628,8 +656,9 @@ func (e *Engine) reconcileLocked(ctx context.Context, worktree string, src Sourc
 	})
 }
 
-// builtKey is the meta key marking that a reconcile of worktree outside git
-// finished once.
+// builtKey is the meta key marking that an index of worktree outside git
+// finished once. A finished reconcile writes it, and so does a reconcile that
+// finds an earlier finished graph without the mark.
 func builtKey(worktree string) string { return "graph_built:" + worktree }
 
 // IndexRunning reports whether a process holds worktree's index lock right now.

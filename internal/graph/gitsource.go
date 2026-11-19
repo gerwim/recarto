@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/gerwim/recarto/internal/parse"
 )
@@ -23,6 +24,8 @@ const AttemptEnv = "RECARTO_INDEX_ATTEMPT"
 // gitCmd is `git -C root args…`, marked as part of attempt when attempt is set.
 func gitCmd(ctx context.Context, attempt, root string, args ...string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", root}, args...)...)
+	// A child of a git wrapper can keep git's output open after git is gone; a cancelled call must not wait for it.
+	cmd.WaitDelay = 100 * time.Millisecond
 	if attempt != "" {
 		cmd.Env = append(os.Environ(), AttemptEnv+"="+attempt)
 	}

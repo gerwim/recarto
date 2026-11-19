@@ -266,3 +266,59 @@ func TestArchitectureIgnoresOtherWorktrees(t *testing.T) {
 		t.Errorf("deps = %+v, want only api → auth", arch.Deps)
 	}
 }
+
+func TestCodeMapDuringARefresh(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name   string
+		nonGit bool
+		first  func(e *Engine, wt string) error
+		token  string
+		opts   []ReconcileOption
+	}{
+		{"outside git, finished by an earlier version", true,
+			func(e *Engine, wt string) error { return e.Reconcile(ctx, wt, FSSource{Root: wt}) }, "", nil},
+		{"forced refresh of a changed git worktree", false,
+			func(e *Engine, wt string) error { return e.ReconcileIfStale(ctx, wt, FSSource{Root: wt}, "tok") }, "tok",
+			[]ReconcileOption{WithForce()}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newTestEngine(t)
+			wt := t.TempDir()
+			writeFile(t, wt, "api/a.go", "package api\nfunc A(){}")
+			if err := tc.first(e, wt); err != nil {
+				t.Fatal(err)
+			}
+			writeFile(t, wt, "api/a.go", "package api\n\nfunc A() {}\n\nfunc B() {}\n")
+			held := newHeldReadSource(wt)
+			done := make(chan error, 1)
+			go func() { done <- e.ReconcileIfStale(ctx, wt, held, tc.token, tc.opts...) }()
+			held.awaitRead(t)
+
+			arch, st, err := e.CodeMap(ctx, wt, tc.nonGit)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if st != (MapStatus{Built: true}) || len(arch.Modules) != 0 {
+				t.Errorf("during the refresh: status %+v, modules %v; want built, not done, no map", st, moduleNamesOf(arch))
+			}
+
+			held.release <- struct{}{}
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Fatal(err)
+				}
+			case <-time.After(hangTimeout):
+				t.Fatal("the refresh hung")
+			}
+			arch, st, err = e.CodeMap(ctx, wt, tc.nonGit)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if st != (MapStatus{Done: true, Built: true}) || strings.Join(moduleNamesOf(arch), ",") != "api" {
+				t.Errorf("after the refresh: status %+v, modules %v; want done with api", st, moduleNamesOf(arch))
+			}
+		})
+	}
+}

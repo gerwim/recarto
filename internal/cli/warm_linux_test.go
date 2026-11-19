@@ -9,6 +9,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gerwim/recarto/internal/gitwrap"
+	"github.com/gerwim/recarto/internal/graph"
 )
 
 // warmRunning reports whether a process runs bin with the argument warm.
@@ -97,15 +100,12 @@ func TestSessionStartIndexesInTheBackground(t *testing.T) {
 		codeMap      = "Code map (modules)"
 		indexingLine = "The code graph is still being indexed; graph results may be incomplete."
 	)
-	// The first session start waits for the index up to a bound: the map when
-	// it finished within it, the indexing line otherwise.
-	got := run(`{"session_id":"s1","source":"startup"}`, "hook", "session-start")
-	if strings.Contains(got, codeMap) == strings.Contains(got, indexingLine) {
-		t.Fatalf("first session start: want the map or the indexing line:\n%s", got)
-	}
+	// What the first block shows depends on how fast its index runs; the
+	// agents tests cover each outcome.
+	run(`{"session_id":"s1","source":"startup"}`, "hook", "session-start")
 	awaitNoWarm(t, bin)
 
-	got = run(`{"session_id":"s2","source":"startup"}`, "hook", "session-start")
+	got := run(`{"session_id":"s2","source":"startup"}`, "hook", "session-start")
 	if !strings.Contains(got, codeMap) || strings.Contains(got, indexingLine) {
 		t.Fatalf("after the background index: want the map and no indexing line:\n%s", got)
 	}
@@ -118,42 +118,42 @@ func TestSessionStartIndexesInTheBackground(t *testing.T) {
 	}
 }
 
-// TestSessionStartMakesOneIndexAttempt: a session start whose first index
-// fails says the graph is not built and makes no second attempt; the next one
-// tries again at once.
+// TestSessionStartMakesOneIndexAttempt: a session start makes one index
+// attempt, and the next one tries again. Which line a failed or slow attempt
+// shows is covered by TestSessionStartFirstIndexNotRunning and
+// TestSessionStartIndexStillRunning in internal/agents.
 func TestSessionStartMakesOneIndexAttempt(t *testing.T) {
 	bin := buildRecarto(t)
 	repo := t.TempDir()
 	initGitRepo(t, repo, map[string]string{"api/a.go": "package api\n\nfunc A() {}\n"})
-	rec := newIndexRecipe(t)
-	run := recartoIn(t, bin, repo, rec.path)
+	rec := gitwrap.NewRecipe(t, repo, graph.AttemptEnv)
+	run := recartoIn(t, bin, repo, rec.PATH())
 	const (
 		codeMap      = "Code map (modules)"
 		indexingLine = "The code graph is still being indexed; graph results may be incomplete."
 		unbuiltLine  = "The code graph is not built yet; graph results may be empty."
 	)
 
-	rec.failing(t, true)
+	rec.Fail(t, true)
 	got := run(`{"session_id":"s1","source":"startup"}`, "hook", "session-start")
-	if !strings.Contains(got, unbuiltLine) || strings.Contains(got, indexingLine) || strings.Contains(got, codeMap) {
-		t.Fatalf("failed first index: want the not-built line alone:\n%s", got)
+	if strings.Contains(got, codeMap) {
+		t.Fatalf("failed first index: a code map:\n%s", got)
 	}
 	awaitNoWarm(t, bin)
-	if n := rec.attempts(t); n != 1 {
+	if n := len(rec.Attempts(t)); n != 1 {
 		t.Fatalf("index attempts = %d, want 1", n)
 	}
 
-	rec.failing(t, false)
-	got = run(`{"session_id":"s2","source":"startup"}`, "hook", "session-start")
-	if strings.Contains(got, unbuiltLine) {
-		t.Fatalf("with the failures off: the attempt must succeed:\n%s", got)
-	}
+	rec.Fail(t, false)
+	// A slow attempt may not hold the lock yet when the wait ends, so the
+	// block's line is not checked here.
+	run(`{"session_id":"s2","source":"startup"}`, "hook", "session-start")
 	awaitNoWarm(t, bin)
-	if n := rec.attempts(t); n != 2 {
+	if n := len(rec.Attempts(t)); n != 2 {
 		t.Fatalf("index attempts = %d, want 2", n)
 	}
 	got = run(`{"session_id":"s3","source":"startup"}`, "hook", "session-start")
-	if !strings.Contains(got, codeMap) || strings.Contains(got, indexingLine) {
+	if !strings.Contains(got, codeMap) || strings.Contains(got, indexingLine) || strings.Contains(got, unbuiltLine) {
 		t.Fatalf("after the index: want the map alone:\n%s", got)
 	}
 }

@@ -9,8 +9,9 @@ import (
 )
 
 const (
-	// firstIndexWait bounds how long a session start waits for a worktree's
-	// first index, so a small repo's first session gets its code map.
+	// firstIndexWait bounds how long a session start looks for code and waits
+	// for the worktree's first index, together, so a small repo's first session
+	// gets its code map.
 	firstIndexWait = 2 * time.Second
 	// indexPollInterval is how often a session start waiting for another
 	// process's index checks whether it still runs.
@@ -23,8 +24,8 @@ const (
 	writeGrace = 300 * time.Millisecond
 )
 
-// firstIndexDeadline bounds the first-index wait and the check for code. A var
-// so a test can end the wait at a moment it picks.
+// firstIndexDeadline is the one deadline of the check for code and the
+// first-index wait. A var so a test can end the wait at a moment it picks.
 var firstIndexDeadline = func(ctx context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(ctx, firstIndexWait)
 }
@@ -44,7 +45,8 @@ type mapTier struct {
 	st     graph.MapStatus
 	line   string
 
-	check  chan codeCheck // nil when no check runs
+	check  chan codeCheck  // nil when no check runs
+	wait   context.Context // the deadline of the check and the first-index wait together
 	cancel context.CancelFunc
 	joined bool
 	got    codeCheck
@@ -69,7 +71,7 @@ func startMapTier(ctx, skip context.Context, a *app.App) *mapTier {
 		return t // a finished index that found nothing to index
 	}
 	dctx, cancel := firstIndexDeadline(ctx)
-	t.check, t.cancel = make(chan codeCheck, 1), cancel
+	t.check, t.wait, t.cancel = make(chan codeCheck, 1), dctx, cancel
 	go func() {
 		defer recoverHook()
 		code, err := graph.HasCode(dctx, wt, a.Git.NonGit, present...)
@@ -100,8 +102,8 @@ func (t *mapTier) empty() bool {
 	return c.err == nil && !c.code
 }
 
-// settle decides an unfinished index's tier, waiting up to firstIndexWait for
-// a worktree's first index. A finished index's tier is decided in result.
+// settle decides an unfinished index's tier, waiting for a worktree's first
+// index within the check's deadline. A finished index's tier is decided in result.
 func (t *mapTier) settle(ctx, skip context.Context, a *app.App) {
 	if t == nil || t.check == nil || t.st.Done {
 		return
@@ -111,9 +113,7 @@ func (t *mapTier) settle(ctx, skip context.Context, a *app.App) {
 		return
 	}
 	if !t.st.Built {
-		wctx, cancel := firstIndexDeadline(ctx)
-		awaitFirstIndex(wctx, a, t.wt)
-		cancel()
+		awaitFirstIndex(t.wait, a, t.wt)
 	}
 	t.decide(ctx, skip, a)
 }
