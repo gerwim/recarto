@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"slices"
+	"sync"
 
 	"github.com/gerwim/recarto/internal/agents"
 	"github.com/gerwim/recarto/internal/agents/claudecode"
@@ -40,7 +41,8 @@ func runHook(ctx context.Context, in io.Reader, out io.Writer, args []string) {
 		}
 	}()
 	var warm bool
-	var attempted []string // worktrees this session start made its index attempt at
+	var mu sync.Mutex // the session start's tiers add to the lists side by side
+	var run warmRun
 	open := func(ev agents.Event) (*app.App, error) {
 		cfg := app.Config{SkipWorkspace: ev.Kind != agents.KindSessionStart && ev.Kind != agents.KindStop}
 		var files, searched []string // the event acts only on these
@@ -63,9 +65,17 @@ func runHook(ctx context.Context, in io.Reader, out io.Writer, args []string) {
 		a, err = app.Open(cfg)
 		warm = err == nil && ev.Kind == agents.KindSessionStart
 		if warm {
+			run.session = ev.SessionID
 			a.StartIndex = func(wt string) (<-chan error, error) {
-				attempted = append(attempted, wt)
+				mu.Lock()
+				run.skip = append(run.skip, wt)
+				mu.Unlock()
 				return startIndex(wt)
+			}
+			a.IndexIfCode = func(wt string) {
+				mu.Lock()
+				run.ifCode = append(run.ifCode, wt)
+				mu.Unlock()
 			}
 		}
 		return a, err
@@ -79,7 +89,7 @@ func runHook(ctx context.Context, in io.Reader, out io.Writer, args []string) {
 	// worktree the session start already made its attempt at is left out: one
 	// attempt per worktree per session start.
 	if warm {
-		if err := startWarm(attempted); err != nil {
+		if err := startWarm(run); err != nil {
 			fmt.Fprintln(os.Stderr, "recarto hook: start the background index:", err)
 		}
 	}

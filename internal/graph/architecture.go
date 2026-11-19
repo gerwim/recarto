@@ -98,38 +98,11 @@ func BudgetArchitecture(arch Architecture, limit int) (mods []Module, deps []Mod
 // reference count) likewise, so the displayed output is stable. limit <= 0 keeps
 // everything. It never mutates arch.
 func MapArchitecture(arch Architecture, limit int) (mods []Module, deps []ModuleEdge) {
-	mods = append(mods, arch.Modules...)
-	sort.SliceStable(mods, func(i, j int) bool { return mods[i].Name < mods[j].Name })
-	sort.SliceStable(mods, func(i, j int) bool {
-		if ti, tj := isTestModuleName(mods[i].Name), isTestModuleName(mods[j].Name); ti != tj {
-			return !ti // product modules before test modules
-		}
-		return mods[i].Files > mods[j].Files
-	})
+	mods, deps = RankArchitecture(arch)
 	if limit > 0 && len(mods) > limit {
 		mods = mods[:limit]
 	}
 	sort.SliceStable(mods, func(i, j int) bool { return mods[i].Name < mods[j].Name })
-
-	deps = append(deps, arch.Deps...)
-	sort.SliceStable(deps, func(i, j int) bool {
-		// Demote edges touching a test module: "tests reference the code under test"
-		// is the heaviest edge in many repos yet says nothing about the product's
-		// architecture. Product→product coupling is the signal worth the budget.
-		ti := isTestModuleName(deps[i].From) || isTestModuleName(deps[i].To)
-		tj := isTestModuleName(deps[j].From) || isTestModuleName(deps[j].To)
-		if ti != tj {
-			return !ti
-		}
-		// Then demote edges dominated by generated-source references: a generated
-		// client's thousands of refs into a shared abstractions module is the
-		// heaviest edge in many monorepos yet is codegen noise, not architecture.
-		gi, gj := genDominatedEdge(deps[i]), genDominatedEdge(deps[j])
-		if gi != gj {
-			return !gi
-		}
-		return deps[i].Count > deps[j].Count
-	})
 	if limit > 0 && len(deps) > limit {
 		deps = deps[:limit]
 	}
@@ -168,6 +141,42 @@ func MapArchitecture(arch Architecture, limit int) (mods []Module, deps []Module
 	}
 	sort.SliceStable(mods, func(i, j int) bool { return mods[i].Name < mods[j].Name })
 
+	return mods, deps
+}
+
+// RankArchitecture returns arch's modules and dependencies in the order
+// MapArchitecture picks them for its limit: product modules before test
+// modules, then by file count (ties by name); dependencies off test modules and
+// generated code first, then by reference count. It never mutates arch.
+func RankArchitecture(arch Architecture) (mods []Module, deps []ModuleEdge) {
+	mods = append(mods, arch.Modules...)
+	sort.SliceStable(mods, func(i, j int) bool { return mods[i].Name < mods[j].Name })
+	sort.SliceStable(mods, func(i, j int) bool {
+		if ti, tj := isTestModuleName(mods[i].Name), isTestModuleName(mods[j].Name); ti != tj {
+			return !ti // product modules before test modules
+		}
+		return mods[i].Files > mods[j].Files
+	})
+
+	deps = append(deps, arch.Deps...)
+	sort.SliceStable(deps, func(i, j int) bool {
+		// Demote edges touching a test module: "tests reference the code under test"
+		// is the heaviest edge in many repos yet says nothing about the product's
+		// architecture. Product→product coupling is the signal worth the budget.
+		ti := isTestModuleName(deps[i].From) || isTestModuleName(deps[i].To)
+		tj := isTestModuleName(deps[j].From) || isTestModuleName(deps[j].To)
+		if ti != tj {
+			return !ti
+		}
+		// Then demote edges dominated by generated-source references: a generated
+		// client's thousands of refs into a shared abstractions module is the
+		// heaviest edge in many monorepos yet is codegen noise, not architecture.
+		gi, gj := genDominatedEdge(deps[i]), genDominatedEdge(deps[j])
+		if gi != gj {
+			return !gi
+		}
+		return deps[i].Count > deps[j].Count
+	})
 	return mods, deps
 }
 

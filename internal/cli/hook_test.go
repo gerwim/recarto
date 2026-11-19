@@ -283,8 +283,8 @@ func TestRunHookSessionStartAttemptsOnce(t *testing.T) {
 		done <- errors.New("git ls-files: exit status 1")
 		return done, nil
 	}
-	startWarm = func(skip []string) error {
-		skipped = skip
+	startWarm = func(w warmRun) error {
+		skipped = w.skip
 		return nil
 	}
 	sessionStart := func(id string) string {

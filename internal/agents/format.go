@@ -86,13 +86,13 @@ const memoryHeader = "Recarto memory for this repo/branch:\n"
 // With the session-memories feature off in f, the memory header, empty-memory
 // line and record nudge go too, leaving the other tiers; a line pointing at
 // tools f turns off is left out.
-func formatSessionContext(results []memory.RecallResult, wsName string, wsResults []memory.RecallResult,
-	extraRepos []string, arch graph.Architecture, mapLine string, bugs []*memory.Record,
+func formatSessionContext(header, reposLine string, results []memory.RecallResult, wsName string, wsResults []memory.RecallResult,
+	arch graph.Architecture, mapLine string, bugs []*memory.Record,
 	deltas []graph.Delta, deltaTotal int, deltaBaselineMs int64, budget int, f features.Set) (string, []string) {
 	var b strings.Builder
 	memories := f.On(features.SessionMemories)
 	if memories {
-		b.WriteString(memoryHeader)
+		b.WriteString(header)
 	}
 	mem, emitted := formatMemories(results, budget)
 	b.WriteString(mem)
@@ -106,10 +106,7 @@ func formatSessionContext(results []memory.RecallResult, wsName string, wsResult
 	// One line, not a tier: the extra repos' memories reach the agent through
 	// recall (merged automatically) and the file-anchored read/edit hooks, so
 	// session start only needs to say they are served and how to target them.
-	if len(extraRepos) > 0 {
-		fmt.Fprintf(&b, "\nAlso serving repos: %s — graph/memory tools accept repo:\"<name>\"; recall and file-anchored surfacing cover them automatically.\n",
-			strings.Join(extraRepos, ", "))
-	}
+	b.WriteString(reposLine)
 
 	if mapLine != "" {
 		b.WriteString("\n" + mapLine + "\n")
@@ -154,14 +151,24 @@ func formatSessionContext(results []memory.RecallResult, wsName string, wsResult
 	return strings.TrimSpace(b.String()), emitted
 }
 
+// alsoServing is the line naming the served repos by their repo argument
+// values, "" for none.
+func alsoServing(names []string) string {
+	if len(names) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("\nAlso serving repos: %s — graph/memory tools accept repo:\"<name>\"; recall and file-anchored surfacing cover them automatically.\n",
+		strings.Join(names, ", "))
+}
+
 // formatResumeContext renders the memory tiers alone, for a resumed conversation:
-// the repo memories under memoryHeader, then the workspace tier. It returns the
+// the repo memories under header, then the workspace tier. It returns the
 // IDs it rendered, and "" when there are none.
-func formatResumeContext(results []memory.RecallResult, wsName string, wsResults []memory.RecallResult, budget int) (string, []string) {
+func formatResumeContext(header string, results []memory.RecallResult, wsName string, wsResults []memory.RecallResult, budget int) (string, []string) {
 	var b strings.Builder
 	mem, emitted := formatMemories(results, budget)
 	if mem != "" {
-		b.WriteString(memoryHeader)
+		b.WriteString(header)
 		b.WriteString(mem)
 	}
 	ws, wsEmitted := formatWorkspaceMemories(wsName, wsResults)
@@ -343,8 +350,29 @@ func nullable(s string) any {
 // guaranteed by construction, not by a post-hoc truncation that can corrupt the
 // header (the old approach hit the date's " (" before the names list).
 func formatDeltaTier(deltas []graph.Delta, total int, baselineMs int64, pointer bool) string {
+	return buildDeltaTier(deltas, total, baselineMs, pointer).String()
+}
+
+// deltaTier is the recent-changes tier in parts: head its first line, lines
+// its module lines in order, more its "… N more modules" line ("" when every
+// module has a line), tail its get_graph_delta pointer ("" without one).
+// Together they fit deltaTierBudget.
+type deltaTier struct {
+	head  string
+	lines []string
+	more  string
+	tail  string
+}
+
+// String is the tier as one text.
+func (t deltaTier) String() string {
+	return t.head + strings.Join(t.lines, "") + t.more + t.tail
+}
+
+// buildDeltaTier is formatDeltaTier's tier in parts.
+func buildDeltaTier(deltas []graph.Delta, total int, baselineMs int64, pointer bool) deltaTier {
 	if len(deltas) == 0 {
-		return ""
+		return deltaTier{}
 	}
 	type agg struct {
 		added, changed, removed int
@@ -388,15 +416,14 @@ func formatDeltaTier(deltas []graph.Delta, total int, baselineMs int64, pointer 
 	const maxModLines = 5
 	date := time.UnixMilli(baselineMs).Format("Jan 2")
 
-	// compose builds the output string with the given configuration. withNames
+	// compose builds the tier with the given configuration. withNames
 	// controls whether symbol names are appended to the top module's line.
 	// modCap limits how many module lines are emitted.
-	compose := func(withNames bool, modCap int) string {
-		var b strings.Builder
-		fmt.Fprintf(&b, "\nChanged since your last working session here (%s):\n", date)
+	compose := func(withNames bool, modCap int) deltaTier {
+		t := deltaTier{head: fmt.Sprintf("\nChanged since your last working session here (%s):\n", date)}
 		for i, m := range order {
 			if i >= modCap {
-				fmt.Fprintf(&b, "- … %d more modules\n", len(order)-modCap)
+				t.more = fmt.Sprintf("- … %d more modules\n", len(order)-modCap)
 				break
 			}
 			a := mods[m]
@@ -420,12 +447,12 @@ func formatDeltaTier(deltas []graph.Delta, total int, baselineMs int64, pointer 
 					line = strings.Replace(line, ", …)", ")", 1)
 				}
 			}
-			b.WriteString(line + "\n")
+			t.lines = append(t.lines, line+"\n")
 		}
 		if pointer {
-			fmt.Fprintf(&b, "(the recarto MCP tool `get_graph_delta` lists all %d)\n", total)
+			t.tail = fmt.Sprintf("(the recarto MCP tool `get_graph_delta` lists all %d)\n", total)
 		}
-		return b.String()
+		return t
 	}
 
 	// Attempt each degradation stage in order. Names are dropped first, then
@@ -437,17 +464,17 @@ func formatDeltaTier(deltas []graph.Delta, total int, baselineMs int64, pointer 
 		names bool
 		lines int
 	}{{false, maxModLines}, {false, 3}, {false, 1}} {
-		if ledger.EstimateTokens(out) <= deltaTierBudget {
+		if ledger.EstimateTokens(out.String()) <= deltaTierBudget {
 			return out
 		}
 		out = compose(fb.names, fb.lines)
 	}
-	if ledger.EstimateTokens(out) > deltaTierBudget {
+	if ledger.EstimateTokens(out.String()) > deltaTierBudget {
 		// Last resort: orientation header + drill-down pointer only.
-		out = fmt.Sprintf("\nChanged since your last working session here (%s): %d symbols.\n",
-			date, total)
+		out = deltaTier{head: fmt.Sprintf("\nChanged since your last working session here (%s): %d symbols.\n",
+			date, total)}
 		if pointer {
-			out += "(the recarto MCP tool `get_graph_delta` lists them)\n"
+			out.tail = "(the recarto MCP tool `get_graph_delta` lists them)\n"
 		}
 	}
 	return out

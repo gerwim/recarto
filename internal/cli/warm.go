@@ -8,8 +8,10 @@ import (
 	"io"
 	"os"
 	"slices"
+	"sync"
 	"time"
 
+	"github.com/gerwim/recarto/internal/agents"
 	"github.com/gerwim/recarto/internal/app"
 	"github.com/gerwim/recarto/internal/detach"
 	"github.com/gerwim/recarto/internal/graph"
@@ -69,25 +71,50 @@ func warmOnly(ctx context.Context, a *app.App, wt string) error {
 	return fmt.Errorf("warm: %s is not a served worktree", wt)
 }
 
-// runWarm is the `recarto warm [--only=<wt> | --skip=<wt>…]` command.
+// runWarm is the `recarto warm [--only=<wt> | --skip=<wt>… --if-code=<wt>… --session=<id>]` command.
 func runWarm(ctx context.Context, a *app.App, _ io.Writer, args []string) error {
 	fs := flag.NewFlagSet("warm", flag.ContinueOnError)
 	only := fs.String("only", "", "index only this served worktree, without the sweep")
-	var skip []string
+	session := fs.String("session", "", "record this conversation's missing sessions in the repos it serves")
+	var skip, ifCode []string
 	fs.Func("skip", "leave this worktree out (repeatable)", func(s string) error {
 		skip = append(skip, s)
+		return nil
+	})
+	fs.Func("if-code", "index this worktree only while it holds files an index would take in (repeatable)", func(s string) error {
+		ifCode = append(ifCode, s)
 		return nil
 	})
 	if helped, err := parseFlags(fs, args); helped || err != nil {
 		return err
 	}
-	if *only != "" && len(skip) > 0 {
-		return errors.New("warm: --only and --skip cannot be combined")
+	if *only != "" && (len(skip) > 0 || len(ifCode) > 0 || *session != "") {
+		return errors.New("warm: --only cannot be combined with --skip, --if-code or --session")
 	}
 	if *only != "" {
 		return warmOnly(ctx, a, *only)
 	}
-	return Warm(ctx, a, skip)
+	for _, wt := range ifCode {
+		for _, rc := range a.AllRepos() {
+			if rc.Git.Worktree != wt {
+				continue
+			}
+			// A listing that fails proves nothing, so the worktree is then indexed.
+			if code, err := graph.HasCode(ctx, wt, rc.Git.NonGit); err == nil && !code {
+				skip = append(skip, wt)
+			}
+		}
+	}
+	// The sessions are written beside the index: a busy repo is tried again until
+	// its row is written, which must not hold up the index.
+	var sessionErr error
+	var wg sync.WaitGroup
+	if *session != "" {
+		wg.Go(func() { sessionErr = agents.RecordRosterSessions(ctx, a, *session) })
+	}
+	err := Warm(ctx, a, skip)
+	wg.Wait()
+	return errors.Join(err, sessionErr)
 }
 
 // warmLimit bounds one `recarto warm` run.
@@ -106,13 +133,26 @@ func endWarm() {
 	os.Exit(1)
 }
 
-// startWarm starts `recarto warm` in a detached process, leaving out the
-// worktrees in skip. A var so tests can keep a hook from starting the test
-// binary.
-var startWarm = func(skip []string) error {
+// warmRun is what a session start hands its background warm: the worktrees it
+// already made its attempt at, those to index only while they hold code, and
+// the conversation whose missing repo sessions it records.
+type warmRun struct {
+	skip, ifCode []string
+	session      string
+}
+
+// startWarm starts `recarto warm` for w in a detached process. A var so tests
+// can keep a hook from starting the test binary.
+var startWarm = func(w warmRun) error {
 	args := []string{"warm"}
-	for _, wt := range skip {
+	for _, wt := range w.skip {
 		args = append(args, "--skip="+wt)
+	}
+	for _, wt := range w.ifCode {
+		args = append(args, "--if-code="+wt)
+	}
+	if w.session != "" {
+		args = append(args, "--session="+w.session)
 	}
 	return detach.Start(binaryPath(), args...)
 }

@@ -2,6 +2,7 @@ package agents
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	"github.com/gerwim/recarto/internal/app"
@@ -30,6 +31,29 @@ var firstIndexDeadline = func(ctx context.Context) (context.Context, context.Can
 	return context.WithTimeout(ctx, firstIndexWait)
 }
 
+// startWait is a session start's one first-index deadline, created at its
+// first use and shared by every tier and check of that start.
+type startWait struct {
+	parent context.Context
+	once   sync.Once
+	ctx    context.Context
+	cancel context.CancelFunc
+}
+
+// get returns the deadline, starting it on the first call.
+func (w *startWait) get() context.Context {
+	w.once.Do(func() { w.ctx, w.cancel = firstIndexDeadline(w.parent) })
+	return w.ctx
+}
+
+// close ends the deadline if it was started.
+func (w *startWait) close() {
+	w.once.Do(func() {})
+	if w.cancel != nil {
+		w.cancel()
+	}
+}
+
 // codeCheck is graph.HasCode's answer.
 type codeCheck struct {
 	code bool
@@ -39,30 +63,38 @@ type codeCheck struct {
 // mapTier is what a full session-start block shows in the code map's place:
 // the map, one line, or nothing. A nil tier shows nothing.
 type mapTier struct {
-	wt     string
-	nonGit bool
-	arch   graph.Architecture
-	st     graph.MapStatus
-	line   string
+	rc    *app.RepoContext
+	start func(worktree string) (<-chan error, error) // nil: no first-index attempt
+	arch  graph.Architecture
+	st    graph.MapStatus
+	line  string
 
 	check  chan codeCheck  // nil when no check runs
 	wait   context.Context // the deadline of the check and the first-index wait together
-	cancel context.CancelFunc
 	joined bool
 	got    codeCheck
 }
 
-// startMapTier reads the worktree's map and, unless a finished index decides
-// from the stored files on disk, starts the check whether the worktree still
-// holds code. Nil when the map cannot be read.
-func startMapTier(ctx, skip context.Context, a *app.App) *mapTier {
-	wt := a.Git.Worktree
-	arch, st, err := a.Graph.CodeMap(skip, wt, a.Git.NonGit)
+// startMapTier reads rc's map and, unless a finished index decides from the
+// stored files on disk, starts the check whether the worktree still holds code.
+// With wait nil (a repo no longer served) nothing is checked, started or
+// waited for: an unfinished map is decided at once. Nil when the map cannot be
+// read.
+func startMapTier(ctx, skip context.Context, wait *startWait, rc *app.RepoContext,
+	start func(string) (<-chan error, error)) *mapTier {
+	wt := rc.Git.Worktree
+	arch, st, err := rc.Graph.CodeMap(skip, wt, rc.Git.NonGit)
 	if err != nil {
 		return nil
 	}
-	t := &mapTier{wt: wt, nonGit: a.Git.NonGit, arch: arch, st: st}
-	present, listed, err := a.Graph.PresentFiles(ctx, wt, candidateFiles)
+	t := &mapTier{rc: rc, start: start, arch: arch, st: st}
+	if wait == nil {
+		if !st.Done {
+			t.decide(ctx, skip)
+		}
+		return t
+	}
+	present, listed, err := rc.Graph.PresentFiles(ctx, wt, candidateFiles)
 	if err != nil {
 		// Without the stored files the check lists the whole worktree.
 		present, listed = nil, true
@@ -72,21 +104,37 @@ func startMapTier(ctx, skip context.Context, a *app.App) *mapTier {
 	if st.Done && (!listed || len(present) > 0) {
 		return t
 	}
-	dctx, cancel := firstIndexDeadline(ctx)
-	t.check, t.wait, t.cancel = make(chan codeCheck, 1), dctx, cancel
+	dctx := wait.get()
+	t.check, t.wait = make(chan codeCheck, 1), dctx
 	go func() {
 		defer recoverHook()
-		code, err := graph.HasCode(dctx, wt, a.Git.NonGit, present...)
+		code, err := graph.HasCode(dctx, wt, rc.Git.NonGit, present...)
 		t.check <- codeCheck{code, err}
 	}()
 	return t
 }
 
-// close ends the check if it still runs.
-func (t *mapTier) close() {
-	if t != nil && t.cancel != nil {
-		t.cancel()
+// mapTiers reads and settles one tier per repo side by side: each repo's map
+// read, code check, first-index start and wait run in a goroutine of their
+// own under the shared deadline, so no repo waits for another.
+func mapTiers(ctx, skip context.Context, wait *startWait, covered []coveredRepo,
+	start func(string) (<-chan error, error)) []*mapTier {
+	tiers := make([]*mapTier, len(covered))
+	var wg sync.WaitGroup
+	for i, c := range covered {
+		w, s := wait, start
+		if !c.served {
+			w, s = nil, nil
+		}
+		wg.Go(func() {
+			defer recoverHook()
+			t := startMapTier(ctx, skip, w, c.RepoContext, s)
+			t.settle(ctx, skip)
+			tiers[i] = t
+		})
 	}
+	wg.Wait()
+	return tiers
 }
 
 // join waits for the check's answer.
@@ -106,7 +154,7 @@ func (t *mapTier) empty() bool {
 
 // settle decides an unfinished index's tier, waiting for a worktree's first
 // index within the check's deadline. A finished index's tier is decided in result.
-func (t *mapTier) settle(ctx, skip context.Context, a *app.App) {
+func (t *mapTier) settle(ctx, skip context.Context) {
 	if t == nil || t.check == nil || t.st.Done {
 		return
 	}
@@ -115,22 +163,23 @@ func (t *mapTier) settle(ctx, skip context.Context, a *app.App) {
 		return
 	}
 	if !t.st.Built {
-		awaitFirstIndex(t.wait, a, t.wt)
+		awaitFirstIndex(t.wait, t.start, t.rc.Graph, t.rc.Git.Worktree)
 	}
-	t.decide(ctx, skip, a)
+	t.decide(ctx, skip)
 }
 
 // decide turns the index lock and the stored graph into the tier.
-func (t *mapTier) decide(ctx, skip context.Context, a *app.App) {
+func (t *mapTier) decide(ctx, skip context.Context) {
+	wt := t.rc.Git.Worktree
 	// The block says an index runs only when it has seen one; a probe that fails
 	// sees none.
-	running, err := a.Graph.IndexRunning(t.wt)
+	running, err := t.rc.Graph.IndexRunning(wt)
 	if err != nil {
 		running = false
 	}
 	// The probe comes before the read, so an index that ends between the two is
 	// judged by its result.
-	arch, st, err := a.Graph.CodeMap(skip, t.wt, t.nonGit)
+	arch, st, err := t.rc.Graph.CodeMap(skip, wt, t.rc.Git.NonGit)
 	if err != nil {
 		t.arch, t.line = graph.Architecture{}, ""
 		return
@@ -149,11 +198,11 @@ func (t *mapTier) decide(ctx, skip context.Context, a *app.App) {
 // recheck decides a tier that says an index is running again, and reports
 // whether the tier changed. The block's conversation writes can wait for the
 // writer of an index that then finishes.
-func (t *mapTier) recheck(ctx, skip context.Context, a *app.App) bool {
+func (t *mapTier) recheck(ctx, skip context.Context) bool {
 	if t == nil || t.line != indexingLine {
 		return false
 	}
-	t.decide(ctx, skip, a)
+	t.decide(ctx, skip)
 	return t.line != indexingLine
 }
 
@@ -173,11 +222,11 @@ func (t *mapTier) result() (graph.Architecture, string) {
 // awaitFirstIndex starts the worktree's first index in another process, or
 // joins the one already running, and waits until no index of it runs or ctx
 // ends.
-func awaitFirstIndex(ctx context.Context, a *app.App, wt string) {
-	if a.StartIndex != nil {
+func awaitFirstIndex(ctx context.Context, start func(string) (<-chan error, error), g *graph.Engine, wt string) {
+	if start != nil {
 		// A process that cannot start leaves the wait to the probe below: another
 		// process may still be indexing the worktree.
-		if done, err := a.StartIndex(wt); err == nil {
+		if done, err := start(wt); err == nil {
 			select {
 			case err := <-done:
 				// decide reads the outcome from the index lock and the stored graph.
@@ -188,7 +237,7 @@ func awaitFirstIndex(ctx context.Context, a *app.App, wt string) {
 		}
 	}
 	for {
-		running, err := a.Graph.IndexRunning(wt)
+		running, err := g.IndexRunning(wt)
 		// A failed probe ends the wait; decide probes again.
 		if err != nil || !running {
 			return

@@ -2,7 +2,6 @@ package mcp
 
 import (
 	"fmt"
-	"path/filepath"
 	"strings"
 
 	"github.com/gerwim/recarto/internal/app"
@@ -19,9 +18,7 @@ func repoTarget(a *app.App, repo string) (*app.RepoContext, error) {
 		return all[0], nil
 	}
 	for _, rc := range all {
-		if strings.EqualFold(rc.Git.RepoName, repo) ||
-			strings.EqualFold(filepath.Base(rc.Git.Worktree), repo) ||
-			strings.EqualFold(filepath.Clean(rc.Git.Worktree), filepath.Clean(repo)) {
+		if rc.AnswersTo(repo) {
 			return rc, nil
 		}
 	}

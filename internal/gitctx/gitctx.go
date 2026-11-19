@@ -59,14 +59,19 @@ func repoIDFromCommonDir(commonDir string) string {
 	return hex.EncodeToString(sum[:])[:16]
 }
 
+// NonGitID is the repo id of dir outside git: the key of the store a session
+// in dir uses while dir is not inside a git repository.
+func NonGitID(dir string) string {
+	sum := sha256.Sum256([]byte(filepath.Clean(dir)))
+	return hex.EncodeToString(sum[:])[:16]
+}
+
 // Resolve derives the identity for cwd using the given Runner.
 func Resolve(r Runner, cwd string) (Context, error) {
 	commonDir, err := r.Run("rev-parse", "--path-format=absolute", "--git-common-dir")
 	if err != nil || commonDir == "" {
-		// Non-git fallback: hash the absolute cwd.
-		sum := sha256.Sum256([]byte(filepath.Clean(cwd)))
 		return Context{
-			RepoID:   hex.EncodeToString(sum[:])[:16],
+			RepoID:   NonGitID(cwd),
 			RepoName: filepath.Base(cwd),
 			Branch:   "(none)",
 			Worktree: cwd,

@@ -43,7 +43,7 @@ func TestWriteDeadlineSkipsABusyWriter(t *testing.T) {
 			return err
 		})
 	}
-	if err := insert(WithWriteDeadline(ctx, time.Now()), "skipped"); !isBusy(err) {
+	if err := insert(WithWriteDeadline(ctx, time.Now()), "skipped"); !IsBusy(err) {
 		t.Fatalf("writer held, deadline passed: want the busy error, got %v", err)
 	}
 

@@ -7,8 +7,13 @@ package app
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/gerwim/recarto/internal/cache"
@@ -64,6 +69,8 @@ type RepoContext struct {
 type App struct {
 	Git    gitctx.Context
 	Runner gitctx.Runner // the git runner identity was resolved with (worktree GC reuses it)
+	// Dir is the directory the App was opened in (Config.CWD or the working directory).
+	Dir    string
 	Store  *store.Store
 	Ledger *ledger.Ledger
 	Engine *memory.Engine
@@ -100,6 +107,79 @@ type App struct {
 	// for a worktree's first index; nil means it only waits for an index another
 	// process runs.
 	StartIndex func(worktree string) (<-chan error, error)
+	// IndexIfCode, when set, takes a worktree the session start's background
+	// index takes in only while it holds files an index would take in: a folder
+	// that served repos to a conversation started there without code.
+	IndexIfCode func(worktree string)
+}
+
+// AnswersTo reports whether the repo argument v names rc: its name or its
+// worktree folder's name, ignoring case, or its worktree path.
+func (rc *RepoContext) AnswersTo(v string) bool {
+	return strings.EqualFold(rc.Git.RepoName, v) ||
+		strings.EqualFold(filepath.Base(rc.Git.Worktree), v) ||
+		strings.EqualFold(filepath.Clean(rc.Git.Worktree), filepath.Clean(v))
+}
+
+// Close releases rc's graph engine and store.
+func (rc *RepoContext) Close() error {
+	if rc.Graph != nil {
+		rc.Graph.Close()
+	}
+	return rc.Store.Close()
+}
+
+// Selector returns the repo argument value that resolves to rc alone, as
+// repoTarget resolves it: rc's name, unless another of a's repos — the
+// session's own folder included — answers to that name; else rc's worktree
+// path, when the first of a's repos answering to it is rc. ok is false when
+// no value reaches rc: another served repo's path differs from rc's only in
+// letter case and comes first.
+func (a *App) Selector(rc *RepoContext) (sel string, ok bool) {
+	all := a.AllRepos()
+	if !slices.ContainsFunc(all, func(o *RepoContext) bool {
+		return o.Git.Worktree != rc.Git.Worktree && o.AnswersTo(rc.Git.RepoName)
+	}) {
+		return rc.Git.RepoName, true
+	}
+	for _, o := range all {
+		if o.AnswersTo(rc.Git.Worktree) {
+			if o.Git.Worktree == rc.Git.Worktree {
+				return rc.Git.Worktree, true
+			}
+			break
+		}
+	}
+	return "", false
+}
+
+// OpenRepo opens the repo whose worktree is dir, as RECARTO_REPOS would serve
+// it, for a caller that closes it. It fails when dir is not, or no longer, the
+// top of a git checkout.
+func OpenRepo(dir string, clk clock.Clock) (*RepoContext, error) {
+	gc, err := resolveReal(dir)
+	if err != nil {
+		return nil, err
+	}
+	if gc.NonGit || gc.Worktree != filepath.Clean(dir) {
+		return nil, fmt.Errorf("%s is not the top of a git checkout", dir)
+	}
+	return openRepo(gc, clk)
+}
+
+// FolderStore opens the store a session in dir used while dir was outside git,
+// for a caller that closes it; nil when there is none.
+func FolderStore(dir string) (*store.Store, error) {
+	path, err := cache.StorePath(gitctx.NonGitID(dir))
+	if err != nil {
+		return nil, err
+	}
+	if _, err := os.Stat(path); errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	} else if err != nil {
+		return nil, err
+	}
+	return store.Open(path)
 }
 
 // SignalSync requests an out-of-band sync cycle from a long-lived process's
@@ -124,7 +204,7 @@ func Open(cfg Config) (*App, error) { return OpenContext(context.Background(), c
 // (cfg.QuickCheck): cancelling it interrupts a running check, and the open
 // fails with that error.
 func OpenContext(ctx context.Context, cfg Config) (*App, error) {
-	runner, gc, err := resolvePrimary(cfg)
+	runner, gc, dir, err := resolvePrimary(cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -160,7 +240,7 @@ func OpenContext(ctx context.Context, cfg Config) (*App, error) {
 	}
 
 	a := &App{
-		Git: gc, Runner: runner, Store: st, Ledger: led, Engine: eng, Graph: gr, Clock: clk,
+		Git: gc, Runner: runner, Dir: dir, Store: st, Ledger: led, Engine: eng, Graph: gr, Clock: clk,
 		Sync: syncer, Workspace: ws, Repos: openRepos(gc.RepoID, clk, storeOpts...), SyncTrigger: make(chan struct{}, 1),
 		Features: features.Load(),
 	}
@@ -172,22 +252,22 @@ func OpenContext(ctx context.Context, cfg Config) (*App, error) {
 }
 
 // resolvePrimary resolves the identity of cfg's working directory, returning the
-// git runner it used.
-func resolvePrimary(cfg Config) (gitctx.Runner, gitctx.Context, error) {
+// git runner it used and the directory it resolved.
+func resolvePrimary(cfg Config) (gitctx.Runner, gitctx.Context, string, error) {
 	cwd := cfg.CWD
 	if cwd == "" {
 		wd, err := os.Getwd()
 		if err != nil {
-			return nil, gitctx.Context{}, err
+			return nil, gitctx.Context{}, "", err
 		}
 		cwd = wd
 	}
 	if cfg.Runner != nil {
 		gc, err := gitctx.Resolve(cfg.Runner, cwd)
-		return cfg.Runner, gc, err
+		return cfg.Runner, gc, cwd, err
 	}
 	gc, err := resolveReal(cwd)
-	return gitctx.Real{Dir: cwd}, gc, err
+	return gitctx.Real{Dir: cwd}, gc, cwd, err
 }
 
 // Worktrees returns the worktree roots an App opened with cfg would serve —
@@ -196,7 +276,7 @@ func resolvePrimary(cfg Config) (gitctx.Runner, gitctx.Context, error) {
 // repo before paying for one. It may list a repo Open then fails to open,
 // never miss one.
 func Worktrees(cfg Config) ([]string, error) {
-	_, gc, err := resolvePrimary(cfg)
+	_, gc, _, err := resolvePrimary(cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -238,7 +318,7 @@ func (a *App) Served() Served {
 // tools before its stores open. It differs from the opened App only when an
 // extra repo's store then fails to open.
 func Describe(cfg Config) (Served, error) {
-	_, gc, err := resolvePrimary(cfg)
+	_, gc, _, err := resolvePrimary(cfg)
 	if err != nil {
 		return Served{}, err
 	}
@@ -282,10 +362,7 @@ func (a *App) Close() error {
 		_ = a.Workspace.Close()
 	}
 	for _, rc := range a.Repos {
-		if rc.Graph != nil {
-			rc.Graph.Close()
-		}
-		_ = rc.Store.Close()
+		_ = rc.Close()
 	}
 	return a.Store.Close()
 }
@@ -378,26 +455,33 @@ func extraRepos(primaryID string) []gitctx.Context {
 func openRepos(primaryID string, clk clock.Clock, storeOpts ...store.Option) []*RepoContext {
 	var out []*RepoContext
 	for _, gc := range extraRepos(primaryID) {
-		path, err := cache.StorePath(gc.RepoID)
-		if err != nil {
-			continue
+		if rc, err := openRepo(gc, clk, storeOpts...); err == nil {
+			out = append(out, rc)
 		}
-		st, err := store.Open(path, storeOpts...)
-		if err != nil {
-			continue
-		}
-		led := ledger.New(st)
-		eng := memory.New(st, led, clk)
-		gr, err := graph.New(st, led, clk)
-		if err != nil {
-			_ = st.Close()
-			continue
-		}
-		eng.SetRefResolver(graphRefResolver{st: st})
-		syncer, _ := remotesync.New(remotesync.ConfigFromEnv(), gc, eng, st)
-		out = append(out, &RepoContext{Git: gc, Store: st, Ledger: led, Engine: eng, Graph: gr, Sync: syncer})
 	}
 	return out
+}
+
+// openRepo opens gc's store, engine and graph into a repo context.
+func openRepo(gc gitctx.Context, clk clock.Clock, storeOpts ...store.Option) (*RepoContext, error) {
+	path, err := cache.StorePath(gc.RepoID)
+	if err != nil {
+		return nil, err
+	}
+	st, err := store.Open(path, storeOpts...)
+	if err != nil {
+		return nil, err
+	}
+	led := ledger.New(st)
+	eng := memory.New(st, led, clk)
+	gr, err := graph.New(st, led, clk)
+	if err != nil {
+		_ = st.Close()
+		return nil, err
+	}
+	eng.SetRefResolver(graphRefResolver{st: st})
+	syncer, _ := remotesync.New(remotesync.ConfigFromEnv(), gc, eng, st)
+	return &RepoContext{Git: gc, Store: st, Ledger: led, Engine: eng, Graph: gr, Sync: syncer}, nil
 }
 
 // writeMeta upserts repo identity metadata. It is idempotent and safe under

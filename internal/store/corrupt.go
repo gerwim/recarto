@@ -30,7 +30,7 @@ var corruptMessages = []string{
 
 // IsCorrupt reports whether err indicates SQLite-level database corruption —
 // the class of error that repair (not retry) addresses. It is the corruption
-// analogue of isBusy: isBusy says "wait and try again", IsCorrupt says "the
+// analogue of IsBusy: IsBusy says "wait and try again", IsCorrupt says "the
 // bytes on disk are damaged; rebuild the file".
 //
 // Classification prefers the driver's structured result code (modernc's
