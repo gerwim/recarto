@@ -500,7 +500,7 @@ func (s *Store) writeTx(ctx context.Context, fn func(c Conn) error, bulk bool) e
 		if IsCorrupt(err) {
 			return corruptGuidance(err)
 		}
-		if err == nil || !isBusy(err) || attempt >= maxWriteRetries {
+		if err == nil || !IsBusy(err) || attempt >= maxWriteRetries {
 			return err
 		}
 		wait := busyBackoff(attempt)
@@ -684,9 +684,9 @@ func corruptGuidance(err error) error {
 		"a new session repairs it automatically on open", err)
 }
 
-// isBusy reports whether err is a transient SQLite lock contention error, the
+// IsBusy reports whether err is a transient SQLite lock contention error, the
 // only class of WriteTx failure that is safe to retry.
-func isBusy(err error) bool {
+func IsBusy(err error) bool {
 	if err == nil {
 		return false
 	}

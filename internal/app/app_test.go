@@ -109,7 +109,7 @@ func TestOpenContextInterruptsTheQuickCheck(t *testing.T) {
 		Clock:      clock.NewFake(time.UnixMilli(1_700_000_000_000)),
 		QuickCheck: true,
 	}
-	_, gc, err := resolvePrimary(cfg)
+	_, gc, _, err := resolvePrimary(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}

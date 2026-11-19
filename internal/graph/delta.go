@@ -252,9 +252,22 @@ func (e *Engine) DeltasSince(ctx context.Context, worktree string, sinceMs int64
 // both MCP and the session-start hook ask this exact question — one home in the
 // engine beats two copies of cross-table SQL.
 func (e *Engine) DeltaBaseline(ctx context.Context, worktree string, nowMs int64) (int64, bool, error) {
+	return e.DeltaBaselineWith(ctx, worktree, "", 0, nowMs)
+}
+
+// DeltaBaselineWith is DeltaBaseline with session id, started at startedAt,
+// counted in worktree while its row is not written yet: as a session with no
+// end, both when the latest start is taken and among the earlier sessions a
+// baseline is chosen from. An empty id counts only the rows written.
+func (e *Engine) DeltaBaselineWith(ctx context.Context, worktree, id string, startedAt, nowMs int64) (int64, bool, error) {
+	// s is the worktree's sessions plus the pending one, which counts only while
+	// no row of that id exists.
+	const s = `(SELECT started_at, ended_at FROM sessions WHERE worktree = ?1
+	  UNION ALL
+	  SELECT ?2, NULL WHERE ?3 <> '' AND NOT EXISTS (SELECT 1 FROM sessions WHERE id = ?3))`
 	var latest int64
 	err := e.st.DB.QueryRowContext(ctx,
-		`SELECT COALESCE(MAX(started_at), 0) FROM sessions WHERE worktree = ?`, worktree).Scan(&latest)
+		`SELECT COALESCE(MAX(started_at), 0) FROM `+s, worktree, startedAt, id).Scan(&latest)
 	if err != nil {
 		return 0, false, err
 	}
@@ -263,12 +276,12 @@ func (e *Engine) DeltaBaseline(ctx context.Context, worktree string, nowMs int64
 	}
 	var baseline int64
 	err = e.st.DB.QueryRowContext(ctx, `
-SELECT s.started_at FROM sessions s
- WHERE s.worktree = ? AND s.started_at < ?
+SELECT s.started_at FROM `+s+` s
+ WHERE s.started_at < ?4
    AND EXISTS (SELECT 1 FROM graph_deltas d
-                WHERE d.worktree = s.worktree
-                  AND d.at >= s.started_at AND d.at <= COALESCE(s.ended_at, ?))
- ORDER BY s.started_at DESC LIMIT 1`, worktree, latest, nowMs).Scan(&baseline)
+                WHERE d.worktree = ?1
+                  AND d.at >= s.started_at AND d.at <= COALESCE(s.ended_at, ?5))
+ ORDER BY s.started_at DESC LIMIT 1`, worktree, startedAt, id, latest, nowMs).Scan(&baseline)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, false, nil
 	}

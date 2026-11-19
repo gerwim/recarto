@@ -18,3 +18,17 @@ func TestEstimateTokens(t *testing.T) {
 		}
 	}
 }
+
+func TestEstimateTokensCeilBoundsTheWhole(t *testing.T) {
+	whole := "- [learning, recarto] a title\n  a body of some length\n  caveat\n"
+	for _, cut := range [][]int{{1}, {7, 20}, {3, 9, 30, 41}} {
+		sum, from := 0, 0
+		for _, c := range append(cut, len(whole)) {
+			sum += EstimateTokensCeil(whole[from:c])
+			from = c
+		}
+		if sum < EstimateTokens(whole) {
+			t.Errorf("cut at %v: parts cost %d, whole %d", cut, sum, EstimateTokens(whole))
+		}
+	}
+}

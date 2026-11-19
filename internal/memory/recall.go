@@ -119,6 +119,56 @@ type RecallResultSet struct {
 // Recall combines FTS5 BM25 and semantic ranks with structural references,
 // applying a calibrated relevance floor before adding pins and baseline seeds.
 func (e *Engine) Recall(ctx context.Context, q RecallQuery) (RecallResultSet, error) {
+	scored, limit, err := e.scored(ctx, q)
+	if err != nil {
+		return RecallResultSet{}, err
+	}
+	budget := q.TokenBudget
+	if budget <= 0 {
+		budget = defaultTokenBudget
+	}
+	out, used, truncated := selectWithinBudget(scored, budget, limit)
+	if len(out) == 0 {
+		// A recall that surfaces nothing above threshold — whether no candidates
+		// matched or the budget excluded them all — is a miss. This counter is the
+		// evidence that justifies (or not) the deferred embeddings path (§9.2/§10).
+		_ = e.led.Incr(ctx, "lifetime", "recall_misses", 1)
+		return RecallResultSet{}, nil
+	}
+	e.NoteRecalled(ctx, out)
+	return RecallResultSet{Results: out, TokensUsed: used, Truncated: truncated}, nil
+}
+
+// Ranked returns q's candidates in recall order — pinned do_not_repeat by
+// score, then the rest by score, at most q.Limit of them (0 → default) — with
+// Recall's scores and dangling refs, but without its token-budget selection,
+// its usage stamps or its counters.
+func (e *Engine) Ranked(ctx context.Context, q RecallQuery) ([]RecallResult, error) {
+	scored, limit, err := e.scored(ctx, q)
+	if err != nil {
+		return nil, err
+	}
+	out, _, _ := selectWithinBudget(scored, math.MaxInt, limit)
+	return out, nil
+}
+
+// NoteRecalled counts rs as recalled and stamps them as used, as Recall does
+// for the set it returns.
+func (e *Engine) NoteRecalled(ctx context.Context, rs []RecallResult) {
+	used := 0
+	for _, r := range rs {
+		used += ledger.EstimateTokens(r.Record.Title + " " + r.Record.Body)
+	}
+	_ = e.led.Incr(ctx, "lifetime", "memories_recalled", int64(len(rs)))
+	_ = e.led.Incr(ctx, "lifetime", "recall_tokens_injected", int64(used))
+	// Stamp recall usage so decay can measure "epochs since last used"
+	// (Phase 3 compaction). Best-effort — must not fail the recall.
+	_ = e.stampRecalled(ctx, rs)
+}
+
+// scored returns q's scored candidates, unsorted, and the cap on returned
+// results that are not pins.
+func (e *Engine) scored(ctx context.Context, q RecallQuery) ([]RecallResult, int, error) {
 	limit := q.Limit
 	if limit <= 0 {
 		limit = defaultLimit
@@ -131,7 +181,7 @@ func (e *Engine) Recall(ctx context.Context, q RecallQuery) (RecallResultSet, er
 	text := lexicalQueryText(q)
 	lex, err := e.lex.Search(ctx, text, candidateN)
 	if err != nil {
-		return RecallResultSet{}, err
+		return nil, 0, err
 	}
 	lexRank := make(map[string]float64, len(lex))
 	textCandidates := make([]string, 0, len(lex)+candidateN)
@@ -155,7 +205,7 @@ func (e *Engine) Recall(ctx context.Context, q RecallQuery) (RecallResultSet, er
 
 	refScore, err := e.structuralScores(ctx, q)
 	if err != nil {
-		return RecallResultSet{}, err
+		return nil, 0, err
 	}
 
 	terms := queryTerms(text)
@@ -176,7 +226,7 @@ func (e *Engine) Recall(ctx context.Context, q RecallQuery) (RecallResultSet, er
 	if related {
 		pinned, err := e.pinnedIDs(ctx, q.Branch)
 		if err != nil {
-			return RecallResultSet{}, err
+			return nil, 0, err
 		}
 		for _, id := range pinned {
 			idset[id] = true
@@ -186,7 +236,7 @@ func (e *Engine) Recall(ctx context.Context, q RecallQuery) (RecallResultSet, er
 	if q.Baseline && related {
 		base, err := e.baselineIDs(ctx, q.Branch, candidateN)
 		if err != nil {
-			return RecallResultSet{}, err
+			return nil, 0, err
 		}
 		for _, id := range base {
 			idset[id] = true
@@ -195,7 +245,7 @@ func (e *Engine) Recall(ctx context.Context, q RecallQuery) (RecallResultSet, er
 
 	recs, err := e.loadByIDs(ctx, idset)
 	if err != nil {
-		return RecallResultSet{}, err
+		return nil, 0, err
 	}
 
 	now := e.clk.Now().UnixMilli()
@@ -212,38 +262,7 @@ func (e *Engine) Recall(ctx context.Context, q RecallQuery) (RecallResultSet, er
 		if q.Kind != "" && r.Kind != q.Kind {
 			continue
 		}
-		arms := 1.0
-		if sem != nil {
-			arms = 2
-		}
-		lexical := lexRank[r.ID]
-		semantic := semRank[r.ID]
-		sig := map[string]float64{
-			"lexical":       lexical,
-			"structural":    refScore[r.ID],
-			"recency":       math.Exp(-float64(now-r.UpdatedAt) / recencyHalfLifeMs),
-			"reinforcement": math.Min(1, math.Log1p(float64(r.ReinforcementCount))/math.Log(11)),
-			"branch":        0,
-		}
-		if sem != nil {
-			sig["semantic"] = semantic
-		}
-		if r.Branch == "" || r.Branch == q.Branch {
-			sig["branch"] = 1
-		}
-		score := (wStructural*sig["structural"] + wRelevance*(lexical+semantic)/arms +
-			wRecency*sig["recency"] + wReinforcement*sig["reinforcement"] +
-			wBranch*sig["branch"]) * r.Confidence
-
-		var dangling []Ref
-		if d, derr := e.Dangling(ctx, q.Worktree, r); derr == nil && len(d) > 0 {
-			dangling = d
-			privileged := r.Pinned || r.Kind == KindBug
-			if len(d) == len(codeRefsOf(r.Refs)) && !privileged {
-				score *= danglingDemotion
-			}
-		}
-		scored = append(scored, RecallResult{Record: r, Score: score, Signals: sig, DanglingRefs: dangling})
+		scored = append(scored, e.scoreRecord(ctx, q, r, now, lexRank[r.ID], semRank[r.ID], refScore[r.ID], sem != nil))
 	}
 
 	if q.MinScore > 0 {
@@ -256,24 +275,43 @@ func (e *Engine) Recall(ctx context.Context, q RecallQuery) (RecallResultSet, er
 		scored = kept
 	}
 
-	budget := q.TokenBudget
-	if budget <= 0 {
-		budget = defaultTokenBudget
+	return scored, limit, nil
+}
+
+// scoreRecord scores one candidate from its arms' ranks and structural score,
+// demoting it when every code ref it holds is missing from q's worktree.
+func (e *Engine) scoreRecord(ctx context.Context, q RecallQuery, r *Record, now int64,
+	lexical, semantic, structural float64, hasSem bool) RecallResult {
+	arms := 1.0
+	if hasSem {
+		arms = 2
 	}
-	out, used, truncated := selectWithinBudget(scored, budget, limit)
-	if len(out) == 0 {
-		// A recall that surfaces nothing above threshold — whether no candidates
-		// matched or the budget excluded them all — is a miss. This counter is the
-		// evidence that justifies (or not) the deferred embeddings path (§9.2/§10).
-		_ = e.led.Incr(ctx, "lifetime", "recall_misses", 1)
-		return RecallResultSet{}, nil
+	sig := map[string]float64{
+		"lexical":       lexical,
+		"structural":    structural,
+		"recency":       math.Exp(-float64(now-r.UpdatedAt) / recencyHalfLifeMs),
+		"reinforcement": math.Min(1, math.Log1p(float64(r.ReinforcementCount))/math.Log(11)),
+		"branch":        0,
 	}
-	_ = e.led.Incr(ctx, "lifetime", "memories_recalled", int64(len(out)))
-	_ = e.led.Incr(ctx, "lifetime", "recall_tokens_injected", int64(used))
-	// Stamp recall usage so decay can measure "epochs since last used"
-	// (Phase 3 compaction). Best-effort — must not fail the recall.
-	_ = e.stampRecalled(ctx, out)
-	return RecallResultSet{Results: out, TokensUsed: used, Truncated: truncated}, nil
+	if hasSem {
+		sig["semantic"] = semantic
+	}
+	if r.Branch == "" || r.Branch == q.Branch {
+		sig["branch"] = 1
+	}
+	score := (wStructural*sig["structural"] + wRelevance*(lexical+semantic)/arms +
+		wRecency*sig["recency"] + wReinforcement*sig["reinforcement"] +
+		wBranch*sig["branch"]) * r.Confidence
+
+	var dangling []Ref
+	if d, derr := e.Dangling(ctx, q.Worktree, r); derr == nil && len(d) > 0 {
+		dangling = d
+		privileged := r.Pinned || r.Kind == KindBug
+		if len(d) == len(codeRefsOf(r.Refs)) && !privileged {
+			score *= danglingDemotion
+		}
+	}
+	return RecallResult{Record: r, Score: score, Signals: sig, DanglingRefs: dangling}
 }
 
 // selectWithinBudget assembles the returned set: pinned do_not_repeat first under

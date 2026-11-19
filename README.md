@@ -313,6 +313,8 @@ Every session start syncs memories, imports the team snapshot and compacts memor
 
 The block's memories are ranked against the graph as it stands when the wait ends. After writing its block, session start starts `recarto warm` in the background. It brings the code graph of this worktree and the `RECARTO_REPOS` repos up to date and drops the graph of dead and unused worktrees. It leaves out a worktree the session start already made its attempt at, so a session start makes one index attempt per worktree. The hook does not wait for it. While another process writes to the store, session start does not wait to sync, import the snapshot, compact or update statistics; the next session start does. A `resume` of a conversation Recarto knows never waits. Changes made outside a session (a pull, a branch switch) show under recent changes from the next session start. OpenCode's plugin runs session start once per session.
 
+In a folder outside git that holds no code, while `RECARTO_REPOS` serves repos, the block shows those repos instead of the folder; see [Session start in a folder without code](#session-start-in-a-folder-without-code). There the first-index wait is one shared 2-second wait for all served repos, and a repo whose index is still running or failed gets its line, naming it.
+
 ## Tool pointers
 
 Hooks name each tool they point at as a recarto MCP tool. They point at a tool only while a `recarto serve` runs on this machine for the repo: started in any of its worktrees, or serving the repo through `RECARTO_REPOS`. Without one, hints and notes keep their symbols, bugs and notes and leave out the pointer, and the large-file, shell-search and Stop nudges and the Stop reminder are skipped and not counted as given. A server that exits or crashes stops counting once its process has ended.
@@ -588,6 +590,22 @@ repo-less session reads and writes exactly the memories the cd'd sessions see:
 Missing paths, non-git directories and duplicates are skipped silently — an
 incomplete list never fails the session. Pair with `RECARTO_WORKSPACE` (§ above)
 for the cross-repo store that belongs to no single repo.
+
+### Session start in a folder without code
+
+When a conversation starts in a folder outside git that holds no file Recarto indexes, and `RECARTO_REPOS` serves at least one repo, its session-start block shows the served repos:
+
+- The choice is made at the conversation's first session start and kept, with the repos then served in their order, for the whole conversation. A new conversation decides again.
+- **One repo:** the block a session started in that repo shows, plus the line naming it.
+- **Several repos:** a line per repo with its name and file and symbol counts, or its still-being-indexed or not-built-yet line; then each repo's code map, recent bugs, recent changes and memories, labelled with the repo.
+  - Each repo's and the workspace's top pinned do-not-repeat, and the per-repo lines, always show.
+  - The workspace takes at most a third of `RECARTO_SESSION_BUDGET`. The rest, including what the workspace leaves unused, is split equally between the repos. What all repos leave unused goes into one pool, which is offered once to each repo in turn, starting with the first; a repo can use it for items its own share could not hold. Tokens no repo can use stay unused. The block's header and closing lines use what is left.
+  - A memory held by several served stores shows once.
+- **`resume`** shows only memories the conversation has not been shown, labelled with their repo, and never waits.
+- **Names:** a repo is named by its name, or by its worktree path when another served repo or the folder has the same name. That value works as `repo`, and the block lists these values. When two served repos' paths differ only in letter case, the later one has no such value, and its label says the repo argument cannot select it.
+- A repo `RECARTO_REPOS` no longer serves still shows in that conversation, named by its path and marked as no longer served; it is not indexed. A checkout that cannot be opened is left out; when none can be, the block says so and shows the workspace tier.
+- The conversation counts as a session in each of its repos, so their recent changes, in the block, in a session started in the repo and in `get_graph_delta`, include changes made from the folder.
+- The folder's own memories are not shown; `recall_memory` and `list_memory` still find them. The folder is not indexed while it holds no code.
 
 ## Sharing memory across machines (HTTP sync)
 

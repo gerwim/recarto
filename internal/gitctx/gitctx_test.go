@@ -117,6 +117,9 @@ func TestResolveNonGit(t *testing.T) {
 	if len(ctx.RepoID) != 16 {
 		t.Fatalf("repo id len = %d, want 16", len(ctx.RepoID))
 	}
+	if ctx.RepoID != NonGitID("/tmp/scratch/") {
+		t.Fatalf("repo id %s, want NonGitID's %s", ctx.RepoID, NonGitID("/tmp/scratch/"))
+	}
 }
 
 func mergeMap(a, b map[string]string) map[string]string {

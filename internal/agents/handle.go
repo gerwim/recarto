@@ -2,12 +2,14 @@ package agents
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gerwim/recarto/internal/app"
@@ -23,6 +25,14 @@ import (
 // neutral result. It is exit-0 advisory: callers treat any returned error as
 // non-blocking. RunHook always encodes the (possibly partial) Result first.
 func Handle(ctx context.Context, a *app.App, ev Event) (Result, error) {
+	if ev.SessionID != "" {
+		ca, done, err := conversationApp(ctx, a, ev.SessionID)
+		if err != nil {
+			return Result{}, err
+		}
+		defer done()
+		a = ca
+	}
 	// Every hook that reaches the store counts as use of its worktree; NoteUsed
 	// writes only an hour-old mark, so a hook that otherwise reads takes no write
 	// lock. A lost mark only lets the sweep drop this graph sooner; the next use
@@ -220,12 +230,17 @@ func toolFeatures(a *app.App) features.Set {
 	if app.ServerRunning(a.Git.RepoID) {
 		return a.Features
 	}
-	f := features.Set{}
-	maps.Copy(f, a.Features)
-	f[features.MemoryTools] = false
-	f[features.GraphTools] = false
-	f[features.IssueReports] = false
-	return f
+	return withoutTools(a.Features)
+}
+
+// withoutTools returns f with the features that point at MCP tools off.
+func withoutTools(f features.Set) features.Set {
+	out := features.Set{}
+	maps.Copy(out, f)
+	out[features.MemoryTools] = false
+	out[features.GraphTools] = false
+	out[features.IssueReports] = false
+	return out
 }
 
 // conversation returns the ledger scope of what ev's conversation was shown:
@@ -256,26 +271,11 @@ func conversation(ev Event) string {
 func handleSessionStart(ctx context.Context, a *app.App, ev Event) (Result, error) {
 	now := a.Clock.Now().UnixMilli()
 	skip := store.WithWriteDeadline(ctx, time.Now().Add(writeGrace))
-	if ev.SessionID != "" {
-		// Read first: a known conversation needs no write, so its resume never
-		// waits for another process's writer.
-		var known bool
-		if err := a.Store.DB.QueryRowContext(ctx,
-			`SELECT EXISTS(SELECT 1 FROM sessions WHERE id=?)`, ev.SessionID).Scan(&known); err != nil {
-			return Result{}, err
-		}
-		if !known {
-			if err := a.Store.WriteTx(ctx, func(c store.Conn) error {
-				_, err := c.ExecContext(ctx,
-					`INSERT INTO sessions(id, agent, branch, worktree, started_at)
-					 VALUES (?, ?, ?, ?, ?)
-					 ON CONFLICT(id) DO NOTHING`,
-					ev.SessionID, agentOrDefault(ev.Agent), nullable(a.Git.Branch), a.Git.Worktree, now)
-				return err
-			}); err != nil {
-				return Result{}, err
-			}
-		}
+	wait := &startWait{parent: ctx}
+	defer wait.close()
+	conv, err := startConversation(ctx, a, ev, now, wait)
+	if err != nil {
+		return Result{}, err
 	}
 	_ = a.Ledger.Incr(skip, "lifetime", "sessions", 1)
 	scope := conversation(ev)
@@ -285,18 +285,83 @@ func handleSessionStart(ctx context.Context, a *app.App, ev Event) (Result, erro
 	if err != nil {
 		return Result{}, err
 	}
+	if conv.roster == nil {
+		var names []string
+		for _, rc := range a.Repos {
+			names = append(names, rc.Git.RepoName)
+		}
+		return repoBlock(ctx, skip, a, now, scope, resumed, wait, subject{
+			rc: a.AllRepos()[0], served: true, tools: true, header: memoryHeader, reposLine: alsoServing(names)})
+	}
+	// A later start of a known conversation resumes it, whether or not its first
+	// block was delivered.
+	resumed = ev.Source == "resume" && !conv.first
+	if a.IndexIfCode != nil {
+		// The background index checks the folder as it then is, so no hook lists it.
+		a.IndexIfCode(a.Git.Worktree)
+	}
+	covered, gone, done := cover(a, conv.roster)
+	defer done()
+	// The block does not need the repos' session rows (it counts this session's
+	// changes as if they were written), so they are written beside the wait.
+	var bg sync.WaitGroup
+	var rowErr error
+	if ev.SessionID != "" {
+		bg.Go(func() {
+			defer recoverHook()
+			rowErr = ensureRosterSessions(skip, covered, ev, conv)
+		})
+	}
+	var res Result
+	switch len(covered) {
+	case 0:
+		res, err = goneBlock(ctx, skip, a, scope, resumed, gone)
+	case 1:
+		res, err = repoBlock(ctx, skip, a, now, scope, resumed, wait, covered[0].subject(ev.SessionID, conv.startedAt))
+	default:
+		res, err = sharedBlock(ctx, skip, a, now, scope, resumed, wait, ev.SessionID, conv.startedAt, covered)
+	}
+	bg.Wait()
+	if err != nil {
+		return Result{}, errors.Join(err, rowErr)
+	}
+	// A session row that could not be written does not spoil the block: the
+	// block is delivered and the failure reported.
+	res.Failure = rowErr
+	return res, nil
+}
+
+// subject is the repo a one-repo block is about.
+type subject struct {
+	rc        *app.RepoContext
+	served    bool   // RECARTO_REPOS serves it: it gets the first-index wait
+	tools     bool   // the repo argument reaches it: the block points at tools
+	header    string // the memory tier's header
+	reposLine string // the line naming served repos, "" for none
+	session   string // the conversation's id, counted as a session in rc before its row is written; "" in a session's own worktree
+	since     int64  // that session's start
+}
+
+// repoBlock builds the session-start block of one repo, s: the block a session
+// started in that repo shows.
+func repoBlock(ctx, skip context.Context, a *app.App, now int64, scope string, resumed bool,
+	wait *startWait, s subject) (Result, error) {
+	rc := s.rc
 	var tier *mapTier
 	if !resumed && a.Features.On(features.CodeMap) {
-		tier = startMapTier(ctx, skip, a)
-		defer tier.close()
+		w, start := wait, a.StartIndex
+		if !s.served {
+			w, start = nil, nil
+		}
+		tier = startMapTier(ctx, skip, w, rc, start)
 	}
 	// The first-index wait comes before upkeep, so a slow sync does not use up its budget.
-	tier.settle(ctx, skip, a)
+	tier.settle(ctx, skip)
 	// The wait used up the first bound; the writes after it get their own.
 	skip = store.WithWriteDeadline(ctx, time.Now().Add(writeGrace))
 	// Writes that miss skip's bound are skipped; the next session start or Stop
 	// redoes them.
-	sessionStartUpkeep(skip, a)
+	sessionStartUpkeep(skip, a, []*app.RepoContext{rc})
 
 	budget := sessionBudget()
 	repoBudget := budget
@@ -314,9 +379,9 @@ func handleSessionStart(ctx context.Context, a *app.App, ev Event) (Result, erro
 				wsResults = wsSet.Results
 			}
 		}
-		set, err := a.Engine.Recall(skip, memory.RecallQuery{
-			Branch:      a.Git.Branch,
-			Worktree:    a.Git.Worktree,
+		set, err := rc.Engine.Recall(skip, memory.RecallQuery{
+			Branch:      rc.Git.Branch,
+			Worktree:    rc.Git.Worktree,
 			Baseline:    true,
 			TokenBudget: repoBudget,
 		})
@@ -329,50 +394,27 @@ func handleSessionStart(ctx context.Context, a *app.App, ev Event) (Result, erro
 		isTodo := func(r memory.RecallResult) bool { return r.Record.Kind == memory.KindTodo }
 		results, wsResults = slices.DeleteFunc(results, isTodo), slices.DeleteFunc(wsResults, isTodo)
 	}
-	// "What changed since you were last here": baseline = the last session that
-	// journaled deltas, so /clear and open-and-close sessions are transparent
-	// (the same delta keeps showing until a context has lived alongside it).
-	var deltas []graph.Delta
-	var deltaTotal int
-	var deltaBaseline int64
-	if at, ok, err := a.Graph.DeltaBaseline(ctx, a.Git.Worktree, now); err == nil && ok {
-		deltaBaseline = at
-		if a.Features.On(features.RecentChanges) {
-			deltas, deltaTotal, _ = a.Graph.DeltasSince(ctx, a.Git.Worktree, at, 200)
-		}
-	}
-	// Retention: drop journal rows no baseline walk can reach (best-effort).
-	// The walk is unbounded — it skips no-op sessions all the way back to the
-	// last delta-bearing one — so the cutoff must never pass the current
-	// baseline: any run of consecutive /clear or read-only sessions, however
-	// long, must not erase the deltas the tier is still reporting. Past that,
-	// rows older than the 10th-most-recent session are unreachable.
-	if cutoff, err := tenthSessionStart(ctx, a); err == nil && cutoff > 0 {
-		if deltaBaseline > 0 && deltaBaseline < cutoff {
-			cutoff = deltaBaseline
-		}
-		_ = a.Graph.PruneDeltas(skip, a.Git.Worktree, cutoff)
-	}
+	deltas, deltaTotal, deltaBaseline := recentChanges(ctx, skip, a, rc, s.session, s.since, now)
 
 	wsName := ""
 	if a.Workspace != nil {
 		wsName = a.Workspace.Name
 	}
 	if resumed {
-		return resumeContext(ctx, a, scope, results, wsName, wsResults, repoBudget)
+		return resumeContext(ctx, a, scope, results, s.header, wsName, wsResults, repoBudget)
 	}
 	// Orientation map + recent bugs are best-effort tiers; failure omits the tier.
 	var bugs []*memory.Record
 	if a.Features.On(features.RecentBugs) {
-		bugs, _ = a.Engine.RecentBugs(ctx, a.Git.Branch, recentBugLimit)
+		bugs, _ = rc.Engine.RecentBugs(ctx, rc.Git.Branch, recentBugLimit)
 	}
 
-	var extraRepos []string
-	for _, rc := range a.Repos {
-		extraRepos = append(extraRepos, rc.Git.RepoName)
+	f := toolFeatures(a)
+	if !s.tools {
+		f = withoutTools(f)
 	}
 	arch, line := tier.result()
-	out, emitted := formatSessionContext(results, wsName, wsResults, extraRepos, arch, line, bugs, deltas, deltaTotal, deltaBaseline, repoBudget, toolFeatures(a))
+	out, emitted := formatSessionContext(s.header, s.reposLine, results, wsName, wsResults, arch, line, bugs, deltas, deltaTotal, deltaBaseline, repoBudget, f)
 	// Mark every memory rendered into this block as surfaced for the conversation, so the
 	// just-in-time read/edit hooks won't re-inject a guardrail/bug/todo the agent can
 	// already see here. Memories dropped under budget stay unmarked and still surface
@@ -385,11 +427,42 @@ func handleSessionStart(ctx context.Context, a *app.App, ev Event) (Result, erro
 	// An index can finish while the marks wait for its writer, and the block must
 	// not then say the graph is still being indexed. The tier takes no part of
 	// the memory budget, so the marks just written match the block rendered again.
-	if tier.recheck(ctx, skip, a) {
+	if tier.recheck(ctx, skip) {
 		arch, line = tier.result()
-		out, _ = formatSessionContext(results, wsName, wsResults, extraRepos, arch, line, bugs, deltas, deltaTotal, deltaBaseline, repoBudget, toolFeatures(a))
+		out, _ = formatSessionContext(s.header, s.reposLine, results, wsName, wsResults, arch, line, bugs, deltas, deltaTotal, deltaBaseline, repoBudget, f)
 	}
 	return Result{Context: out}, nil
+}
+
+// recentChanges returns rc's changes since its baseline, counting session id,
+// started at since, as written in rc, and prunes rc's journal past what any
+// baseline walk can reach.
+func recentChanges(ctx, skip context.Context, a *app.App, rc *app.RepoContext, id string, since, now int64) ([]graph.Delta, int, int64) {
+	// "What changed since you were last here": baseline = the last session that
+	// journaled deltas, so /clear and open-and-close sessions are transparent
+	// (the same delta keeps showing until a context has lived alongside it).
+	var deltas []graph.Delta
+	var deltaTotal int
+	var deltaBaseline int64
+	if at, ok, err := rc.Graph.DeltaBaselineWith(ctx, rc.Git.Worktree, id, since, now); err == nil && ok {
+		deltaBaseline = at
+		if a.Features.On(features.RecentChanges) {
+			deltas, deltaTotal, _ = rc.Graph.DeltasSince(ctx, rc.Git.Worktree, at, 200)
+		}
+	}
+	// Retention: drop journal rows no baseline walk can reach (best-effort).
+	// The walk is unbounded — it skips no-op sessions all the way back to the
+	// last delta-bearing one — so the cutoff must never pass the current
+	// baseline: any run of consecutive /clear or read-only sessions, however
+	// long, must not erase the deltas the tier is still reporting. Past that,
+	// rows older than the 10th-most-recent session are unreachable.
+	if cutoff, err := tenthSessionStart(ctx, rc); err == nil && cutoff > 0 {
+		if deltaBaseline > 0 && deltaBaseline < cutoff {
+			cutoff = deltaBaseline
+		}
+		_ = rc.Graph.PruneDeltas(skip, rc.Git.Worktree, cutoff)
+	}
+	return deltas, deltaTotal, deltaBaseline
 }
 
 // applySource applies a session start's source to the record of what scope's
@@ -409,9 +482,10 @@ func applySource(ctx context.Context, a *app.App, scope, source string) (resumed
 	return false, nil
 }
 
-// sessionStartUpkeep syncs memories, imports the team snapshot and runs gated
-// memory compaction. Every session start runs it, whatever its source.
-func sessionStartUpkeep(ctx context.Context, a *app.App) {
+// sessionStartUpkeep syncs memories, imports the team snapshot of each of repos
+// and runs their gated memory compaction. Every session start runs it, whatever
+// its source.
+func sessionStartUpkeep(ctx context.Context, a *app.App, repos []*app.RepoContext) {
 	// Pull remote memory changes before recall, so this session's injected
 	// context reflects other machines' work (best-effort, bounded — a wedged or
 	// unreachable sync server must never delay the agent). This runs BEFORE the
@@ -432,7 +506,9 @@ func sessionStartUpkeep(ctx context.Context, a *app.App) {
 
 	// Absorb a teammate's committed memory snapshot when it changed (best-effort).
 	if a.Features.On(features.TeamSnapshot) {
-		_, _ = snapshot.SyncOnSessionStart(ctx, a.Engine, a.Store, a.Git.Worktree)
+		for _, rc := range repos {
+			_, _ = snapshot.SyncOnSessionStart(ctx, rc.Engine, rc.Store, rc.Git.Worktree)
+		}
 	}
 
 	// Push anything now sitting in the local outbox/tombstone queue — a prior
@@ -457,7 +533,9 @@ func sessionStartUpkeep(ctx context.Context, a *app.App) {
 	// single-flight across worktrees). Runs before recall so this session's
 	// recalls stamp the freshly-advanced epoch. Never blocks the agent.
 	if a.Features.On(features.AutoCompact) {
-		_, _ = a.Engine.Compact(ctx, memory.CompactOptions{})
+		for _, rc := range repos {
+			_, _ = rc.Engine.Compact(ctx, memory.CompactOptions{})
+		}
 	}
 }
 
@@ -465,7 +543,7 @@ func sessionStartUpkeep(ctx context.Context, a *app.App) {
 // full block would show now that scope's conversation has not been shown, and
 // marks them shown. No context when there are none.
 func resumeContext(ctx context.Context, a *app.App, scope string, results []memory.RecallResult,
-	wsName string, wsResults []memory.RecallResult, budget int) (Result, error) {
+	header, wsName string, wsResults []memory.RecallResult, budget int) (Result, error) {
 	// A memory the block drops for its budget stays out on a resume too, as it
 	// did at startup; otherwise every resume would inject it.
 	_, inBlock := formatMemories(results, budget)
@@ -478,7 +556,7 @@ func resumeContext(ctx context.Context, a *app.App, scope string, results []memo
 	if err != nil {
 		return Result{}, err
 	}
-	out, emitted := formatResumeContext(results, wsName, wsResults, budget)
+	out, emitted := formatResumeContext(header, results, wsName, wsResults, budget)
 	markSurfaced(ctx, a, scope, emitted)
 	return Result{Context: out}, nil
 }
@@ -743,11 +821,11 @@ func handleShell(ctx context.Context, a *app.App, ev Event) (Result, error) {
 // session, or 0 when fewer exist. It is the retention horizon for graph_deltas
 // rows — but only after the caller clamps it to the current delta baseline,
 // which an unbounded run of no-op sessions can push past this horizon.
-func tenthSessionStart(ctx context.Context, a *app.App) (int64, error) {
+func tenthSessionStart(ctx context.Context, rc *app.RepoContext) (int64, error) {
 	var at int64
-	err := a.Store.DB.QueryRowContext(ctx,
+	err := rc.Store.DB.QueryRowContext(ctx,
 		`SELECT started_at FROM sessions WHERE worktree = ?
-		  ORDER BY started_at DESC LIMIT 1 OFFSET 9`, a.Git.Worktree).Scan(&at)
+		  ORDER BY started_at DESC LIMIT 1 OFFSET 9`, rc.Git.Worktree).Scan(&at)
 	if err != nil {
 		return 0, nil // fewer than 10 sessions: nothing to prune (sql.ErrNoRows folds here)
 	}
@@ -775,7 +853,7 @@ const stopIssueReminder = " And if Recarto itself errored, ranked the wrong resu
 // Code re-invokes Stop after our block, always pass through. Every fault in the
 // nudge decision degrades to the static reminder — never to silence, and never
 // to a false block.
-func handleStop(ctx context.Context, a *app.App, ev Event) (Result, error) {
+func handleStop(ctx context.Context, a *app.App, ev Event) (res Result, err error) {
 	if ev.SessionID == "" {
 		return Result{}, nil
 	}
@@ -788,6 +866,10 @@ func handleStop(ctx context.Context, a *app.App, ev Event) (Result, error) {
 	}); err != nil {
 		return Result{}, err
 	}
+	rosterErr := endRosterSessions(ctx, a, ev, now)
+	// A roster repo whose session cannot be ended does not hold up the sync push
+	// or the nudge; the hook reports it.
+	defer func() { res.Failure = rosterErr }()
 	// Turn boundary: the agent is idle, so a TRUNCATE checkpoint can actually
 	// win the WAL (mid-session it silently yields to concurrent readers).
 	_ = a.Store.Checkpoint(ctx)

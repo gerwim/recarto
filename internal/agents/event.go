@@ -6,6 +6,7 @@ package agents
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"path/filepath"
@@ -77,6 +78,9 @@ type Result struct {
 	SystemMessage string
 	Block         bool
 	Reason        string
+	// Failure is a failure that leaves the result usable: RunHook delivers the
+	// result, then reports the failure on the hook's error channel.
+	Failure error
 }
 
 // Adapter converts a host's hook payloads to and from the neutral types.
@@ -142,7 +146,7 @@ func RunHook(ctx context.Context, open func(Event) (*app.App, error), ad Adapter
 	if err != nil {
 		return err
 	}
-	return ad.Encode(kind, out, res)
+	return errors.Join(ad.Encode(kind, out, res), res.Failure)
 }
 
 // Opened adapts an already-open App to RunHook's opener.

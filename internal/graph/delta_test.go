@@ -4,6 +4,9 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/gerwim/recarto/internal/clock"
 )
 
 func TestDeltaJournalAddedChangedRemoved(t *testing.T) {
@@ -161,4 +164,45 @@ func TestPruneDeltas(t *testing.T) {
 	if total != 0 {
 		t.Fatalf("prune left %d deltas, want 0", total)
 	}
+}
+
+func TestDeltaBaselineWithCountsAPendingSession(t *testing.T) {
+	e := newTestEngine(t)
+	ctx := context.Background()
+	wt := t.TempDir()
+	clk := e.clk.(*clock.Fake)
+	at := func() int64 { clk.Advance(time.Second); return clk.Now().UnixMilli() }
+	write := func(id string, start int64) {
+		t.Helper()
+		if _, err := e.st.DB.Exec(`INSERT INTO sessions(id, agent, worktree, started_at) VALUES (?, 'a', ?, ?)`, id, wt, start); err != nil {
+			t.Fatal(err)
+		}
+	}
+	check := func(what, id string, start int64) {
+		t.Helper()
+		now := at()
+		pb, pok, err := e.DeltaBaselineWith(ctx, wt, id, start, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		write(id, start)
+		wb, wok, err := e.DeltaBaseline(ctx, wt, now)
+		if err != nil || wb != pb || wok != pok || !pok {
+			t.Fatalf("%s: pending %d %v, written %d %v %v", what, pb, pok, wb, wok, err)
+		}
+	}
+	indexInto(t, e, wt, "a.go", "package p\nfunc A() {}\n")
+	earlier := at()
+	write("earlier", earlier)
+	at()
+	indexInto(t, e, wt, "a.go", "package p\nfunc A() { _ = 1 }\n")
+	// The pending session is the latest start: it sets the cutoff.
+	check("cutoff", "cut", at())
+
+	// The pending session made a change and another started later: it is the baseline.
+	pending := at()
+	at()
+	indexInto(t, e, wt, "a.go", "package p\nfunc A() { _ = 2 }\n")
+	write("later", at())
+	check("candidate", "cand", pending)
 }

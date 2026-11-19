@@ -283,8 +283,8 @@ func TestRunHookSessionStartAttemptsOnce(t *testing.T) {
 		done <- errors.New("git ls-files: exit status 1")
 		return done, nil
 	}
-	startWarm = func(skip []string) error {
-		skipped = skip
+	startWarm = func(w warmRun) error {
+		skipped = w.skip
 		return nil
 	}
 	sessionStart := func(id string) string {
@@ -328,4 +328,29 @@ func realDir(t *testing.T, dir string) string {
 		t.Fatal(err)
 	}
 	return r
+}
+
+// From a folder without code serving a repo, session start hands the folder to
+// the background warm to check for code, with the conversation's id.
+func TestRunHookSessionStartFromAFolderWithoutCode(t *testing.T) {
+	a, folder, repo := scratchServing(t)
+	if err := Warm(context.Background(), a, nil); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(folder)
+	prev := startWarm
+	t.Cleanup(func() { startWarm = prev })
+	var got warmRun
+	startWarm = func(w warmRun) error {
+		got = w
+		return nil
+	}
+	var out bytes.Buffer
+	runHook(context.Background(), strings.NewReader(`{"session_id":"s1","source":"startup"}`), &out, []string{"session-start"})
+	if !slices.Equal(got.ifCode, []string{folder}) || got.session != "s1" || slices.Contains(got.skip, repo) {
+		t.Fatalf("warm run %+v", got)
+	}
+	if !strings.Contains(out.String(), "lib") {
+		t.Errorf("block lacks the repo: %s", out.String())
+	}
 }

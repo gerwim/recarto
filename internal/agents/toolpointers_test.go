@@ -182,9 +182,9 @@ func TestPointersNameTheRecartoServer(t *testing.T) {
 	}
 	assertNamesRecartoTools(t, "read notes", read)
 
-	block, _ := formatSessionContext(
+	block, _ := formatSessionContext(memoryHeader, "",
 		[]memory.RecallResult{{Record: &memory.Record{Kind: memory.KindLearning, Title: "wal mode needs busy timeout", Branch: "main"}, Score: 0.5}},
-		"", nil, nil,
+		"", nil,
 		graph.Architecture{Modules: []graph.Module{{Name: "internal", Files: 3, Symbols: 9}}}, "",
 		[]*memory.Record{{ID: "b1", Kind: memory.KindBug, Title: "reindex drops edges"}},
 		[]graph.Delta{{Path: "internal/x.go", QualifiedName: "X", Kind: "function", Change: "added"}}, 1, 1749340800000, 1500, nil)
