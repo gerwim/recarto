@@ -67,6 +67,15 @@ func (e *Engine) indexFileBase(worktree string) string {
 // indexLockPath is the file whose lock lets one process at a time index worktree.
 func (e *Engine) indexLockPath(worktree string) string { return e.indexFileBase(worktree) + ".lock" }
 
+// markBeforeWrites sets worktree's pending marker before a run that writes,
+// unless the marker is already set.
+func (e *Engine) markBeforeWrites(ctx context.Context, worktree string, writes, marked bool) error {
+	if !writes || marked {
+		return nil
+	}
+	return e.setResolvePending(ctx, worktree)
+}
+
 // resolvePending reports whether worktree has an interrupted reconcile to finish.
 func (e *Engine) resolvePending(ctx context.Context, worktree string) bool {
 	var v string
@@ -205,10 +214,8 @@ func (e *Engine) Reconcile(ctx context.Context, worktree string, src Source, opt
 	// a resolve, at the end); actual mutation cannot be known before parsing.
 	willMutate := len(worklist) > 0 || deletions > 0
 	// A forced run or an index rebuild rewrites the resolution even when no file changed, so it marks too.
-	if (willMutate || pending) && !marked {
-		if err := e.setResolvePending(ctx, worktree); err != nil {
-			return err
-		}
+	if err := e.markBeforeWrites(ctx, worktree, willMutate || pending, marked); err != nil {
+		return err
 	}
 
 	// Bulk-load only when the WHOLE store is empty, not just this worktree: the

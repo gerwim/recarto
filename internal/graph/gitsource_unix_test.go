@@ -132,7 +132,9 @@ func TestDiscoveryIsNotHeldByAnAttempt(t *testing.T) {
 	t.Cleanup(func() {
 		if !finished {
 			r.Hold(t, false)
-			<-done
+			if err := <-done; err != nil {
+				t.Error(err)
+			}
 		}
 	})
 
