@@ -13,12 +13,16 @@ import (
 	"github.com/mattn/go-isatty"
 
 	"github.com/gerwim/recarto/internal/cli"
+	"github.com/gerwim/recarto/internal/graph"
 	"github.com/gerwim/recarto/internal/ledger"
 	"github.com/gerwim/recarto/internal/store"
 	"github.com/gerwim/recarto/internal/version"
 )
 
 func main() {
+	// The marker belongs to the index attempt that set it; a process started
+	// under one (a hook run from a git hook, say) must not mark its own calls. Unsetting a valid name cannot fail.
+	_ = os.Unsetenv(graph.AttemptEnv)
 	// RECARTO_CPUPROFILE is a debug knob: when set, the whole invocation is CPU
 	// profiled into the named file (pprof format). Only honored on the normal
 	// return path — error paths os.Exit and drop the profile, which is fine for

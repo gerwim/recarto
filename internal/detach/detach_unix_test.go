@@ -39,6 +39,8 @@ func TestDetachHelper(t *testing.T) {
 			os.Exit(1)
 		}
 		os.Exit(0)
+	case "exit3":
+		os.Exit(3)
 	default:
 		t.Skip("helper process")
 	}
@@ -103,5 +105,22 @@ func TestStartOutlivesCallerAndHoldsNoOutput(t *testing.T) {
 			t.Fatal("the child did not finish")
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestStartWatchedReportsTheExit(t *testing.T) {
+	t.Setenv("RECARTO_DETACH_HELPER", "exit3")
+	done, err := StartWatched(os.Args[0], "-test.run=^TestDetachHelper$")
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		var exit *exec.ExitError
+		if !errors.As(err, &exit) || exit.ExitCode() != 3 {
+			t.Fatalf("want exit status 3, got %v", err)
+		}
+	case <-time.After(hang):
+		t.Fatal("the process's exit never arrived")
 	}
 }

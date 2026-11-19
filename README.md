@@ -306,7 +306,12 @@ What session start adds, by its `source`:
 | `compact` | The full block, after forgetting the conversation's reads, notes and searches. Its memories count as shown again. |
 | `resume` | Only the memories the block would show that the conversation has not been shown yet, such as ones recorded or synced since, in the block's format and budget. Nothing when there are none. A session Recarto has no record of gets the full block. |
 
-Every session start syncs memories, imports the team snapshot and compacts memories, whatever the source. It then starts `recarto warm` in the background, which brings the code graph of this worktree and the `RECARTO_REPOS` repos up to date and drops the graph of dead and unused worktrees. The hook does not wait for it. While the worktree's index is unfinished, the block has one line saying so instead of the code map. Changes made outside a session (a pull, a branch switch) show under recent changes from the next session start. OpenCode's plugin runs session start once per session.
+Every session start syncs memories, imports the team snapshot and compacts memories, whatever the source. A full block then shows the code map, or one line in its place:
+- A worktree with no files Recarto indexes shows neither.
+- A worktree with code whose index has never finished gets its first index: session start starts it, or joins the process already indexing it, and waits up to 2 seconds. If the index finishes, the block shows the map. If it is still running, the block says the code graph is still being indexed, and the index goes on in the background. If it failed or could not start, the block says the code graph is not built yet; the next session start tries again.
+- A worktree whose index finished once never waits. It shows the last finished map, even when it is out of date, or says the graph is still being indexed while a new index of it runs.
+
+The block's memories are ranked against the graph as it stands when the wait ends. After writing its block, session start starts `recarto warm` in the background. It brings the code graph of this worktree and the `RECARTO_REPOS` repos up to date and drops the graph of dead and unused worktrees. It leaves out a worktree the session start already made its attempt at, so a session start makes one index attempt per worktree. The hook does not wait for it. While another process writes to the store, session start does not wait to sync, import the snapshot, compact or update statistics; the next session start does. A `resume` of a conversation Recarto knows never waits. Changes made outside a session (a pull, a branch switch) show under recent changes from the next session start. OpenCode's plugin runs session start once per session.
 
 ## Tool pointers
 
@@ -432,7 +437,7 @@ the lifetime ledger counters:
 
 **Is it fast?** Recarto has no built-in timing, so measure the two heavy operations —
 the graph index and recall — directly. Hooks are exit-0 CLI calls, so their latency is
-essentially these two (post-edit reconcile + session-start injection; session start indexes in the background):
+essentially these two (post-edit reconcile + session-start injection; session start waits at most 2 s for a first index and otherwise indexes in the background):
 
 **Linux / macOS**
 
@@ -460,7 +465,8 @@ Measure-Command { recarto recall "auth flow" }
   query, and incrementally on each edit. One process at a time indexes a worktree.
   `recarto index`, `recarto graph` and the MCP server wait for it; `recarto warm`
   leaves the worktree to it. A `recarto warm` run stops after 30 minutes, and the
-  next session start continues its work.
+  next session start continues its work. A session start in a worktree whose index
+  never finished waits up to 2 s for it.
 - **Hooks start fast.** A hook decodes its payload first and opens only what that
   event needs; one with nothing to act on exits at about the cost of a bare process
   start. The git identity is remembered in `<cache>/gitctx/` and re-resolved when the

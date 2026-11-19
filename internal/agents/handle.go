@@ -26,8 +26,13 @@ func Handle(ctx context.Context, a *app.App, ev Event) (Result, error) {
 	// Every hook that reaches the store counts as use of its worktree; NoteUsed
 	// writes only an hour-old mark, so a hook that otherwise reads takes no write
 	// lock. A lost mark only lets the sweep drop this graph sooner; the next use
-	// re-indexes it.
-	_ = a.Graph.NoteUsed(ctx, a.Git.Worktree)
+	// re-indexes it. So a session start does not wait for it behind another
+	// process's writer, such as an index finishing.
+	usedCtx := ctx
+	if ev.Kind == KindSessionStart {
+		usedCtx = store.WithWriteDeadline(ctx, time.Now().Add(writeGrace))
+	}
+	_ = a.Graph.NoteUsed(usedCtx, a.Git.Worktree)
 	switch ev.Kind {
 	case KindSessionStart:
 		return handleSessionStart(ctx, a, ev)
@@ -239,21 +244,40 @@ func conversation(ev Event) string {
 // recalls a token-budgeted slice for this branch, and returns it as injectable
 // context plus a record nudge. A resume of a conversation that
 // already got the block returns only the memories it has not been shown yet.
+// A full block waits up to firstIndexWait for the worktree's first index, and
+// ranks its memories against the graph as it stands when the wait ends.
+//
+// Writes that can be skipped (statistics, sync, snapshot import, compaction,
+// recall stamps, the map cache) run under skip: while another process holds
+// the store's writer, such as an index finishing, they wait at most writeGrace
+// and are skipped, to be redone by the next session start or Stop. Conversation
+// state (a new conversation's row, a clear or compact reset, the block and
+// shown marks) waits for the writer.
 func handleSessionStart(ctx context.Context, a *app.App, ev Event) (Result, error) {
 	now := a.Clock.Now().UnixMilli()
+	skip := store.WithWriteDeadline(ctx, time.Now().Add(writeGrace))
 	if ev.SessionID != "" {
-		if err := a.Store.WriteTx(ctx, func(c store.Conn) error {
-			_, err := c.ExecContext(ctx,
-				`INSERT INTO sessions(id, agent, branch, worktree, started_at)
-				 VALUES (?, ?, ?, ?, ?)
-				 ON CONFLICT(id) DO NOTHING`,
-				ev.SessionID, agentOrDefault(ev.Agent), nullable(a.Git.Branch), a.Git.Worktree, now)
-			return err
-		}); err != nil {
+		// Read first: a known conversation needs no write, so its resume never
+		// waits for another process's writer.
+		var known bool
+		if err := a.Store.DB.QueryRowContext(ctx,
+			`SELECT EXISTS(SELECT 1 FROM sessions WHERE id=?)`, ev.SessionID).Scan(&known); err != nil {
 			return Result{}, err
 		}
+		if !known {
+			if err := a.Store.WriteTx(ctx, func(c store.Conn) error {
+				_, err := c.ExecContext(ctx,
+					`INSERT INTO sessions(id, agent, branch, worktree, started_at)
+					 VALUES (?, ?, ?, ?, ?)
+					 ON CONFLICT(id) DO NOTHING`,
+					ev.SessionID, agentOrDefault(ev.Agent), nullable(a.Git.Branch), a.Git.Worktree, now)
+				return err
+			}); err != nil {
+				return Result{}, err
+			}
+		}
 	}
-	_ = a.Ledger.Incr(ctx, "lifetime", "sessions", 1)
+	_ = a.Ledger.Incr(skip, "lifetime", "sessions", 1)
 	scope := conversation(ev)
 	// Forget before the upkeep, so a hook the host kills mid-upkeep still leaves a
 	// compacted conversation's record cleared.
@@ -261,7 +285,17 @@ func handleSessionStart(ctx context.Context, a *app.App, ev Event) (Result, erro
 	if err != nil {
 		return Result{}, err
 	}
-	sessionStartUpkeep(ctx, a)
+	var tier *mapTier
+	if !resumed && a.Features.On(features.CodeMap) {
+		tier = startMapTier(ctx, skip, a)
+		defer tier.close()
+	}
+	// Writes that miss skip's bound are skipped; the next session start or Stop
+	// redoes them.
+	sessionStartUpkeep(skip, a)
+	tier.settle(ctx, skip, a)
+	// The wait used up the first bound; the writes after it get their own.
+	skip = store.WithWriteDeadline(ctx, time.Now().Add(writeGrace))
 
 	budget := sessionBudget()
 	repoBudget := budget
@@ -272,14 +306,14 @@ func handleSessionStart(ctx context.Context, a *app.App, ev Event) (Result, erro
 		if a.Workspace != nil {
 			wsBudget := budget / 3
 			repoBudget = budget - wsBudget
-			if wsSet, err := a.Workspace.Engine.Recall(ctx, memory.RecallQuery{
+			if wsSet, err := a.Workspace.Engine.Recall(skip, memory.RecallQuery{
 				Baseline:    true,
 				TokenBudget: wsBudget,
 			}); err == nil {
 				wsResults = wsSet.Results
 			}
 		}
-		set, err := a.Engine.Recall(ctx, memory.RecallQuery{
+		set, err := a.Engine.Recall(skip, memory.RecallQuery{
 			Branch:      a.Git.Branch,
 			Worktree:    a.Git.Worktree,
 			Baseline:    true,
@@ -316,7 +350,7 @@ func handleSessionStart(ctx context.Context, a *app.App, ev Event) (Result, erro
 		if deltaBaseline > 0 && deltaBaseline < cutoff {
 			cutoff = deltaBaseline
 		}
-		_ = a.Graph.PruneDeltas(ctx, a.Git.Worktree, cutoff)
+		_ = a.Graph.PruneDeltas(skip, a.Git.Worktree, cutoff)
 	}
 
 	wsName := ""
@@ -327,15 +361,6 @@ func handleSessionStart(ctx context.Context, a *app.App, ev Event) (Result, erro
 		return resumeContext(ctx, a, scope, results, wsName, wsResults, repoBudget)
 	}
 	// Orientation map + recent bugs are best-effort tiers; failure omits the tier.
-	// A map of an unfinished index leaves modules out without saying so, so
-	// while the index is unfinished the block says that instead.
-	var arch graph.Architecture
-	indexing := false
-	if a.Features.On(features.CodeMap) {
-		if m, done, err := a.Graph.CodeMap(ctx, a.Git.Worktree, a.Git.NonGit); err == nil {
-			arch, indexing = m, !done
-		}
-	}
 	var bugs []*memory.Record
 	if a.Features.On(features.RecentBugs) {
 		bugs, _ = a.Engine.RecentBugs(ctx, a.Git.Branch, recentBugLimit)
@@ -345,7 +370,8 @@ func handleSessionStart(ctx context.Context, a *app.App, ev Event) (Result, erro
 	for _, rc := range a.Repos {
 		extraRepos = append(extraRepos, rc.Git.RepoName)
 	}
-	out, emitted := formatSessionContext(results, wsName, wsResults, extraRepos, arch, indexing, bugs, deltas, deltaTotal, deltaBaseline, repoBudget, toolFeatures(a))
+	arch, line := tier.result()
+	out, emitted := formatSessionContext(results, wsName, wsResults, extraRepos, arch, line, bugs, deltas, deltaTotal, deltaBaseline, repoBudget, toolFeatures(a))
 	// Mark every memory rendered into this block as surfaced for the conversation, so the
 	// just-in-time read/edit hooks won't re-inject a guardrail/bug/todo the agent can
 	// already see here. Memories dropped under budget stay unmarked and still surface
@@ -354,6 +380,13 @@ func handleSessionStart(ctx context.Context, a *app.App, ev Event) (Result, erro
 	if scope != "" {
 		// A lost mark only costs the next resume a full block, as before.
 		_ = a.Ledger.Incr(ctx, scope, blockMetric, 1)
+	}
+	// An index can finish while the marks wait for its writer, and the block must
+	// not then say the graph is still being indexed. The tier takes no part of
+	// the memory budget, so the marks just written match the block rendered again.
+	if tier.recheck(ctx, skip, a) {
+		arch, line = tier.result()
+		out, _ = formatSessionContext(results, wsName, wsResults, extraRepos, arch, line, bugs, deltas, deltaTotal, deltaBaseline, repoBudget, toolFeatures(a))
 	}
 	return Result{Context: out}, nil
 }

@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 
+	"github.com/gerwim/recarto/internal/ids"
 	"github.com/gerwim/recarto/internal/store"
 )
 
@@ -70,7 +71,7 @@ func (e *Engine) takeDeferred(ctx context.Context, worktree string) error {
 		if err != nil || !ok {
 			return err
 		}
-		err = e.drainDeferred(ctx, worktree, NewSource(worktree))
+		err = e.drainDeferred(ctx, worktree, inAttempt(NewSource(worktree), ids.New()))
 		release()
 		if err != nil {
 			return err

@@ -128,7 +128,7 @@ func TestReconcileIfIdleLeavesABusyWorktree(t *testing.T) {
 	e1, e2 := twoEngines(t)
 	ctx := context.Background()
 	inToken, gate := make(chan struct{}), make(chan struct{})
-	token1 := func() string {
+	token1 := func(string) string {
 		close(inToken)
 		<-gate
 		return "tok"
@@ -144,7 +144,7 @@ func TestReconcileIfIdleLeavesABusyWorktree(t *testing.T) {
 
 	src2 := &gatedSource{inner: crossFileCallSource(), gate: make(chan struct{})}
 	close(src2.gate)
-	token2 := func() string {
+	token2 := func(string) string {
 		t.Error("token read while another process indexes the worktree")
 		return "tok"
 	}

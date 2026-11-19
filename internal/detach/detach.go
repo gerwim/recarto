@@ -10,10 +10,20 @@ import "os/exec"
 // outside the caller's session (Unix) or console (Windows), so the host ending
 // its session does not stop it.
 func Start(name string, args ...string) error {
+	_, err := StartWatched(name, args...)
+	return err
+}
+
+// StartWatched is Start that also reports the process's exit: the returned
+// channel gets its Wait error (nil on exit status 0) once it ends, while the
+// caller still runs. The caller need not read it.
+func StartWatched(name string, args ...string) (<-chan error, error) {
 	cmd := exec.Command(name, args...)
 	cmd.SysProcAttr = sysProcAttr()
 	if err := cmd.Start(); err != nil {
-		return err
+		return nil, err
 	}
-	return cmd.Process.Release()
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	return done, nil
 }

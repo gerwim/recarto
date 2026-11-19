@@ -357,16 +357,29 @@ func (e *Engine) Architecture(ctx context.Context, worktree, scope string) (Arch
 	if scope != "" {
 		return e.architectureUncached(ctx, e.st.DB, worktree, scope)
 	}
-	arch, _, err := e.architecture(ctx, worktree, false, false)
-	return arch, err
+	return e.architecture(ctx, worktree, false, false, nil)
 }
 
-// CodeMap returns the code map of worktree's finished index and done=true.
-// While the index is unfinished it returns done=false and no map. The check and
-// the map come from one read snapshot, so a reconcile committing in another
-// process meanwhile cannot put a partial map in the session block.
-func (e *Engine) CodeMap(ctx context.Context, worktree string, nonGit bool) (arch Architecture, done bool, err error) {
-	return e.architecture(ctx, worktree, nonGit, true)
+// MapStatus is what CodeMap found about worktree's index.
+type MapStatus struct {
+	// Done: the stored graph is a finished index, possibly of an earlier state
+	// of the worktree.
+	Done bool
+	// Built: an index of worktree finished once, even if a later one is
+	// running or was cut short since.
+	Built bool
+}
+
+// CodeMap returns the code map of worktree's finished index, with its status.
+// While the index is unfinished it returns no map. The status and the map come
+// from one read snapshot, so a reconcile committing in another process
+// meanwhile cannot put a partial map in the session block.
+func (e *Engine) CodeMap(ctx context.Context, worktree string, nonGit bool) (Architecture, MapStatus, error) {
+	var st MapStatus
+	arch, err := e.architecture(ctx, worktree, nonGit, true, func(s indexState, done bool) {
+		st = MapStatus{Done: done, Built: done || s.token != "" || s.built}
+	})
+	return arch, st, err
 }
 
 // archHook, when non-nil, runs inside the map's read snapshot right after the
@@ -378,8 +391,10 @@ var archHook func()
 // transaction. Only a finished index is served from or written to the cache: a
 // map of a partial graph cached under a token that a later run stamps again
 // would be served as complete. With onlyDone, an unfinished index gives no map.
-func (e *Engine) architecture(ctx context.Context, worktree string, nonGit, onlyDone bool) (arch Architecture, done bool, err error) {
+// state, when set, gets the snapshot's index state and whether it is done.
+func (e *Engine) architecture(ctx context.Context, worktree string, nonGit, onlyDone bool, state func(s indexState, done bool)) (arch Architecture, err error) {
 	var s indexState
+	done := false
 	computed := false
 	cacheKey := archCacheKey + worktree
 	err = e.st.ReadTx(ctx, func(q store.Conn) error {
@@ -389,6 +404,9 @@ func (e *Engine) architecture(ctx context.Context, worktree string, nonGit, only
 		}
 		if done, err = codeMapDone(ctx, q, worktree, nonGit, s); err != nil {
 			return err
+		}
+		if state != nil {
+			state(s, done)
 		}
 		if archHook != nil {
 			archHook()
@@ -413,7 +431,7 @@ func (e *Engine) architecture(ctx context.Context, worktree string, nonGit, only
 		return err
 	})
 	if err != nil {
-		return Architecture{}, false, err
+		return Architecture{}, err
 	}
 	if computed && s.finished() {
 		// Best-effort: a busy store just means the next call recomputes. The map
@@ -427,7 +445,7 @@ func (e *Engine) architecture(ctx context.Context, worktree string, nonGit, only
 			})
 		}
 	}
-	return arch, done, nil
+	return arch, nil
 }
 
 // archNodesQuery and archEdgesQuery read one worktree's nodes and resolved

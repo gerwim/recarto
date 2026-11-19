@@ -4,10 +4,12 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"io/fs"
 	"path/filepath"
 	"runtime"
 	"sync"
 
+	"github.com/gerwim/recarto/internal/ids"
 	"github.com/gerwim/recarto/internal/parse"
 	"github.com/gerwim/recarto/internal/store"
 )
@@ -539,6 +541,7 @@ func (e *Engine) ReconcileIfStale(ctx context.Context, worktree string, src Sour
 	if err != nil {
 		return err
 	}
+	src = inAttempt(src, ids.New())
 	err = e.reconcileLocked(ctx, worktree, src, token, o.force, opts...)
 	return e.finishLocked(ctx, worktree, src, release, err)
 }
@@ -552,8 +555,9 @@ var ErrIndexing = errors.New("another process is indexing this worktree")
 // no git command and written nothing: that process may hold the store's write
 // lock for a whole resolve. Otherwise it reads the worktree's git state (token)
 // only once it holds the index lock, so a git call that hangs keeps the lock
-// and every later caller moves on instead of hanging in the same call.
-func (e *Engine) ReconcileIfIdle(ctx context.Context, worktree string, src Source, token func() string, opts ...ReconcileOption) error {
+// and every later caller moves on instead of hanging in the same call. token
+// gets the attempt's marker (see AttemptEnv) for its git calls.
+func (e *Engine) ReconcileIfIdle(ctx context.Context, worktree string, src Source, token func(attempt string) string, opts ...ReconcileOption) error {
 	release, ok, err := store.TryLockFile(e.indexLockPath(worktree))
 	if err != nil {
 		return err
@@ -561,13 +565,15 @@ func (e *Engine) ReconcileIfIdle(ctx context.Context, worktree string, src Sourc
 	if !ok {
 		return ErrIndexing
 	}
+	attempt := ids.New()
+	src = inAttempt(src, attempt)
 	var o reconcileOptions
 	o.resolve(opts)
 	// As in ReconcileIfStale, the mark comes before the reconcile's reads, so a
 	// concurrent prune of this worktree stops.
 	err = e.MarkUsed(ctx, worktree)
 	if err == nil {
-		err = e.reconcileLocked(ctx, worktree, src, token(), o.force, opts...)
+		err = e.reconcileLocked(ctx, worktree, src, token(attempt), o.force, opts...)
 	}
 	return e.finishLocked(ctx, worktree, src, release, err)
 }
@@ -610,6 +616,36 @@ func (e *Engine) reconcileLocked(ctx context.Context, worktree string, src Sourc
 		// so a completed reconcile leaves the WAL empty (best-effort, like all
 		// checkpoints: it yields to concurrent readers).
 		_ = e.st.Checkpoint(ctx)
+		return nil
 	}
-	return nil
+	// Outside git no token records that an index finished, and file rows alone
+	// may be a cut-short first index; the mark tells a session start this
+	// worktree needs no first-index wait.
+	return e.st.WriteTx(ctx, func(c store.Conn) error {
+		_, err := c.ExecContext(ctx,
+			`INSERT INTO meta(key, value) VALUES (?, '1') ON CONFLICT(key) DO NOTHING`, builtKey(worktree))
+		return err
+	})
+}
+
+// builtKey is the meta key marking that a reconcile of worktree outside git
+// finished once.
+func builtKey(worktree string) string { return "graph_built:" + worktree }
+
+// IndexRunning reports whether a process holds worktree's index lock right now.
+// It takes the lock shared without waiting, so it never stops an index from
+// starting for longer than the probe.
+func (e *Engine) IndexRunning(worktree string) (bool, error) {
+	release, ok, err := store.TryShareLockFile(e.indexLockPath(worktree))
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if ok {
+		release()
+		return false, nil
+	}
+	return true, nil
 }

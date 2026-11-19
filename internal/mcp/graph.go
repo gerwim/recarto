@@ -57,7 +57,7 @@ var freshWait = 3 * time.Second
 // the query — stale results beat no results.
 func ensureFresh(ctx context.Context, t *app.RepoContext) string {
 	f := t.Graph.EnsureFresh(ctx, t.Git.Worktree,
-		graph.NewSource(t.Git.Worktree), graph.WorktreeToken(t.Git.Worktree), freshWait)
+		graph.NewSource(t.Git.Worktree), graph.WorktreeToken(t.Git.Worktree, ""), freshWait)
 	return freshnessHint(f)
 }
 

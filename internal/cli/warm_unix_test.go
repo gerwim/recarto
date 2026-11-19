@@ -39,6 +39,54 @@ func gitScript(t *testing.T, hook string) string {
 	return dir
 }
 
+// indexRecipe is a git first on PATH that logs each index attempt's marker
+// (see graph.AttemptEnv) and, while failing is on, fails each marked ls-files.
+// Discovery calls carry no marker and always run the real git.
+type indexRecipe struct{ dir, path string }
+
+func newIndexRecipe(t *testing.T) indexRecipe {
+	t.Helper()
+	d := t.TempDir()
+	dir := gitScript(t, `m="$`+graph.AttemptEnv+`"
+if [ -n "$m" ]; then
+	printf '%s\n' "$m" >> '`+d+`/attempts'
+	case " $* " in *" ls-files "*) [ -e '`+d+`/fail' ] && exit 1 ;; esac
+fi`)
+	return indexRecipe{dir: d, path: dir + string(os.PathListSeparator) + os.Getenv("PATH")}
+}
+
+// failing switches the recipe's failures on or off.
+func (r indexRecipe) failing(t *testing.T, on bool) {
+	t.Helper()
+	p := filepath.Join(r.dir, "fail")
+	var err error
+	if on {
+		err = os.WriteFile(p, nil, 0o644)
+	} else {
+		err = os.Remove(p)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+// attempts counts the distinct index attempts logged so far.
+func (r indexRecipe) attempts(t *testing.T) int {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(r.dir, "attempts"))
+	if os.IsNotExist(err) {
+		return 0
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]bool{}
+	for _, m := range strings.Fields(string(b)) {
+		seen[m] = true
+	}
+	return len(seen)
+}
+
 // TestWarmLimitHelper is the `recarto warm` process TestWarmStopsAtItsLimit
 // runs. Its limit fires when SIGUSR1 arrives, unless Run stopped it first.
 func TestWarmLimitHelper(t *testing.T) {
@@ -105,14 +153,14 @@ func TestWarmStopsAtItsLimit(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = a.Close() })
 	ctx := context.Background()
-	if err := Warm(ctx, a); err != nil {
+	if err := Warm(ctx, a, nil); err != nil {
 		t.Fatal(err)
 	}
-	_, finished, err := a.Graph.CodeMap(ctx, a.Git.Worktree, false)
+	_, st, err := a.Graph.CodeMap(ctx, a.Git.Worktree, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !finished {
+	if !st.Done {
 		t.Error("index unfinished after the next warm")
 	}
 	if got := filesIn(t, a, a.Git.Worktree); got != 1 {
@@ -187,7 +235,7 @@ func TestWarmLeavesAWorktreeAnotherProcessIndexes(t *testing.T) {
 	if _, err := bconn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
 		t.Fatalf("blocker BEGIN IMMEDIATE: %v", err)
 	}
-	awaitNil(t, "warm with the worktree busy", func() error { return Warm(ctx, a) })
+	awaitNil(t, "warm with the worktree busy", func() error { return Warm(ctx, a, nil) })
 	repos := a.AllRepos()
 	if len(repos) != 2 {
 		t.Fatalf("served repos = %d, want 2", len(repos))
@@ -209,7 +257,7 @@ func TestWarmLeavesAWorktreeAnotherProcessIndexes(t *testing.T) {
 	if err := a.Graph.Reconcile(ctx, "/definitely/gone-wt", graph.FSSource{Root: primary}); err != nil {
 		t.Fatal(err)
 	}
-	awaitNil(t, "warm after the store lock is free", func() error { return Warm(ctx, a) })
+	awaitNil(t, "warm after the store lock is free", func() error { return Warm(ctx, a, nil) })
 	if got := filesIn(t, a, "/definitely/gone-wt"); got != 0 {
 		t.Errorf("dead worktree files = %d, want 0: warm's sweep must run", got)
 	}

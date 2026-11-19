@@ -4,11 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/gerwim/recarto/internal/app"
 )
 
 func TestHookSessionStartDispatch(t *testing.T) {
@@ -258,4 +261,71 @@ func TestHookShellOwnerAnswers(t *testing.T) {
 			t.Errorf("--cmd %s answered = %v, want %v: %q", cmd, got, want, out.String())
 		}
 	}
+}
+
+// A session start makes one index attempt per worktree: the background warm
+// leaves out the worktree whose first index the hook started.
+func TestRunHookSessionStartAttemptsOnce(t *testing.T) {
+	repo := t.TempDir()
+	initGitRepo(t, repo, map[string]string{"a.go": "package p\n\nfunc A() {}\n"})
+	t.Chdir(repo)
+	for _, k := range []string{"RECARTO_WORKSPACE", "RECARTO_REPOS", "RECARTO_SYNC_URL", "RECARTO_SYNC_KEY"} {
+		t.Setenv(k, "")
+	}
+	t.Setenv("RECARTO_CACHE_DIR", t.TempDir())
+	t.Setenv("RECARTO_CONFIG", filepath.Join(t.TempDir(), "config.toml"))
+	var started, skipped []string
+	prevIndex, prevWarm := startIndex, startWarm
+	t.Cleanup(func() { startIndex, startWarm = prevIndex, prevWarm })
+	startIndex = func(wt string) (<-chan error, error) {
+		started = append(started, wt)
+		done := make(chan error, 1)
+		done <- errors.New("git ls-files: exit status 1")
+		return done, nil
+	}
+	startWarm = func(skip []string) error {
+		skipped = skip
+		return nil
+	}
+	sessionStart := func(id string) string {
+		t.Helper()
+		var out bytes.Buffer
+		runHook(context.Background(), strings.NewReader(`{"session_id":"`+id+`","source":"startup"}`), &out, []string{"session-start"})
+		return out.String()
+	}
+
+	got := sessionStart("s1")
+	wt := realDir(t, repo)
+	if !slices.Equal(started, []string{wt}) || !slices.Equal(skipped, []string{wt}) {
+		t.Fatalf("started %v, warm skipped %v; want one start of %s, left out of warm", started, skipped, wt)
+	}
+	if !strings.Contains(got, "not built yet") {
+		t.Errorf("failed first index: want the not-built line:\n%s", got)
+	}
+
+	a, err := app.Open(app.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Warm(context.Background(), a, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Close(); err != nil {
+		t.Fatal(err)
+	}
+	started, skipped = nil, []string{"unset"}
+	sessionStart("s2")
+	if len(started) != 0 || skipped != nil {
+		t.Errorf("indexed worktree: started %v, warm skipped %v; want neither", started, skipped)
+	}
+}
+
+// realDir is dir with its symlinks resolved, as git names a worktree.
+func realDir(t *testing.T, dir string) string {
+	t.Helper()
+	r, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return r
 }
