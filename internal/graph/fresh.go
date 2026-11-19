@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -147,6 +149,7 @@ type indexState struct {
 	token     string // stamped by the last finished reconcile; "" when none
 	pending   bool   // a reconcile left committed writes unresolved
 	indexesOK bool   // every graph secondary index exists
+	built     bool   // outside git: a reconcile finished once (builtKey)
 }
 
 // finished reports whether the stored graph is the output of a finished reconcile.
@@ -155,8 +158,8 @@ func (s indexState) finished() bool { return s.token != "" && !s.pending && s.in
 // readIndexState reads worktree's index state in one round trip on q; graphFresh
 // runs it on every graph tool call (~65µs on the bench box; see BenchmarkGraphFresh).
 func readIndexState(ctx context.Context, q store.Conn, worktree string) (indexState, error) {
-	args := make([]any, 0, len(graphSecondaryIndexes)+2)
-	args = append(args, graphTokenKey+worktree, resolvePendingKey(worktree))
+	args := make([]any, 0, len(graphSecondaryIndexes)+3)
+	args = append(args, graphTokenKey+worktree, resolvePendingKey(worktree), builtKey(worktree))
 	ph := make([]string, len(graphSecondaryIndexes))
 	for i, ix := range graphSecondaryIndexes {
 		args = append(args, ix.name)
@@ -167,16 +170,18 @@ func readIndexState(ctx context.Context, q store.Conn, worktree string) (indexSt
 	err := q.QueryRowContext(ctx,
 		`SELECT COALESCE((SELECT value FROM meta WHERE key=?1), ''),
 		        EXISTS(SELECT 1 FROM meta WHERE key=?2),
+		        EXISTS(SELECT 1 FROM meta WHERE key=?3),
 		        (SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name IN (`+
 			strings.Join(ph, ",")+`))`, args...).
-		Scan(&s.token, &s.pending, &indexes)
+		Scan(&s.token, &s.pending, &s.built, &indexes)
 	s.indexesOK = indexes == len(graphSecondaryIndexes)
 	return s, err
 }
 
 // codeMapDone reports whether s, read on q, is a finished index the code map
 // may be built from. Outside git no token is ever stamped, so there a graph
-// with files and no recovery debt counts. A finished index of an earlier state
+// with no recovery debt counts when it has files (an index of an earlier
+// version left no mark) or the built mark. A finished index of an earlier state
 // of the worktree counts too: it is stale, not partial.
 func codeMapDone(ctx context.Context, q store.Conn, worktree string, nonGit bool, s indexState) (bool, error) {
 	if !nonGit {
@@ -184,6 +189,9 @@ func codeMapDone(ctx context.Context, q store.Conn, worktree string, nonGit bool
 	}
 	if s.pending || !s.indexesOK {
 		return false, nil
+	}
+	if s.built {
+		return true, nil
 	}
 	var one int
 	err := q.QueryRowContext(ctx, `SELECT 1 FROM files WHERE worktree=? LIMIT 1`, worktree).Scan(&one)
@@ -237,4 +245,28 @@ func (e *Engine) staleStatus(ctx context.Context, worktree, detail string) Fresh
 		return Freshness{State: Refreshing, Detail: detail}
 	}
 	return Freshness{State: FirstIndex, Detail: detail}
+}
+
+// PresentFiles returns up to n of the files worktree's graph stores that are
+// still on disk, and whether the graph stores any file. It reads n rows and
+// stats each, so a caller can check a few known code files first instead of
+// listing the whole worktree.
+func (e *Engine) PresentFiles(ctx context.Context, worktree string, n int) (present []string, listed bool, err error) {
+	rows, err := e.st.DB.QueryContext(ctx, `SELECT path FROM files WHERE worktree=? LIMIT ?`, worktree, n)
+	if err != nil {
+		return nil, false, err
+	}
+	// rows.Err reports a failed read; Close only frees the cursor.
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			return nil, false, err
+		}
+		listed = true
+		if info, err := os.Stat(filepath.Join(worktree, filepath.FromSlash(p))); err == nil && !info.IsDir() {
+			present = append(present, p)
+		}
+	}
+	return present, listed, rows.Err()
 }

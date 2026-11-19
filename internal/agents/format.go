@@ -55,8 +55,13 @@ func largeReadThreshold() int {
 	return largeReadTokens
 }
 
-// indexingLine stands in for the code map while the worktree's index is unfinished.
+// indexingLine stands in for the code map while an index of a worktree with
+// code runs and no finished map can be shown.
 const indexingLine = "The code graph is still being indexed; graph results may be incomplete."
+
+// unbuiltLine stands in for the code map when a worktree with code has no
+// finished index and none is running: its first index failed or could not start.
+const unbuiltLine = "The code graph is not built yet; graph results may be empty."
 
 // memoryHeader opens the repo memory tier of the session-start block.
 const memoryHeader = "Recarto memory for this repo/branch:\n"
@@ -65,8 +70,8 @@ const memoryHeader = "Recarto memory for this repo/branch:\n"
 // (always, full body), cerebrum memories (title + trimmed body, degrading to
 // titles-only then dropping under budget pressure), an optional cross-repo
 // workspace tier (wsResults, already token-budgeted by their own recall), a
-// bounded module map (or, while indexing is set, one line saying the graph is
-// still being indexed), and a titles-only recent-bugs tier — followed by the
+// bounded module map (or, when mapLine is set, that line in its place), and a
+// titles-only recent-bugs tier — followed by the
 // record nudge.
 //
 // It also returns the IDs of the memories it actually rendered (full or title-only,
@@ -82,7 +87,7 @@ const memoryHeader = "Recarto memory for this repo/branch:\n"
 // line and record nudge go too, leaving the other tiers; a line pointing at
 // tools f turns off is left out.
 func formatSessionContext(results []memory.RecallResult, wsName string, wsResults []memory.RecallResult,
-	extraRepos []string, arch graph.Architecture, indexing bool, bugs []*memory.Record,
+	extraRepos []string, arch graph.Architecture, mapLine string, bugs []*memory.Record,
 	deltas []graph.Delta, deltaTotal int, deltaBaselineMs int64, budget int, f features.Set) (string, []string) {
 	var b strings.Builder
 	memories := f.On(features.SessionMemories)
@@ -106,8 +111,8 @@ func formatSessionContext(results []memory.RecallResult, wsName string, wsResult
 			strings.Join(extraRepos, ", "))
 	}
 
-	if indexing {
-		b.WriteString("\n" + indexingLine + "\n")
+	if mapLine != "" {
+		b.WriteString("\n" + mapLine + "\n")
 	} else if len(arch.Modules) > 0 {
 		// Select the highest-signal modules/deps for the map rather than the
 		// alphabetically-first ones: rank product modules by file count and the

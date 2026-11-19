@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -43,7 +44,7 @@ func TestWarmPrunesDeadWorktrees(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := Warm(ctx, a); err != nil {
+	if err := Warm(ctx, a, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -78,7 +79,7 @@ func TestWarmPrunesUnusedWorktrees(t *testing.T) {
 	}
 	fc.Advance(4 * 24 * time.Hour)
 
-	if err := Warm(ctx, a); err != nil {
+	if err := Warm(ctx, a, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -134,7 +135,7 @@ func TestWarmIndexesServedReposAndCachesTheirMap(t *testing.T) {
 	t.Cleanup(func() { _ = a.Close() })
 	ctx := context.Background()
 
-	if err := Warm(ctx, a); err != nil {
+	if err := Warm(ctx, a, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -179,7 +180,7 @@ func TestWarmBadUnusedDaysStillPrunesDead(t *testing.T) {
 	a.Clock.(*clock.Fake).Advance(10 * 24 * time.Hour)
 	t.Setenv("RECARTO_UNUSED_WORKTREE_DAYS", "7d")
 
-	if err := Warm(ctx, a); err == nil || !strings.Contains(err.Error(), "RECARTO_UNUSED_WORKTREE_DAYS") {
+	if err := Warm(ctx, a, nil); err == nil || !strings.Contains(err.Error(), "RECARTO_UNUSED_WORKTREE_DAYS") {
 		t.Fatalf("Warm error = %v, want one naming RECARTO_UNUSED_WORKTREE_DAYS", err)
 	}
 	if got := filesIn(t, a, "/definitely/gone-wt"); got != 0 {
@@ -187,5 +188,46 @@ func TestWarmBadUnusedDaysStillPrunesDead(t *testing.T) {
 	}
 	if got := filesIn(t, a, wtOld); got != 1 {
 		t.Errorf("unused worktree files = %d, want 1", got)
+	}
+}
+
+func TestWarmFlags(t *testing.T) {
+	ctx := context.Background()
+	own, other := t.TempDir(), t.TempDir()
+	a := newPruneApp(t, own, other)
+	a.Git.Worktree = own
+	if err := os.WriteFile(filepath.Join(own, "a.go"), []byte("package p\nfunc A(){}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	seedDeadWorktree(t, a, other)
+
+	if err := runWarm(ctx, a, io.Discard, []string{"--skip=" + own}); err != nil {
+		t.Fatal(err)
+	}
+	if got := filesIn(t, a, own); got != 0 {
+		t.Errorf("--skip: the skipped worktree got %d files", got)
+	}
+	if got := deadFiles(t, a); got != 0 {
+		t.Errorf("--skip: the sweep must still run, dead worktree has %d files", got)
+	}
+
+	seedDeadWorktree(t, a, other)
+	if err := runWarm(ctx, a, io.Discard, []string{"--only=" + own}); err != nil {
+		t.Fatal(err)
+	}
+	if got := filesIn(t, a, own); got != 1 {
+		t.Errorf("--only: indexed files = %d, want 1", got)
+	}
+	if got := deadFiles(t, a); got == 0 {
+		t.Error("--only must not sweep")
+	}
+
+	for _, args := range [][]string{
+		{"--only=/not/served"},
+		{"--only=" + own, "--skip=" + own},
+	} {
+		if err := runWarm(ctx, a, io.Discard, args); err == nil {
+			t.Errorf("warm %v: want an error", args)
+		}
 	}
 }

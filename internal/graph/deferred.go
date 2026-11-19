@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 
+	"github.com/gerwim/recarto/internal/ids"
 	"github.com/gerwim/recarto/internal/store"
 )
 
@@ -70,7 +71,14 @@ func (e *Engine) takeDeferred(ctx context.Context, worktree string) error {
 		if err != nil || !ok {
 			return err
 		}
-		err = e.drainDeferred(ctx, worktree, NewSource(worktree))
+		attempt := ids.New()
+		// Outside git the drain's pending marker would hide an index an earlier version finished without the built mark.
+		if !inGitRepo(ctx, worktree, attempt) {
+			err = e.markBuiltIfFinished(ctx, worktree)
+		}
+		if err == nil {
+			err = e.drainDeferred(ctx, worktree, inAttempt(NewSource(worktree), attempt))
+		}
 		release()
 		if err != nil {
 			return err

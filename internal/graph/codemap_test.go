@@ -2,8 +2,11 @@ package graph
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gerwim/recarto/internal/store"
 )
@@ -16,50 +19,106 @@ func moduleNamesOf(a Architecture) []string {
 	return names
 }
 
-func TestCodeMapOnlyForFinishedIndex(t *testing.T) {
+func TestCodeMapStatus(t *testing.T) {
 	ctx := context.Background()
+	reconcile := func(t *testing.T, e *Engine, wt string) {
+		if err := e.Reconcile(ctx, wt, FSSource{Root: wt}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	finish := func(token string) func(*testing.T, *Engine, string) {
+		return func(t *testing.T, e *Engine, wt string) {
+			if err := e.ReconcileIfStale(ctx, wt, FSSource{Root: wt}, token); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
 	for _, tc := range []struct {
-		name   string
-		nonGit bool
-		setup  func(t *testing.T, e *Engine, wt string)
-		done   bool
+		name    string
+		nonGit  bool
+		noFiles bool
+		setup   func(t *testing.T, e *Engine, wt string)
+		want    MapStatus
 	}{
-		{"nothing indexed", false, func(*testing.T, *Engine, string) {}, false},
-		{"finished index", false, func(t *testing.T, e *Engine, wt string) {
-			if err := e.ReconcileIfStale(ctx, wt, FSSource{Root: wt}, "tok"); err != nil {
-				t.Fatal(err)
-			}
-		}, true},
-		{"reconcile cut short", false, func(t *testing.T, e *Engine, wt string) {
-			if err := e.ReconcileIfStale(ctx, wt, FSSource{Root: wt}, "tok"); err != nil {
-				t.Fatal(err)
-			}
+		{"nothing indexed", false, false, func(*testing.T, *Engine, string) {}, MapStatus{}},
+		{"finished index", false, false, finish("tok"), MapStatus{Done: true, Built: true}},
+		{"cut short after a finish", false, false, func(t *testing.T, e *Engine, wt string) {
+			finish("tok")(t, e, wt)
 			if err := e.setResolvePending(ctx, wt); err != nil {
 				t.Fatal(err)
 			}
-		}, false},
-		{"outside git", true, func(t *testing.T, e *Engine, wt string) {
-			if err := e.Reconcile(ctx, wt, FSSource{Root: wt}); err != nil {
+		}, MapStatus{Built: true}},
+		{"outside git, never finished", true, false, func(t *testing.T, e *Engine, wt string) {
+			reconcile(t, e, wt)
+			if err := e.setResolvePending(ctx, wt); err != nil {
 				t.Fatal(err)
 			}
-		}, true},
+		}, MapStatus{}},
+		{"outside git, finished by an earlier version", true, false, reconcile, MapStatus{Done: true, Built: true}},
+		{"outside git, finished with no files", true, true, finish(""), MapStatus{Done: true, Built: true}},
+		{"pruned", false, false, func(t *testing.T, e *Engine, wt string) {
+			finish("tok")(t, e, wt)
+			if ok, err := e.PruneWorktree(ctx, wt, e.clk.Now().Add(time.Second)); err != nil || !ok {
+				t.Fatalf("PruneWorktree = %v, %v", ok, err)
+			}
+		}, MapStatus{}},
+		{"outside git, pruned", true, false, func(t *testing.T, e *Engine, wt string) {
+			finish("")(t, e, wt)
+			if ok, err := e.PruneWorktree(ctx, wt, e.clk.Now().Add(time.Second)); err != nil || !ok {
+				t.Fatalf("PruneWorktree = %v, %v", ok, err)
+			}
+		}, MapStatus{}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			e := newTestEngine(t)
 			wt := t.TempDir()
-			writeFile(t, wt, "api/a.go", "package api\nfunc A(){}")
+			if !tc.noFiles {
+				writeFile(t, wt, "api/a.go", "package api\nfunc A(){}")
+			}
 			tc.setup(t, e, wt)
-			arch, done, err := e.CodeMap(ctx, wt, tc.nonGit)
+			arch, st, err := e.CodeMap(ctx, wt, tc.nonGit)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if done != tc.done {
-				t.Fatalf("done = %v, want %v", done, tc.done)
+			if st != tc.want {
+				t.Fatalf("status = %+v, want %+v", st, tc.want)
 			}
-			if got := strings.Join(moduleNamesOf(arch), ","); (done && got != "api") || (!done && got != "") {
-				t.Errorf("modules = %q with done=%v", got, done)
+			want := ""
+			if st.Done && !tc.noFiles {
+				want = "api"
+			}
+			if got := strings.Join(moduleNamesOf(arch), ","); got != want {
+				t.Errorf("modules = %q, want %q", got, want)
 			}
 		})
+	}
+}
+
+// An edit the post-edit hook indexes outside git shows in the next map:
+// outside git the map is never cached.
+func TestCodeMapOutsideGitCountsAPostEdit(t *testing.T) {
+	ctx := context.Background()
+	e := newTestEngine(t)
+	wt := t.TempDir()
+	writeFile(t, wt, "api/a.go", "package api\nfunc A(){}")
+	if err := e.ReconcileIfStale(ctx, wt, FSSource{Root: wt}, ""); err != nil {
+		t.Fatal(err)
+	}
+	symbols := func() int {
+		arch, st, err := e.CodeMap(ctx, wt, true)
+		if err != nil || !st.Done || len(arch.Modules) != 1 {
+			t.Fatalf("CodeMap = %+v, %+v, %v", arch, st, err)
+		}
+		return arch.Modules[0].Symbols
+	}
+	before := symbols()
+	src := []byte("package api\nfunc A(){}\nfunc B(){}")
+	writeFile(t, wt, "api/a.go", string(src))
+	if err := e.ReindexFileIncremental(ctx, wt, "api/a.go", src, 1, int64(len(src))); err != nil {
+		t.Fatal(err)
+	}
+	if got := symbols(); got != before+1 {
+		t.Errorf("symbols = %d, want %d", got, before+1)
 	}
 }
 
@@ -91,16 +150,16 @@ func TestCodeMapReadsOneSnapshot(t *testing.T) {
 	}
 	t.Cleanup(func() { archHook = nil })
 
-	arch, done, err := e.CodeMap(ctx, wt, false)
+	arch, st, err := e.CodeMap(ctx, wt, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := strings.Join(moduleNamesOf(arch), ","); !done || got != "api,lib" {
-		t.Errorf("CodeMap = %q, done=%v; want api,lib from the snapshot the check saw", got, done)
+	if got := strings.Join(moduleNamesOf(arch), ","); !st.Done || got != "api,lib" {
+		t.Errorf("CodeMap = %q, %+v; want api,lib from the snapshot the check saw", got, st)
 	}
 	archHook = nil
-	if _, done, err := e.CodeMap(ctx, wt, false); err != nil || done {
-		t.Errorf("after the commit: done = %v, %v; want false (pending marker)", done, err)
+	if _, st, err := e.CodeMap(ctx, wt, false); err != nil || st.Done {
+		t.Errorf("after the commit: %+v, %v; want not done (pending marker)", st, err)
 	}
 }
 
@@ -207,5 +266,93 @@ func TestArchitectureIgnoresOtherWorktrees(t *testing.T) {
 	}
 	if len(arch.Deps) != 1 || arch.Deps[0].From != "api" || arch.Deps[0].To != "auth" {
 		t.Errorf("deps = %+v, want only api → auth", arch.Deps)
+	}
+}
+
+func TestCodeMapDuringARefresh(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name   string
+		nonGit bool
+		first  func(e *Engine, wt string) error
+		token  string
+		opts   []ReconcileOption
+	}{
+		{"outside git, finished by an earlier version", true,
+			func(e *Engine, wt string) error { return e.Reconcile(ctx, wt, FSSource{Root: wt}) }, "", nil},
+		{"forced refresh of a changed git worktree", false,
+			func(e *Engine, wt string) error { return e.ReconcileIfStale(ctx, wt, FSSource{Root: wt}, "tok") }, "tok",
+			[]ReconcileOption{WithForce()}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newTestEngine(t)
+			wt := t.TempDir()
+			writeFile(t, wt, "api/a.go", "package api\nfunc A(){}")
+			if err := tc.first(e, wt); err != nil {
+				t.Fatal(err)
+			}
+			writeFile(t, wt, "api/a.go", "package api\n\nfunc A() {}\n\nfunc B() {}\n")
+			held := newHeldReadSource(wt)
+			done := make(chan error, 1)
+			go func() { done <- e.ReconcileIfStale(ctx, wt, held, tc.token, tc.opts...) }()
+			held.awaitRead(t)
+
+			arch, st, err := e.CodeMap(ctx, wt, tc.nonGit)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if st != (MapStatus{Built: true}) || len(arch.Modules) != 0 {
+				t.Errorf("during the refresh: status %+v, modules %v; want built, not done, no map", st, moduleNamesOf(arch))
+			}
+
+			held.release <- struct{}{}
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Fatal(err)
+				}
+			case <-time.After(hangTimeout):
+				t.Fatal("the refresh hung")
+			}
+			arch, st, err = e.CodeMap(ctx, wt, tc.nonGit)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if st != (MapStatus{Done: true, Built: true}) || strings.Join(moduleNamesOf(arch), ",") != "api" {
+				t.Errorf("after the refresh: status %+v, modules %v; want done with api", st, moduleNamesOf(arch))
+			}
+		})
+	}
+}
+
+func TestCodeMapAfterAFailedDeferredDrain(t *testing.T) {
+	ctx := context.Background()
+	e := newTestEngine(t)
+	wt := t.TempDir()
+	writeFile(t, wt, "api/a.go", "package api\nfunc A(){}")
+	// A finished index with no built mark, as an earlier version left it.
+	if err := e.Reconcile(ctx, wt, FSSource{Root: wt}); err != nil {
+		t.Fatal(err)
+	}
+	// A dangling link: the drain lists it, marks the graph pending, then fails to read it.
+	if err := os.Symlink(filepath.Join(wt, "nowhere"), filepath.Join(wt, "api", "gone.go")); err != nil {
+		t.Fatal(err)
+	}
+	// Only a locked run creates the lock directory; Reconcile alone took no lock.
+	if err := os.MkdirAll(filepath.Dir(e.deferredPath(wt)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.markDeferred(wt); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.takeDeferred(ctx, wt); err == nil {
+		t.Fatal("the drain of a dangling link succeeded")
+	}
+	arch, st, err := e.CodeMap(ctx, wt, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st != (MapStatus{Built: true}) || len(arch.Modules) != 0 {
+		t.Errorf("after the failed drain: status %+v, modules %v; want built, not done, no map", st, moduleNamesOf(arch))
 	}
 }

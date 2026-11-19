@@ -1,6 +1,7 @@
 package graph
 
 import (
+	"context"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -37,8 +38,26 @@ type FSSource struct{ Root string }
 
 func (s FSSource) List() ([]FileEntry, error) {
 	var out []FileEntry
-	err := filepath.WalkDir(s.Root, func(p string, d fs.DirEntry, err error) error {
+	err := walkCode(context.Background(), s.Root, func(rel string, d fs.DirEntry) (bool, error) {
+		info, err := d.Info()
 		if err != nil {
+			return false, err
+		}
+		out = append(out, FileEntry{Path: rel, Mtime: info.ModTime().UnixMilli(), Size: info.Size()})
+		return false, nil
+	})
+	return out, err
+}
+
+// walkCode walks root as an index outside git does, calling fn with the
+// slash-separated relative path of each file a supported language takes. It
+// skips the denylist directories, and ends when fn reports stop or ctx ends.
+func walkCode(ctx context.Context, root string, fn func(rel string, d fs.DirEntry) (stop bool, err error)) error {
+	return filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if err := ctx.Err(); err != nil {
 			return err
 		}
 		if d.IsDir() {
@@ -47,7 +66,7 @@ func (s FSSource) List() ([]FileEntry, error) {
 			}
 			return nil
 		}
-		rel, err := filepath.Rel(s.Root, p)
+		rel, err := filepath.Rel(root, p)
 		if err != nil {
 			return err
 		}
@@ -55,14 +74,15 @@ func (s FSSource) List() ([]FileEntry, error) {
 		if _, ok := parse.LangForExt(rel); !ok {
 			return nil
 		}
-		info, err := d.Info()
+		stop, err := fn(rel, d)
 		if err != nil {
 			return err
 		}
-		out = append(out, FileEntry{Path: rel, Mtime: info.ModTime().UnixMilli(), Size: info.Size()})
+		if stop {
+			return filepath.SkipAll
+		}
 		return nil
 	})
-	return out, err
 }
 
 func (s FSSource) Read(path string) ([]byte, error) {

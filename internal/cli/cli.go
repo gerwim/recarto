@@ -26,7 +26,7 @@ var appCommands = map[string]func(ctx context.Context, a *app.App, out io.Writer
 	"snapshot": Snapshot,
 	"todo":     Todo,
 	"sync":     Sync,
-	"warm":     func(ctx context.Context, a *app.App, _ io.Writer, _ []string) error { return Warm(ctx, a) },
+	"warm":     runWarm,
 }
 
 // Run dispatches a CLI invocation (args excludes the program name) and writes

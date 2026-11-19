@@ -26,7 +26,7 @@ func Index(ctx context.Context, a *app.App, w io.Writer, args []string) error {
 	if slices.Contains(args, "--force") {
 		opts = append(opts, graph.WithForce())
 	}
-	if err := a.Graph.ReconcileIfStale(ctx, wt, graph.NewSource(wt), graph.WorktreeToken(wt),
+	if err := a.Graph.ReconcileIfStale(ctx, wt, graph.NewSource(wt), graph.WorktreeToken(wt, ""),
 		opts...); err != nil {
 		return err
 	}

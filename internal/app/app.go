@@ -95,6 +95,11 @@ type App struct {
 	// callers never need a nil check before signaling; nothing consumes it when
 	// sync is unconfigured.
 	SyncTrigger chan struct{}
+	// StartIndex, when set, starts an index of worktree in another process and
+	// returns a channel that gets that process's exit. A session start uses it
+	// for a worktree's first index; nil means it only waits for an index another
+	// process runs.
+	StartIndex func(worktree string) (<-chan error, error)
 }
 
 // SignalSync requests an out-of-band sync cycle from a long-lived process's
