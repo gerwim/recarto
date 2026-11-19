@@ -449,11 +449,44 @@ func TestShareMap(t *testing.T) {
 		t.Fatalf("ample room:\n%s\nwant today's map:\n%s", res.sections[0], want.String())
 	}
 
+	// Room for the head and all nine module lines, not for m0 → m8 beside m8:
+	// the cap of eight holds and m8 does not show.
+	nine := func() (*shareSource, int) {
+		src := &shareSource{label: "r"}
+		mapSteps(src, arch)
+		room := cost(src.heads[0][0])
+		for _, it := range src.steps[0].items {
+			room += cost(it.text)
+		}
+		return src, room
+	}
+	moduleLines := func(section string) int { return strings.Count(section, "\n- ") }
+	src, room := nine()
+	res = share(room, nil, []*shareSource{src}, nil, false)
+	if n := moduleLines(res.sections[0]); n != archModuleLimit || strings.Contains(res.sections[0], "- m8:") {
+		t.Fatalf("tight map shows %d modules:\n%s", n, res.sections[0])
+	}
+	// The pool adds room: m8 still shows only beside m0 → m8.
+	src, room = nine()
+	res = share(2*room+1, nil, []*shareSource{src, {label: "other"}}, nil, false)
+	sec := res.sections[0]
+	if strings.Contains(sec, "- m8:") != strings.Contains(sec, "m0 → m8") ||
+		!strings.Contains(sec, "m0 → m8") && moduleLines(sec) > archModuleLimit {
+		t.Fatalf("with the pool:\n%s", sec)
+	}
+	// Room for the eight, m0 → m8 and m8's line: they show together.
+	src, room = nine()
+	room += cost(src.steps[1].items[0].text)
+	res = share(room, nil, []*shareSource{src}, nil, false)
+	if !strings.Contains(res.sections[0], "- m8:") || !strings.Contains(res.sections[0], "m0 → m8") {
+		t.Fatalf("room for the edge and its endpoint:\n%s", res.sections[0])
+	}
+
 	// With the module cap reached after m0, the edge m0 → m1 brings m1 along.
 	src = &shareSource{label: "r"}
 	mapSteps(src, graph.Architecture{Modules: arch.Modules[:2], Deps: []graph.ModuleEdge{{From: "m0", To: "m1", Count: 1}}})
 	src.steps[0].cap = 1
-	room := cost(src.heads[0][0]) + cost(src.steps[0].items[0].text) + cost(src.steps[0].items[1].text) + cost(src.steps[1].items[0].text)
+	room = cost(src.heads[0][0]) + cost(src.steps[0].items[0].text) + cost(src.steps[0].items[1].text) + cost(src.steps[1].items[0].text)
 	res = share(room, nil, []*shareSource{src}, nil, false)
 	if !strings.Contains(res.sections[0], "- m1:") || !strings.Contains(res.sections[0], "m0 → m1") {
 		t.Fatalf("the edge did not bring its endpoint: %q", res.sections[0])

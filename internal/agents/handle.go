@@ -2,6 +2,7 @@ package agents
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"os"
@@ -304,10 +305,11 @@ func handleSessionStart(ctx context.Context, a *app.App, ev Event) (Result, erro
 	// The block does not need the repos' session rows (it counts this session's
 	// changes as if they were written), so they are written beside the wait.
 	var bg sync.WaitGroup
+	var rowErr error
 	if ev.SessionID != "" {
 		bg.Go(func() {
 			defer recoverHook()
-			ensureRosterSessions(skip, covered, ev, conv)
+			rowErr = ensureRosterSessions(skip, covered, ev, conv)
 		})
 	}
 	var res Result
@@ -320,7 +322,13 @@ func handleSessionStart(ctx context.Context, a *app.App, ev Event) (Result, erro
 		res, err = sharedBlock(ctx, skip, a, now, scope, resumed, wait, ev.SessionID, conv.startedAt, covered)
 	}
 	bg.Wait()
-	return res, err
+	if err != nil {
+		return Result{}, errors.Join(err, rowErr)
+	}
+	// A session row that could not be written does not spoil the block: the
+	// block is delivered and the failure reported.
+	res.Failure = rowErr
+	return res, nil
 }
 
 // subject is the repo a one-repo block is about.
@@ -845,7 +853,7 @@ const stopIssueReminder = " And if Recarto itself errored, ranked the wrong resu
 // Code re-invokes Stop after our block, always pass through. Every fault in the
 // nudge decision degrades to the static reminder — never to silence, and never
 // to a false block.
-func handleStop(ctx context.Context, a *app.App, ev Event) (Result, error) {
+func handleStop(ctx context.Context, a *app.App, ev Event) (res Result, err error) {
 	if ev.SessionID == "" {
 		return Result{}, nil
 	}
@@ -858,9 +866,10 @@ func handleStop(ctx context.Context, a *app.App, ev Event) (Result, error) {
 	}); err != nil {
 		return Result{}, err
 	}
-	if err := endRosterSessions(ctx, a, ev, now); err != nil {
-		return Result{}, err
-	}
+	rosterErr := endRosterSessions(ctx, a, ev, now)
+	// A roster repo whose session cannot be ended does not hold up the sync push
+	// or the nudge; the hook reports it.
+	defer func() { res.Failure = rosterErr }()
 	// Turn boundary: the agent is idle, so a TRUNCATE checkpoint can actually
 	// win the WAL (mid-session it silently yields to concurrent readers).
 	_ = a.Store.Checkpoint(ctx)

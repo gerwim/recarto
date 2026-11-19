@@ -599,7 +599,7 @@ When a conversation starts in a folder outside git that holds no file Recarto in
 - **One repo:** the block a session started in that repo shows, plus the line naming it.
 - **Several repos:** a line per repo with its name and file and symbol counts, or its still-being-indexed or not-built-yet line; then each repo's code map, recent bugs, recent changes and memories, labelled with the repo.
   - Each repo's and the workspace's top pinned do-not-repeat, and the per-repo lines, always show.
-  - The workspace takes at most a third of `RECARTO_SESSION_BUDGET`. The rest is split equally between the repos; what a repo leaves unused is offered to the next repos in order. The block's header and closing lines use what is left.
+  - The workspace takes at most a third of `RECARTO_SESSION_BUDGET`. The rest, including what the workspace leaves unused, is split equally between the repos. What all repos leave unused goes into one pool, which is offered once to each repo in turn, starting with the first; a repo can use it for items its own share could not hold. Tokens no repo can use stay unused. The block's header and closing lines use what is left.
   - A memory held by several served stores shows once.
 - **`resume`** shows only memories the conversation has not been shown, labelled with their repo, and never waits.
 - **Names:** a repo is named by its name, or by its worktree path when another served repo or the folder has the same name. That value works as `repo`, and the block lists these values. When two served repos' paths differ only in letter case, the later one has no such value, and its label says the repo argument cannot select it.

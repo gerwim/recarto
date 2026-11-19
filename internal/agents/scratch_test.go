@@ -31,6 +31,8 @@ type scratch struct {
 func newScratch(t *testing.T) *scratch {
 	t.Helper()
 	clearRecartoEnv(t)
+	// The first-index wait ends when a test says so or the hook ends, never by the real timer.
+	endWaitWhen(t, make(chan struct{}))
 	t.Setenv("RECARTO_CACHE_DIR", t.TempDir())
 	base, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
@@ -424,10 +426,10 @@ func TestScratchFirstIndexesSideBySide(t *testing.T) {
 	for _, order := range []string{"second first", "big first"} {
 		t.Run(order, func(t *testing.T) {
 			s := newScratch(t)
-			second, big, md := s.goRepo("second"), s.goRepo("big"), s.repo("docs", map[string]string{"README.md": "# d"})
-			repos := []string{second, big, md}
+			second, big := s.goRepo("second"), s.goRepo("big")
+			repos := []string{second, big}
 			if order == "big first" {
-				repos = []string{big, second, md}
+				repos = []string{big, second}
 			}
 			a := s.open(s.folder, repos...)
 			remember(t, rc(t, a, second), memory.KindLearning, "NoSuchHelper wraps the retries", "x", memory.Ref{Type: memory.RefSymbol, Value: "NoSuchHelper"})
@@ -467,12 +469,12 @@ func TestScratchFirstIndexesSideBySide(t *testing.T) {
 				return done, nil
 			}
 			b := start(t, a, "s", "startup")
-			for _, w := range []string{"- second: 1 files", "\nbig: " + indexingLine, "\ndocs: 0 files, 0 symbols\n", "references code not present in this worktree"} {
+			for _, w := range []string{"- second: 1 files", "\nbig: " + indexingLine, "references code not present in this worktree"} {
 				if !strings.Contains(b, w) {
 					t.Errorf("block lacks %q", w)
 				}
 			}
-			if strings.Contains(b, "- big:") || starts[md] != 0 || starts[big] != 1 || starts[second] != 1 {
+			if strings.Contains(b, "- big:") || starts[big] != 1 || starts[second] != 1 {
 				t.Errorf("starts %v", starts)
 			}
 			if t.Failed() {
@@ -618,13 +620,14 @@ func TestScratchRosterRowsAfterTheRoster(t *testing.T) {
 	t0 := s.clk.Now().UnixMilli()
 
 	release := holdWriter(t, rr.Store)
-	got := make(chan string, 1)
+	got := make(chan Result, 1)
 	go func() {
 		res, _ := Handle(context.Background(), a, Event{Kind: KindSessionStart, SessionID: "s", Source: "startup"})
-		got <- res.Context
+		got <- res
 	}()
-	if b := await(t, "the start", got); !strings.Contains(b, alsoServing([]string{"recarto"})) {
-		t.Fatalf("block:\n%s", b)
+	// A busy writer is not reported: warm writes the row.
+	if b := await(t, "the start", got); !strings.Contains(b.Context, alsoServing([]string{"recarto"})) || b.Failure != nil {
+		t.Fatalf("failure %v, block:\n%s", b.Failure, b.Context)
 	}
 	if rows := sessionRows(t, rr, "s"); len(rows) != 0 {
 		t.Fatalf("a row written past the held writer: %+v", rows)
@@ -849,5 +852,154 @@ func TestScratchSeveralReposOneUnselectable(t *testing.T) {
 	if !strings.Contains(blk, "with one of: second;") || !strings.Contains(blk, "\n"+label+": ") ||
 		!strings.Contains(blk, "\nRecent bugs:\n- RECARTO-BUG") {
 		t.Fatalf("block:\n%s", blk)
+	}
+}
+
+// TestScratchRefreshEndingInTheWaitShowsItsMap: a refresh of an indexed repo
+// that ends while another repo's first index is waited for shows its map.
+func TestScratchRefreshEndingInTheWaitShowsItsMap(t *testing.T) {
+	s := newScratch(t)
+	x, y := s.goRepo("x"), s.goRepo("y")
+	a := s.open(s.folder, x, y)
+	rx := rc(t, a, x)
+	index(t, rx)
+	writeTree(t, x, map[string]string{"x/b.go": "package x\n\nfunc B() {}\n"})
+	src := newGated(graph.FSSource{Root: x}, true)
+	refreshed := make(chan error, 1)
+	go func() {
+		refreshed <- rx.Graph.ReconcileIfStale(context.Background(), x, src, graph.WorktreeToken(x, ""))
+	}()
+	await(t, "the refresh", src.entered)
+
+	var open sync.Once
+	prev := tierDecided
+	t.Cleanup(func() { tierDecided = prev })
+	tierDecided = func(tr *mapTier) {
+		if tr.rc.Git.Worktree == x && tr.line == indexingLine {
+			open.Do(func() { close(src.gate) })
+		}
+	}
+	yStarted := make(chan struct{})
+	a.StartIndex = func(wt string) (<-chan error, error) {
+		if wt == y {
+			close(yStarted)
+		}
+		return make(chan error), nil
+	}
+	end := make(chan struct{})
+	go func() {
+		if err := <-refreshed; err != nil {
+			t.Errorf("refresh: %v", err)
+		}
+		<-yStarted
+		close(end)
+	}()
+	endWaitWhen(t, end)
+	b := start(t, a, "s", "startup")
+	if !strings.Contains(b, "\nx: 2 files, 2 symbols\n") || !strings.Contains(b, "- x: 2 files") {
+		t.Fatalf("block:\n%s", b)
+	}
+}
+
+// TestScratchIndexCutShortShowsTheLabel: an index cut short, with none
+// running, has no counts to show.
+func TestScratchIndexCutShortShowsTheLabel(t *testing.T) {
+	s := newScratch(t)
+	x, y := s.goRepo("x"), s.goRepo("y")
+	a := s.open(s.folder, x, y)
+	rx := rc(t, a, x)
+	index(t, rx)
+	index(t, rc(t, a, y))
+	writeTree(t, x, map[string]string{"x/b.go": "package x\n\nfunc B() {}\n"})
+	src := newGated(graph.FSSource{Root: x}, true)
+	ctx, cancel := context.WithCancel(context.Background())
+	ran := make(chan error, 1)
+	go func() { ran <- rx.Graph.ReconcileIfStale(ctx, x, src, graph.WorktreeToken(x, "")) }()
+	await(t, "the refresh", src.entered)
+	cancel()
+	close(src.gate)
+	if err := await(t, "the refresh", ran); err == nil {
+		t.Fatal("the refresh was meant to be cut short")
+	}
+	b := start(t, a, "s", "startup")
+	if !strings.Contains(b, "\nx\n") || strings.Contains(b, "x: 0 files") || strings.Contains(b, "- x:") ||
+		!strings.Contains(b, "\ny: 1 files, 1 symbols\n") || !strings.Contains(b, "- y: 1 files") {
+		t.Fatalf("block:\n%s", b)
+	}
+}
+
+// TestScratchMarkdownRepoAddsNoWait: a repo holding nothing to index adds no
+// wait, no map and no indexing line; its one line names it with zero counts.
+func TestScratchMarkdownRepoAddsNoWait(t *testing.T) {
+	s := newScratch(t)
+	second, docs := s.goRepo("second"), s.repo("docs", map[string]string{"README.md": "# d"})
+	a := s.open(s.folder, second, docs)
+	index(t, rc(t, a, second))
+	var mu sync.Mutex
+	var calls []string
+	a.StartIndex = func(wt string) (<-chan error, error) {
+		mu.Lock()
+		calls = append(calls, wt)
+		mu.Unlock()
+		done := make(chan error, 1)
+		done <- fmt.Errorf("no index")
+		return done, nil
+	}
+	got := make(chan string, 1)
+	go func() {
+		res, _ := Handle(context.Background(), a, Event{Kind: KindSessionStart, SessionID: "s", Source: "startup"})
+		got <- res.Context
+	}()
+	b := await(t, "the start", got)
+	mu.Lock()
+	defer mu.Unlock()
+	if !strings.Contains(b, "\ndocs: 0 files, 0 symbols\n") || strings.Contains(b, "- docs:") ||
+		strings.Contains(b, "docs: "+indexingLine) || strings.Contains(b, "docs: "+unbuiltLine) || slices.Contains(calls, docs) {
+		t.Fatalf("calls %v, block:\n%s", calls, b)
+	}
+}
+
+// TestScratchRosterRowFailureIsReported: a roster repo's session row that
+// cannot be written is reported, and the block and Stop are still delivered.
+func TestScratchRosterRowFailureIsReported(t *testing.T) {
+	s := newScratch(t)
+	r := s.goRepo("r")
+	a := s.open(s.folder, r)
+	rr := rc(t, a, r)
+	index(t, rr)
+	remember(t, rr, memory.KindDecision, "R-DECISION", "x")
+	ctx := context.Background()
+	stop := func(id string) Result {
+		t.Helper()
+		s.clk.Advance(time.Second)
+		res, err := Handle(ctx, a, Event{Kind: KindStop, SessionID: id})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return res
+	}
+	start(t, a, "ref", "startup")
+	want := stop("ref")
+
+	if _, err := rr.Store.DB.Exec(`CREATE TRIGGER refuse BEFORE INSERT ON sessions BEGIN SELECT RAISE(ABORT, 'refused'); END`); err != nil {
+		t.Fatal(err)
+	}
+	ev := Event{Kind: KindSessionStart, SessionID: "s", Source: "startup"}
+	var out strings.Builder
+	err := RunHook(ctx, Opened(a), fixedAdapter{ev}, KindSessionStart, strings.NewReader(""), &out)
+	if err == nil || !strings.Contains(err.Error(), "refused") || !strings.Contains(err.Error(), r) || !strings.Contains(out.String(), "R-DECISION") {
+		t.Fatalf("err %v, output %s", err, out.String())
+	}
+	res, err := Handle(ctx, a, Event{Kind: KindSessionStart, SessionID: "s", Source: "compact"})
+	if err != nil || !strings.Contains(res.Context, "R-DECISION") || res.Failure == nil || !strings.Contains(res.Failure.Error(), "refused") {
+		t.Fatalf("err %v, failure %v, block:\n%s", err, res.Failure, res.Context)
+	}
+	got := stop("s")
+	if got.Failure == nil || !strings.Contains(got.Failure.Error(), "refused") || got.SystemMessage != want.SystemMessage || got.SystemMessage == "" {
+		t.Fatalf("stop %+v, want message %q", got, want.SystemMessage)
+	}
+	var ended bool
+	if err := a.Store.DB.QueryRow(`SELECT ended_at IS NOT NULL FROM sessions WHERE id='s'`).Scan(&ended); err != nil || !ended {
+		t.Fatalf("folder row not ended: %v", err)
 	}
 }

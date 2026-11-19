@@ -23,7 +23,6 @@ type shareItem struct {
 	id   string // the memory a recent-bug line shows; "" for other lines
 	ends []int  // a dependency's endpoint modules (indexes into steps[0].items), brought along when not yet shown
 	last bool   // taken only once every earlier item of its step is taken
-	free bool   // does not count toward its step's cap: a module today's map shows only as an endpoint
 }
 
 // shareStep is one fill step's candidates.
@@ -196,7 +195,7 @@ func (st *fillState) fillStep(si int, room *int, placed map[string]int) {
 				continue
 			}
 		}
-		if step.cap > 0 && !it.free && st.counted[si] >= step.cap {
+		if step.cap > 0 && st.counted[si] >= step.cap {
 			continue
 		}
 		if it.last && slices.Contains(st.taken[si][:ii], false) {
@@ -218,9 +217,7 @@ func (st *fillState) fillStep(si int, room *int, placed map[string]int) {
 		}
 		*room -= c
 		st.taken[si][ii] = true
-		if !it.free {
-			st.counted[si]++
-		}
+		st.counted[si]++
 		st.paid[g] = true
 		if si == 0 {
 			st.shown[ii] = true
@@ -446,7 +443,7 @@ func sharedBlock(ctx, skip context.Context, a *app.App, now int64, scope string,
 	}
 	markSurfaced(ctx, a, scope, append(ids, res.bugIDs...))
 	if scope != "" {
-		// A lost mark only costs the next resume a full block, as before.
+		// A lost mark only costs the next resume a full block.
 		_ = a.Ledger.Incr(ctx, scope, blockMetric, 1)
 	}
 	noteRecalled(skip, a, covered, chosen)
@@ -598,6 +595,10 @@ func oneLine(c coveredRepo, t *mapTier, codeMap bool) string {
 	if line != "" {
 		return "\n" + c.label() + ": " + line + "\n"
 	}
+	if !t.mapped() {
+		// An index cut short with none running: no counts are known.
+		return "\n" + c.label() + "\n"
+	}
 	files, syms := 0, 0
 	for _, m := range arch.Modules {
 		files += m.Files
@@ -606,8 +607,10 @@ func oneLine(c coveredRepo, t *mapTier, codeMap bool) string {
 	return fmt.Sprintf("\n%s: %d files, %d symbols\n", c.label(), files, syms)
 }
 
-// mapSteps fills src's map steps from arch: today's map first, in the order it
-// lists them, then the rest in the map's ranking.
+// mapSteps fills src's map steps from arch: the code map's modules and
+// dependencies first, in the order it lists them, then the rest in the map's
+// ranking. A module the map shows only as a dependency's endpoint is not among
+// its modules: past the cap it enters only beside a dependency that is shown.
 func mapSteps(src *shareSource, arch graph.Architecture) {
 	mods, deps := graph.MapArchitecture(arch, archModuleLimit)
 	rmods, rdeps := graph.RankArchitecture(arch)
@@ -616,21 +619,21 @@ func mapSteps(src *shareSource, arch graph.Architecture) {
 		ranked[m.Name] = true
 	}
 	index := map[string]int{}
-	modItem := func(m graph.Module, free bool) {
+	modItem := func(m graph.Module) {
 		index[m.Name] = len(src.steps[0].items)
 		src.steps[0].items = append(src.steps[0].items, shareItem{
 			text: fmt.Sprintf("- %s: %d files, %d symbols\n", m.Name, m.Files, m.Symbols),
 			key:  m.Name,
-			free: free,
 		})
 	}
 	for _, m := range mods {
-		// Today's map shows a module outside its top ranks only as a dependency's endpoint.
-		modItem(m, !ranked[m.Name])
+		if ranked[m.Name] {
+			modItem(m)
+		}
 	}
 	for _, m := range rmods {
 		if _, ok := index[m.Name]; !ok {
-			modItem(m, false)
+			modItem(m)
 		}
 	}
 	type edge struct{ from, to string }
@@ -674,7 +677,7 @@ func bugSteps(src *shareSource, bugs []*memory.Record, pointer bool) {
 	src.heads[1] = [2]string{head, ""}
 }
 
-// changeSteps fills src's recent-changes step from today's tier: its module
+// changeSteps fills src's recent-changes step from the changes tier: its module
 // lines, then its "more" line once every module line is taken.
 func changeSteps(src *shareSource, t deltaTier) {
 	if t.head == "" {

@@ -133,7 +133,7 @@ func conversationApp(ctx context.Context, a *app.App, sessionID string) (*app.Ap
 
 // conversationStart is what a session start knows of its conversation.
 type conversationStart struct {
-	roster    []string // the repos it covers, in order; nil: the session's own worktree (Stage 2's block)
+	roster    []string // the repos it covers, in order; nil: the block of the session's own worktree
 	first     bool     // this start is the first Recarto sees of the conversation
 	startedAt int64    // the folder session's start
 	agent     string   // the folder session's agent, for its roster repo sessions
@@ -290,19 +290,25 @@ func recordRosterSession(ctx context.Context, rc *app.RepoContext, id, agent str
 
 // ensureRosterSessions records ev's conversation in each covered repo that has
 // no session of it yet, side by side. Its writes give up at ctx's write
-// deadline; a repo it misses gets its session from the background warm this
-// start launches, or from a later start or Stop.
-func ensureRosterSessions(ctx context.Context, covered []coveredRepo, ev Event, conv conversationStart) {
+// deadline; a repo whose writer is busy gets its session from the background
+// warm this start launches, or from a later start or Stop. It returns every
+// other failure.
+func ensureRosterSessions(ctx context.Context, covered []coveredRepo, ev Event, conv conversationStart) error {
+	errs := make([]error, len(covered))
 	var wg sync.WaitGroup
-	for _, c := range covered {
+	for i, c := range covered {
 		wg.Go(func() {
 			defer recoverHook()
-			// A miss is not the hook's failure: the folder row and roster already
-			// record the session, and the background warm writes the row.
-			_ = recordRosterSession(ctx, c.RepoContext, ev.SessionID, conv.agent, conv.startedAt)
+			err := recordRosterSession(ctx, c.RepoContext, ev.SessionID, conv.agent, conv.startedAt)
+			// A busy writer is not a failure: the folder row and roster already
+			// record the session, and the background warm retries until the row is written.
+			if err != nil && !store.IsBusy(err) {
+				errs[i] = fmt.Errorf("record the session in %s: %w", c.Git.Worktree, err)
+			}
 		})
 	}
 	wg.Wait()
+	return errors.Join(errs...)
 }
 
 // rosterRetryWait waits before RecordRosterSessions tries a busy repo again.
@@ -315,30 +321,6 @@ var rosterRetryWait = func(ctx context.Context) error {
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
-	}
-}
-
-// rosterRepos opens sessionID's roster repos that can be opened, served ones
-// from a; done closes what it opened. A repo that cannot be opened is left
-// out: a later start or Stop that can open it handles it.
-func rosterRepos(a *app.App, roster []string) (repos []*app.RepoContext, done func()) {
-	var opened []*app.RepoContext
-	for _, wt := range roster {
-		if i := slices.IndexFunc(a.Repos, func(rc *app.RepoContext) bool { return rc.Git.Worktree == wt }); i >= 0 {
-			repos = append(repos, a.Repos[i])
-			continue
-		}
-		rc, err := app.OpenRepo(wt, a.Clock)
-		if err != nil {
-			continue
-		}
-		opened = append(opened, rc)
-		repos = append(repos, rc)
-	}
-	return repos, func() {
-		for _, rc := range opened {
-			_ = rc.Close()
-		}
 	}
 }
 
@@ -360,11 +342,14 @@ func RecordRosterSessions(ctx context.Context, a *app.App, sessionID string) err
 	if err != nil || !found {
 		return err
 	}
-	repos, done := rosterRepos(a, roster)
+	// A repo that cannot be opened keeps its row missing: a later start or Stop
+	// that can open it records it.
+	covered, _, done := cover(a, roster)
 	defer done()
-	errs := make([]error, len(repos))
+	errs := make([]error, len(covered))
 	var wg sync.WaitGroup
-	for i, rc := range repos {
+	for i, c := range covered {
+		rc := c.RepoContext
 		wg.Go(func() {
 			for {
 				err := recordRosterSession(store.WithWriteDeadline(ctx, time.Now().Add(writeGrace)), rc, sessionID, agent, startedAt)
@@ -395,10 +380,13 @@ func endRosterSessions(ctx context.Context, a *app.App, ev Event, now int64) err
 	if err != nil || !found {
 		return err
 	}
-	repos, done := rosterRepos(a, roster)
+	// A repo that cannot be opened keeps its session open: a later Stop that
+	// can open it ends it.
+	covered, _, done := cover(a, roster)
 	defer done()
 	var errs []error
-	for _, rc := range repos {
+	for _, c := range covered {
+		rc := c.RepoContext
 		var ended bool
 		err := rc.Store.DB.QueryRowContext(ctx,
 			`SELECT EXISTS(SELECT 1 FROM sessions WHERE id=? AND ended_at IS NOT NULL)`, ev.SessionID).Scan(&ended)

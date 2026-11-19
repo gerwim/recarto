@@ -116,7 +116,10 @@ func startMapTier(ctx, skip context.Context, wait *startWait, rc *app.RepoContex
 
 // mapTiers reads and settles one tier per repo side by side: each repo's map
 // read, code check, first-index start and wait run in a goroutine of their
-// own under the shared deadline, so no repo waits for another.
+// own under the shared deadline, so no repo waits for another. Once every wait
+// is over each tier that says an index runs is decided again: an already
+// indexed repo never waits for its refresh, so a refresh that ended while
+// other repos' first indexes were waited for shows its finished map.
 func mapTiers(ctx, skip context.Context, wait *startWait, covered []coveredRepo,
 	start func(string) (<-chan error, error)) []*mapTier {
 	tiers := make([]*mapTier, len(covered))
@@ -134,6 +137,9 @@ func mapTiers(ctx, skip context.Context, wait *startWait, covered []coveredRepo,
 		})
 	}
 	wg.Wait()
+	for _, t := range tiers {
+		t.recheck(ctx, skip)
+	}
 	return tiers
 }
 
@@ -193,6 +199,19 @@ func (t *mapTier) decide(ctx, skip context.Context) {
 	case !st.Built:
 		t.line = unbuiltLine
 	}
+	if tierDecided != nil {
+		tierDecided(t)
+	}
+}
+
+// tierDecided, when set, runs after decide settles a tier: a test seam to act
+// between a tier's decision and the end of the shared wait. Nil in production.
+var tierDecided func(t *mapTier)
+
+// mapped reports whether the tier's file and symbol counts are known: its
+// map is finished, or its worktree holds nothing an index would take in.
+func (t *mapTier) mapped() bool {
+	return t != nil && (t.st.Done || t.check != nil && t.empty())
 }
 
 // recheck decides a tier that says an index is running again, and reports

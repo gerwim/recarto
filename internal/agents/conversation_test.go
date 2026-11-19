@@ -19,6 +19,9 @@ func handle(t *testing.T, a *app.App, ev Event) string {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if res.Failure != nil {
+		t.Fatalf("reported failure: %v", res.Failure)
+	}
 	return res.Context
 }
 
