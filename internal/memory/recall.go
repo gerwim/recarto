@@ -262,38 +262,7 @@ func (e *Engine) scored(ctx context.Context, q RecallQuery) ([]RecallResult, int
 		if q.Kind != "" && r.Kind != q.Kind {
 			continue
 		}
-		arms := 1.0
-		if sem != nil {
-			arms = 2
-		}
-		lexical := lexRank[r.ID]
-		semantic := semRank[r.ID]
-		sig := map[string]float64{
-			"lexical":       lexical,
-			"structural":    refScore[r.ID],
-			"recency":       math.Exp(-float64(now-r.UpdatedAt) / recencyHalfLifeMs),
-			"reinforcement": math.Min(1, math.Log1p(float64(r.ReinforcementCount))/math.Log(11)),
-			"branch":        0,
-		}
-		if sem != nil {
-			sig["semantic"] = semantic
-		}
-		if r.Branch == "" || r.Branch == q.Branch {
-			sig["branch"] = 1
-		}
-		score := (wStructural*sig["structural"] + wRelevance*(lexical+semantic)/arms +
-			wRecency*sig["recency"] + wReinforcement*sig["reinforcement"] +
-			wBranch*sig["branch"]) * r.Confidence
-
-		var dangling []Ref
-		if d, derr := e.Dangling(ctx, q.Worktree, r); derr == nil && len(d) > 0 {
-			dangling = d
-			privileged := r.Pinned || r.Kind == KindBug
-			if len(d) == len(codeRefsOf(r.Refs)) && !privileged {
-				score *= danglingDemotion
-			}
-		}
-		scored = append(scored, RecallResult{Record: r, Score: score, Signals: sig, DanglingRefs: dangling})
+		scored = append(scored, e.scoreRecord(ctx, q, r, now, lexRank[r.ID], semRank[r.ID], refScore[r.ID], sem != nil))
 	}
 
 	if q.MinScore > 0 {
@@ -307,6 +276,42 @@ func (e *Engine) scored(ctx context.Context, q RecallQuery) ([]RecallResult, int
 	}
 
 	return scored, limit, nil
+}
+
+// scoreRecord scores one candidate from its arms' ranks and structural score,
+// demoting it when every code ref it holds is missing from q's worktree.
+func (e *Engine) scoreRecord(ctx context.Context, q RecallQuery, r *Record, now int64,
+	lexical, semantic, structural float64, hasSem bool) RecallResult {
+	arms := 1.0
+	if hasSem {
+		arms = 2
+	}
+	sig := map[string]float64{
+		"lexical":       lexical,
+		"structural":    structural,
+		"recency":       math.Exp(-float64(now-r.UpdatedAt) / recencyHalfLifeMs),
+		"reinforcement": math.Min(1, math.Log1p(float64(r.ReinforcementCount))/math.Log(11)),
+		"branch":        0,
+	}
+	if hasSem {
+		sig["semantic"] = semantic
+	}
+	if r.Branch == "" || r.Branch == q.Branch {
+		sig["branch"] = 1
+	}
+	score := (wStructural*sig["structural"] + wRelevance*(lexical+semantic)/arms +
+		wRecency*sig["recency"] + wReinforcement*sig["reinforcement"] +
+		wBranch*sig["branch"]) * r.Confidence
+
+	var dangling []Ref
+	if d, derr := e.Dangling(ctx, q.Worktree, r); derr == nil && len(d) > 0 {
+		dangling = d
+		privileged := r.Pinned || r.Kind == KindBug
+		if len(d) == len(codeRefsOf(r.Refs)) && !privileged {
+			score *= danglingDemotion
+		}
+	}
+	return RecallResult{Record: r, Score: score, Signals: sig, DanglingRefs: dangling}
 }
 
 // selectWithinBudget assembles the returned set: pinned do_not_repeat first under

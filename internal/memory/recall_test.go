@@ -3,6 +3,7 @@ package memory
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strconv"
 	"testing"
 	"time"
@@ -610,7 +611,7 @@ func TestRankedKeepsEveryPinAndStampsNothing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 3 || !got[0].Record.Pinned || !got[1].Record.Pinned || got[2].Record.Kind != KindLearning {
+	if len(got) != 3 || !slices.Contains(pins, got[0].Record.ID) || !slices.Contains(pins, got[1].Record.ID) || got[2].Record.Kind != KindLearning {
 		t.Fatalf("ranked %+v, want both pins then the learning", got)
 	}
 	recalled := func() int64 {

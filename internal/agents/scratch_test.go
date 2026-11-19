@@ -117,7 +117,7 @@ func sessionRows(t *testing.T, r *app.RepoContext, id string) []sessionRow {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var out []sessionRow
 	for rows.Next() {
 		var row sessionRow
@@ -272,7 +272,7 @@ func TestScratchRosterStaysWithTheConversation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer rr.Close()
+	defer func() { _ = rr.Close() }()
 	remember(t, rr, memory.KindLearning, "RECARTO-NEW", "x")
 	remember(t, rc(t, b, second), memory.KindLearning, "SECOND-NEW", "x")
 	mark := r + " (no longer served)"

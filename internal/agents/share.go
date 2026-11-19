@@ -412,118 +412,15 @@ func sharedBlock(ctx, skip context.Context, a *app.App, now int64, scope string,
 	sessionStartUpkeep(skip, a, rcs)
 
 	f := toolFeatures(a)
-	memories := a.Features.On(features.SessionMemories)
-	keep := func(rs []memory.RecallResult) []memory.RecallResult {
-		if a.Features.On(features.Todos) {
-			return rs
-		}
-		return slices.DeleteFunc(rs, func(r memory.RecallResult) bool { return r.Record.Kind == memory.KindTodo })
+	ws, srcs, empty, err := shareSources(ctx, skip, a, now, resumed, session, since, covered, tiers, f)
+	if err != nil {
+		return Result{}, err
 	}
-	empty := true
-	var ws *shareSource
-	if memories && a.Workspace != nil {
-		// As in a one-repo block, a workspace that cannot be read leaves its tier out.
-		if ranked, err := a.Workspace.Engine.Ranked(skip, memory.RecallQuery{Baseline: true}); err == nil {
-			ws = &shareSource{label: "workspace " + a.Workspace.Name, ranked: keep(ranked)}
-			empty = empty && len(ws.ranked) == 0
-		}
-	}
-	srcs := make([]*shareSource, len(covered))
-	for i, c := range covered {
-		src := &shareSource{label: c.label()}
-		if memories {
-			ranked, err := c.Engine.Ranked(skip, memory.RecallQuery{Branch: c.Git.Branch, Worktree: c.Git.Worktree, Baseline: true})
-			if err != nil {
-				return Result{}, err
-			}
-			src.ranked = keep(ranked)
-			empty = empty && len(src.ranked) == 0
-		}
-		fr := f
-		if c.sel == "" {
-			fr = withoutTools(f)
-		}
-		deltas, total, baseline := recentChanges(ctx, skip, a, c.RepoContext, session, since, now)
-		if !resumed {
-			arch, line := tiers[i].result()
-			if line == "" && len(arch.Modules) > 0 {
-				mapSteps(src, arch)
-			}
-			if a.Features.On(features.RecentBugs) {
-				bugs, _ := c.Engine.RecentBugs(ctx, c.Git.Branch, -1)
-				bugSteps(src, bugs, fr.On(features.MemoryTools))
-			}
-			changeSteps(src, buildDeltaTier(deltas, total, baseline, fr.On(features.GraphTools)))
-		}
-		srcs[i] = src
-	}
-
-	framing := make([]string, fNudge+1)
-	if memories {
-		framing[fHeader] = "Recarto memory for the served repos:\n"
-		if empty {
-			framing[fEmpty] = "(no prior memories yet)\n"
-		}
-	}
-	var sels []string
-	for _, c := range covered {
-		if c.sel != "" {
-			sels = append(sels, c.sel)
-		}
-	}
-	if len(sels) > 0 && (f.On(features.GraphTools) || f.On(features.MemoryTools)) {
-		framing[fServed] = "\nGraph and memory tools take repo:\"<name>\" with one of: " + strings.Join(sels, ", ") +
-			"; recall and file-anchored surfacing cover the served repos.\n"
-	}
-	if codeMap && f.On(features.GraphTools) {
-		framing[fGraph] = "Query the code graph with the recarto MCP tools (search, snippet, callers) instead of reading whole files; grep/glob auto-injects matching symbols.\n"
-	}
-	if memories && f.On(features.MemoryTools) {
-		framing[fNudge] = "\nRecord new learnings with the recarto MCP tool `record_memory` and bug fixes with `record_bug`."
-	}
-
+	framing := sharedFraming(a, f, covered, empty, codeMap)
 	res := share(sessionBudget(), ws, srcs, framing, resumed)
-	engineOf := func(src int) *memory.Engine {
-		if src == srcWorkspace {
-			return a.Workspace.Engine
-		}
-		return covered[src].Engine
-	}
-	noteRecalled := func(shown []shareLine) {
-		bySrc := map[int][]memory.RecallResult{}
-		for _, l := range shown {
-			bySrc[l.src] = append(bySrc[l.src], l.r)
-		}
-		for src, rs := range bySrc {
-			engineOf(src).NoteRecalled(skip, rs)
-		}
-	}
 	chosen := append(slices.Clone(res.pins), res.lines...)
-
 	if resumed {
-		var shown []shareLine
-		for _, l := range chosen {
-			n, err := a.Ledger.Get(ctx, scope, shownMetric+l.r.Record.ID)
-			if err != nil {
-				return Result{}, err
-			}
-			if n == 0 {
-				shown = append(shown, l)
-			}
-		}
-		if len(shown) == 0 {
-			return Result{}, nil
-		}
-		var b strings.Builder
-		b.WriteString(framing[fHeader])
-		ids := make([]string, 0, len(shown))
-		for _, l := range shown {
-			b.WriteString(l.text)
-			ids = append(ids, l.r.Record.ID)
-		}
-		markSurfaced(ctx, a, scope, ids)
-		noteRecalled(shown)
-		return Result{Context: strings.TrimSpace(b.String())}, nil
+		return sharedResume(ctx, skip, a, scope, framing[fHeader], chosen, covered)
 	}
 
 	render := func() string {
@@ -552,7 +449,7 @@ func sharedBlock(ctx, skip context.Context, a *app.App, now int64, scope string,
 		// A lost mark only costs the next resume a full block, as before.
 		_ = a.Ledger.Incr(ctx, scope, blockMetric, 1)
 	}
-	noteRecalled(chosen)
+	noteRecalled(skip, a, covered, chosen)
 	// An index can finish while the marks wait for its writer; only the one
 	// lines change, so the marks just written still match.
 	changed := false
@@ -563,6 +460,132 @@ func sharedBlock(ctx, skip context.Context, a *app.App, now int64, scope string,
 		out = render()
 	}
 	return Result{Context: out}, nil
+}
+
+// shareSources gathers what share divides: the workspace's ranked memories,
+// and each covered repo's ranked memories and, for a full block, its map,
+// bugs and changes. empty reports that no source holds a memory.
+func shareSources(ctx, skip context.Context, a *app.App, now int64, resumed bool, session string, since int64,
+	covered []coveredRepo, tiers []*mapTier, f features.Set) (ws *shareSource, srcs []*shareSource, empty bool, err error) {
+	memories := a.Features.On(features.SessionMemories)
+	keep := func(rs []memory.RecallResult) []memory.RecallResult {
+		if a.Features.On(features.Todos) {
+			return rs
+		}
+		return slices.DeleteFunc(rs, func(r memory.RecallResult) bool { return r.Record.Kind == memory.KindTodo })
+	}
+	empty = true
+	if memories && a.Workspace != nil {
+		// As in a one-repo block, a workspace that cannot be read leaves its tier out.
+		if ranked, err := a.Workspace.Engine.Ranked(skip, memory.RecallQuery{Baseline: true}); err == nil {
+			ws = &shareSource{label: "workspace " + a.Workspace.Name, ranked: keep(ranked)}
+			empty = len(ws.ranked) == 0
+		}
+	}
+	srcs = make([]*shareSource, len(covered))
+	for i, c := range covered {
+		src := &shareSource{label: c.label()}
+		if memories {
+			ranked, err := c.Engine.Ranked(skip, memory.RecallQuery{Branch: c.Git.Branch, Worktree: c.Git.Worktree, Baseline: true})
+			if err != nil {
+				return nil, nil, false, err
+			}
+			src.ranked = keep(ranked)
+			empty = empty && len(src.ranked) == 0
+		}
+		fr := f
+		if c.sel == "" {
+			fr = withoutTools(f)
+		}
+		deltas, total, baseline := recentChanges(ctx, skip, a, c.RepoContext, session, since, now)
+		if !resumed {
+			arch, line := tiers[i].result()
+			if line == "" && len(arch.Modules) > 0 {
+				mapSteps(src, arch)
+			}
+			if a.Features.On(features.RecentBugs) {
+				bugs, _ := c.Engine.RecentBugs(ctx, c.Git.Branch, -1)
+				bugSteps(src, bugs, fr.On(features.MemoryTools))
+			}
+			changeSteps(src, buildDeltaTier(deltas, total, baseline, fr.On(features.GraphTools)))
+		}
+		srcs[i] = src
+	}
+	return ws, srcs, empty, nil
+}
+
+// sharedFraming returns the several-repo block's header and closing texts,
+// indexed by fHeader … fNudge, "" where the features leave one out.
+func sharedFraming(a *app.App, f features.Set, covered []coveredRepo, empty, codeMap bool) []string {
+	memories := a.Features.On(features.SessionMemories)
+	framing := make([]string, fNudge+1)
+	if memories {
+		framing[fHeader] = "Recarto memory for the served repos:\n"
+		if empty {
+			framing[fEmpty] = "(no prior memories yet)\n"
+		}
+	}
+	var sels []string
+	for _, c := range covered {
+		if c.sel != "" {
+			sels = append(sels, c.sel)
+		}
+	}
+	if len(sels) > 0 && (f.On(features.GraphTools) || f.On(features.MemoryTools)) {
+		framing[fServed] = "\nGraph and memory tools take repo:\"<name>\" with one of: " + strings.Join(sels, ", ") +
+			"; recall and file-anchored surfacing cover the served repos.\n"
+	}
+	if codeMap && f.On(features.GraphTools) {
+		framing[fGraph] = "Query the code graph with the recarto MCP tools (search, snippet, callers) instead of reading whole files; grep/glob auto-injects matching symbols.\n"
+	}
+	if memories && f.On(features.MemoryTools) {
+		framing[fNudge] = "\nRecord new learnings with the recarto MCP tool `record_memory` and bug fixes with `record_bug`."
+	}
+	return framing
+}
+
+// sharedResume shows the chosen memories scope's conversation has not been
+// shown yet, under header, and marks them shown.
+func sharedResume(ctx, skip context.Context, a *app.App, scope, header string, chosen []shareLine, covered []coveredRepo) (Result, error) {
+	var shown []shareLine
+	for _, l := range chosen {
+		n, err := a.Ledger.Get(ctx, scope, shownMetric+l.r.Record.ID)
+		if err != nil {
+			return Result{}, err
+		}
+		if n == 0 {
+			shown = append(shown, l)
+		}
+	}
+	if len(shown) == 0 {
+		return Result{}, nil
+	}
+	var b strings.Builder
+	b.WriteString(header)
+	ids := make([]string, 0, len(shown))
+	for _, l := range shown {
+		b.WriteString(l.text)
+		ids = append(ids, l.r.Record.ID)
+	}
+	markSurfaced(ctx, a, scope, ids)
+	noteRecalled(skip, a, covered, shown)
+	return Result{Context: strings.TrimSpace(b.String())}, nil
+}
+
+// noteRecalled counts each shown memory as recalled by the engine of the
+// source that shows it.
+func noteRecalled(ctx context.Context, a *app.App, covered []coveredRepo, shown []shareLine) {
+	bySrc := map[int][]memory.RecallResult{}
+	for _, l := range shown {
+		bySrc[l.src] = append(bySrc[l.src], l.r)
+	}
+	for src, rs := range bySrc {
+		if src == srcWorkspace {
+			a.Workspace.Engine.NoteRecalled(ctx, rs)
+		} else {
+			covered[src].Engine.NoteRecalled(ctx, rs)
+		}
+	}
 }
 
 // oneLine is the line naming covered repo c in a several-repo block: its label
