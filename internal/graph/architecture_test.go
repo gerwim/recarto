@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -375,5 +376,26 @@ func TestIsTestModuleNameConservative(t *testing.T) {
 		if got := isTestModuleName(name); got != want {
 			t.Errorf("isTestModuleName(%q) = %v, want %v", name, got, want)
 		}
+	}
+}
+
+func TestRankArchitectureOrder(t *testing.T) {
+	arch := Architecture{
+		Modules: []Module{{Name: "b", Files: 3}, {Name: "a", Files: 3}, {Name: "tests", Files: 9}, {Name: "c", Files: 5}},
+		Deps:    []ModuleEdge{{From: "a", To: "b", Count: 2}, {From: "tests", To: "a", Count: 50}, {From: "c", To: "a", Count: 7}},
+	}
+	mods, deps := RankArchitecture(arch)
+	var names, edges []string
+	for _, m := range mods {
+		names = append(names, m.Name)
+	}
+	for _, d := range deps {
+		edges = append(edges, d.From+">"+d.To)
+	}
+	if got, want := strings.Join(names, ","), "c,a,b,tests"; got != want {
+		t.Errorf("modules %s, want %s", got, want)
+	}
+	if got, want := strings.Join(edges, ","), "c>a,a>b,tests>a"; got != want {
+		t.Errorf("deps %s, want %s", got, want)
 	}
 }

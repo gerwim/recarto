@@ -588,3 +588,57 @@ func TestRecallStampsLastUsedEpoch(t *testing.T) {
 		t.Errorf("recall_count = %d, want 1", count)
 	}
 }
+
+func TestRankedKeepsEveryPinAndStampsNothing(t *testing.T) {
+	e := newTestEngine(t, clock.NewFake(time.UnixMilli(20_000_000)))
+	ctx := context.Background()
+	var pins []string
+	for _, b := range []string{
+		"never add a redundant toolchain directive to go.mod it breaks builds on older toolchains",
+		"never call the indexer from a hook without the lock held or two writers race each other",
+	} {
+		id, _, _, err := e.Record(ctx, NewMemory{Kind: KindDoNotRepeat, Body: b})
+		if err != nil {
+			t.Fatal(err)
+		}
+		pins = append(pins, id)
+	}
+	if _, _, _, err := e.Record(ctx, NewMemory{Kind: KindLearning, Body: "wal mode needs a busy timeout on every connection"}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := e.Ranked(ctx, RecallQuery{Baseline: true, TokenBudget: 5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 3 || !got[0].Record.Pinned || !got[1].Record.Pinned || got[2].Record.Kind != KindLearning {
+		t.Fatalf("ranked %+v, want both pins then the learning", got)
+	}
+	recalled := func() int64 {
+		n, err := e.led.Get(ctx, "lifetime", "memories_recalled")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	if n := recalled(); n != 0 {
+		t.Fatalf("Ranked counted %d recalls", n)
+	}
+	e.NoteRecalled(ctx, got[:1])
+	if n := recalled(); n != 1 {
+		t.Fatalf("NoteRecalled counted %d recalls, want 1", n)
+	}
+}
+
+func TestRecentBugsNegativeLimitReturnsAll(t *testing.T) {
+	e := newTestEngine(t, clock.NewFake(time.UnixMilli(20_000_000)))
+	ctx := context.Background()
+	for i := range 7 {
+		if _, _, _, err := e.Record(ctx, NewMemory{Kind: KindBug, Title: fmt.Sprintf("bug %d", i), Body: fmt.Sprintf("distinct failure number %d in module %c", i, 'a'+i)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	bugs, err := e.RecentBugs(ctx, "", -1)
+	if err != nil || len(bugs) != 7 {
+		t.Fatalf("got %d bugs, %v; want 7", len(bugs), err)
+	}
+}
