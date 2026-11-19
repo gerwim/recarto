@@ -2,6 +2,8 @@ package graph
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -320,5 +322,37 @@ func TestCodeMapDuringARefresh(t *testing.T) {
 				t.Errorf("after the refresh: status %+v, modules %v; want done with api", st, moduleNamesOf(arch))
 			}
 		})
+	}
+}
+
+func TestCodeMapAfterAFailedDeferredDrain(t *testing.T) {
+	ctx := context.Background()
+	e := newTestEngine(t)
+	wt := t.TempDir()
+	writeFile(t, wt, "api/a.go", "package api\nfunc A(){}")
+	// A finished index with no built mark, as an earlier version left it.
+	if err := e.Reconcile(ctx, wt, FSSource{Root: wt}); err != nil {
+		t.Fatal(err)
+	}
+	// A dangling link: the drain lists it, marks the graph pending, then fails to read it.
+	if err := os.Symlink(filepath.Join(wt, "nowhere"), filepath.Join(wt, "api", "gone.go")); err != nil {
+		t.Fatal(err)
+	}
+	// Only a locked run creates the lock directory; Reconcile alone took no lock.
+	if err := os.MkdirAll(filepath.Dir(e.deferredPath(wt)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.markDeferred(wt); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.takeDeferred(ctx, wt); err == nil {
+		t.Fatal("the drain of a dangling link succeeded")
+	}
+	arch, st, err := e.CodeMap(ctx, wt, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st != (MapStatus{Built: true}) || len(arch.Modules) != 0 {
+		t.Errorf("after the failed drain: status %+v, modules %v; want built, not done, no map", st, moduleNamesOf(arch))
 	}
 }

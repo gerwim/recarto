@@ -24,7 +24,11 @@ func TestWriteDeadlineSkipsABusyWriter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer blocker.Close()
+	defer func() {
+		if err := blocker.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
 	bconn, err := blocker.Conn(ctx)
 	if err != nil {
 		t.Fatal(err)

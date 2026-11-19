@@ -256,7 +256,8 @@ func (e *Engine) PresentFiles(ctx context.Context, worktree string, n int) (pres
 	if err != nil {
 		return nil, false, err
 	}
-	defer rows.Close()
+	// rows.Err reports a failed read; Close only frees the cursor.
+	defer func() { _ = rows.Close() }()
 	for rows.Next() {
 		var p string
 		if err := rows.Scan(&p); err != nil {

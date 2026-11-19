@@ -171,10 +171,31 @@ func TestDiscoveryIsNotHeldByAnAttempt(t *testing.T) {
 func TestHasCodeStopsAtItsDeadline(t *testing.T) {
 	repo := committedRepo(t, map[string]string{"a.go": "package a"})
 	flags := t.TempDir()
-	// Lets the orphaned subshell exit before the temp dirs go.
-	t.Cleanup(func() { _ = os.WriteFile(filepath.Join(flags, "release"), nil, 0o644) })
+	// The subshell outlives the killed wrapper and must be gone before its flag directory.
+	t.Cleanup(func() {
+		if err := os.Remove(filepath.Join(flags, "hold")); err != nil {
+			t.Error(err)
+		}
+		if _, err := os.Stat(filepath.Join(flags, "started")); err != nil {
+			return
+		}
+		deadline := time.Now().Add(time.Minute)
+		for {
+			if _, err := os.Stat(filepath.Join(flags, "exited")); err == nil {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Error("the wrapper's subshell never exited")
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	})
+	if err := os.WriteFile(filepath.Join(flags, "hold"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("PATH", gitwrap.Script(t, `case " $* " in *" ls-files "*)
-	( while [ ! -e '`+flags+`/release' ]; do sleep 0.01; done ) &
+	( while [ -e '`+flags+`/hold' ]; do sleep 0.01; done; : > '`+flags+`/exited' ) &
 	: > '`+flags+`/started'
 	wait ;;
 esac`)+string(os.PathListSeparator)+os.Getenv("PATH"))

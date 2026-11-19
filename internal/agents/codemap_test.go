@@ -455,6 +455,9 @@ func TestSessionStartAfterAFinishedIndex(t *testing.T) {
 	}
 }
 
+// TestSessionStartReadsGitForCode: a finished index keeps its map while a
+// stored code file is on disk; git decides once none is; the background index
+// drops a file git stopped listing.
 func TestSessionStartReadsGitForCode(t *testing.T) {
 	finish := func(t *testing.T, a *app.App) {
 		wt := a.Git.Worktree
@@ -465,23 +468,26 @@ func TestSessionStartReadsGitForCode(t *testing.T) {
 	for name, tc := range map[string]struct {
 		change func(t *testing.T, wt string)
 		want   string
+		next   string
 	}{
 		"untracked and ignored, still on disk": {func(t *testing.T, wt string) {
 			gitIn(t, wt, "rm", "-q", "--cached", "a.go")
 			writeTree(t, wt, map[string]string{".gitignore": "a.go\n"})
-		}, "none"},
+		}, "map", "none"},
 		"deleted": {func(t *testing.T, wt string) {
 			if err := os.Remove(filepath.Join(wt, "a.go")); err != nil {
 				t.Fatal(err)
 			}
-		}, "none"},
-		"unchanged": {func(*testing.T, string) {}, "map"},
+		}, "none", "none"},
+		"unchanged": {func(*testing.T, string) {}, "map", "map"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			a := openRepoApp(t, map[string]string{"a.go": "package a\n\nfunc A() {}\n"})
 			finish(t, a)
 			tc.change(t, a.Git.Worktree)
 			wantTier(t, start(t, a, "s1", "startup"), tc.want)
+			finish(t, a)
+			wantTier(t, start(t, a, "s2", "startup"), tc.next)
 		})
 	}
 }

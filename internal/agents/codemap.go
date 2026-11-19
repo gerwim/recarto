@@ -52,9 +52,9 @@ type mapTier struct {
 	got    codeCheck
 }
 
-// startMapTier reads the worktree's map and starts the check whether it still
-// holds code, which runs while the session start does its upkeep. Nil when the
-// map cannot be read.
+// startMapTier reads the worktree's map and, unless a finished index decides
+// from the stored files on disk, starts the check whether the worktree still
+// holds code. Nil when the map cannot be read.
 func startMapTier(ctx, skip context.Context, a *app.App) *mapTier {
 	wt := a.Git.Worktree
 	arch, st, err := a.Graph.CodeMap(skip, wt, a.Git.NonGit)
@@ -67,8 +67,10 @@ func startMapTier(ctx, skip context.Context, a *app.App) *mapTier {
 		// Without the stored files the check lists the whole worktree.
 		present, listed = nil, true
 	}
-	if st.Done && !listed {
-		return t // a finished index that found nothing to index
+	// A stored code file still on disk keeps a finished map without a git process,
+	// which would add about a millisecond; the background index drops a file git stopped listing.
+	if st.Done && (!listed || len(present) > 0) {
+		return t
 	}
 	dctx, cancel := firstIndexDeadline(ctx)
 	t.check, t.wait, t.cancel = make(chan codeCheck, 1), dctx, cancel
@@ -177,7 +179,9 @@ func awaitFirstIndex(ctx context.Context, a *app.App, wt string) {
 		// process may still be indexing the worktree.
 		if done, err := a.StartIndex(wt); err == nil {
 			select {
-			case <-done:
+			case err := <-done:
+				// decide reads the outcome from the index lock and the stored graph.
+				_ = err
 			case <-ctx.Done():
 				return
 			}
