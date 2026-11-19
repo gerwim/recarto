@@ -307,7 +307,7 @@ What session start adds, by its `source`:
 | `resume` | Only the memories the block would show that the conversation has not been shown yet, such as ones recorded or synced since, in the block's format and budget. Nothing when there are none. A session Recarto has no record of gets the full block. |
 
 Every session start syncs memories, imports the team snapshot and compacts memories, whatever the source. A full block then shows the code map, or one line in its place:
-- A worktree with no files Recarto indexes shows neither.
+- A worktree with no files Recarto indexes shows neither. When the last indexed file stays on disk but git stops listing it (untracked and ignored), the old map still shows until the background index after that session start drops the file.
 - A worktree with code whose index has never finished gets its first index: session start starts it, or joins the process already indexing it, and waits up to 2 seconds. If the index finishes, the block shows the map. If it is still running, the block says the code graph is still being indexed, and the index goes on in the background. If it failed or could not start, the block says the code graph is not built yet; the next session start tries again.
 - A worktree whose index finished once never waits. It shows the last finished map, even when it is out of date, or says the graph is still being indexed while a new index of it runs.
 
