@@ -17,7 +17,7 @@ func Compact(ctx context.Context, a *app.App, w io.Writer, args []string) (rerr 
 	force := fs.Bool("force", false, "ignore the once-per-interval gate")
 	dry := fs.Bool("dry-run", false, "report planned changes without writing")
 	budget := fs.Int("budget-tokens", 0, "live-set token budget (0 = default)")
-	vacuum := fs.Bool("vacuum", false, "after compaction, VACUUM the store so freed pages return to the OS (rewrites the file; needs comparable free disk)")
+	vacuum := fs.Bool("vacuum", false, "after compaction, optimize the FTS indexes and VACUUM the store so freed pages return to the OS (rewrites the file; needs comparable free disk)")
 	if helped, err := parseFlags(fs, args); helped || err != nil {
 		return err
 	}
@@ -59,6 +59,16 @@ func Compact(ctx context.Context, a *app.App, w io.Writer, args []string) (rerr 
 		}
 	}
 	if *vacuum && !*dry {
+		// Merge each FTS5 index's segments first: incremental writes leave them
+		// fragmented with delete markers, and the pages optimize frees are only
+		// returned to the OS by the VACUUM that follows.
+		tables, err := a.Store.OptimizeFTS(ctx)
+		if err != nil {
+			return err
+		}
+		if _, err := fmt.Fprintf(w, "fts optimized: %d index(es)\n", len(tables)); err != nil {
+			return err
+		}
 		if _, err := a.Store.DB.ExecContext(ctx, `VACUUM`); err != nil {
 			return err
 		}
