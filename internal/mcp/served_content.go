@@ -63,10 +63,12 @@ func searchContentServed(ctx context.Context, a *app.App, in SearchContentInput)
 			recordUnsearched(part, unsearched, &folderNotes, &failedParts, &failedLabels, reason)
 			continue
 		}
-		if err := graph.CanList(part.root); err != nil {
-			reason := fmt.Sprintf("its files cannot be listed (%v)", err)
-			recordUnsearched(part, unsearched, &folderNotes, &failedParts, &failedLabels, reason)
-			continue
+		if in.Language != "" {
+			if err := graph.CanList(part.root); err != nil {
+				reason := fmt.Sprintf("its files cannot be listed (%v)", err)
+				recordUnsearched(part, unsearched, &folderNotes, &failedParts, &failedLabels, reason)
+				continue
+			}
 		}
 		searchedParts++
 		if part.noSearch {

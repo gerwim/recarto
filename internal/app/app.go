@@ -223,9 +223,11 @@ func OpenContext(ctx context.Context, cfg Config) (*App, error) {
 	}
 	extras := extraRepos(gc.RepoID)
 	// Judged before any store opens, so the folder counts as it was when the server started.
-	codeless := cfg.DecideCodeless && CodeLess(ctx, gc)
+	var codeless bool
 	if cfg.Codeless != nil {
 		codeless = *cfg.Codeless
+	} else {
+		codeless = cfg.DecideCodeless && CodeLess(ctx, gc)
 	}
 	clk := cfg.Clock
 	if clk == nil {
