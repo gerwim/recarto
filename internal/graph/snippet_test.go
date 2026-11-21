@@ -53,6 +53,35 @@ func TestSnippetByNameUniqueReturnsSource(t *testing.T) {
 	}
 }
 
+func TestHasSymbolAndContentNoSymbols(t *testing.T) {
+	e := newTestEngine(t)
+	ctx := context.Background()
+	wt := t.TempDir()
+	code := "package p\nfunc Target() {\n // marker\n}\n"
+	writeFile(t, wt, "a.go", code)
+	src, _ := FSSource{Root: wt}.Read("a.go")
+	if err := e.IndexFile(ctx, wt, "a.go", src, 1, int64(len(src))); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		path, symbol string
+		want         bool
+	}{{"", "Target", true}, {"a.go", "Target", true}, {"other.go", "Target", false}, {"", "Missing", false}} {
+		got, err := e.HasSymbol(ctx, wt, tc.path, tc.symbol)
+		if err != nil || got != tc.want {
+			t.Errorf("HasSymbol(%q, %q) = %v, %v; want %v", tc.path, tc.symbol, got, err, tc.want)
+		}
+	}
+	withSymbol, _, err := e.SearchContentWithMeta(ctx, wt, "marker", ContentSearchOpts{Limit: 10})
+	if err != nil || len(withSymbol) != 1 || withSymbol[0].Symbol != "Target" {
+		t.Fatalf("content with symbols = %+v, %v", withSymbol, err)
+	}
+	withoutSymbol, _, err := e.SearchContentWithMeta(ctx, wt, "marker", ContentSearchOpts{Limit: 10, NoSymbols: true})
+	if err != nil || len(withoutSymbol) != 1 || withoutSymbol[0].Symbol != "" || withoutSymbol[0].Kind != "" {
+		t.Fatalf("content without symbols = %+v, %v", withoutSymbol, err)
+	}
+}
+
 func TestSnippetByNameAmbiguousReturnsCandidates(t *testing.T) {
 	e := newTestEngine(t)
 	ctx := context.Background()

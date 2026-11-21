@@ -31,7 +31,7 @@ type AnnotatedSymbol struct {
 // A lookup miss is an empty slice, not an error.
 func (e *Engine) Annotated(ctx context.Context, worktree, attr string, limit int) ([]AnnotatedSymbol, error) {
 	if limit <= 0 {
-		limit = 50
+		limit = DefaultListLimit
 	}
 	// A use is recorded by its last name segment (@pytest.fixture as fixture,
 	// #[tokio::main] as main), so the qualified form written at the site matches.

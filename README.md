@@ -575,8 +575,9 @@ repo-less session reads and writes exactly the memories the cd'd sessions see:
 
 - Graph and file tools (`search_graph`, `get_code_snippet`, `get_file_outline`, …)
   take an optional `repo` (name or path) to target a served repo; omitted = the cwd
-  repo, and an unknown name errors with the served list. Tools offer `repo` only
-  while at least one listed repo besides the cwd repo is served.
+  repo (from a folder without code, see below), and an unknown name errors with the
+  served list. Tools offer `repo` only while at least one listed repo besides the
+  cwd repo is served.
 - `recall_memory`/`search_bugs`/`list_memory` merge every served repo's memories
   (hits labeled `repo`); `record_memory`/`record_bug` take `repo` to write into a
   specific repo's store (from a folder without code, see below); id lookups resolve
@@ -608,6 +609,38 @@ When `recarto serve` starts in a folder outside git that holds no file Recarto i
 - Replies, errors and labels leave the folder out of the served repos and name each repo by the value that reaches it as `repo`: its name, or its worktree path when another served repo or the folder has the same name.
 
 With no repo served, writes go to the folder's own store. An explicit `repo` and `scope: "workspace"` work as before.
+
+### Graph and file tools from a folder without code
+
+When `recarto serve` starts outside git in a folder with no file Recarto indexes,
+the decision is fixed for that server. With no repo served, graph tools say no code
+is indexed and `search_content` searches the folder.
+
+- **One served repo:** graph tools answer exactly as they do with `repo` naming it,
+  with every argument passed on as given.
+- **Several served repos:** each call first refreshes every repo with code, side by
+  side, within one wait of about 3 seconds. A repo with no indexable files is not
+  waited for and gives no graph results, but can still contribute text matches.
+  - `search_graph`, `query_graph` without `path`, `find_implementations`,
+    `find_annotated`, `get_architecture` and `get_graph_delta` cover every repo,
+    label entries, and split result limits evenly. A hint names `repo` to narrow a
+    capped result; architecture and delta replies have one section per repo.
+  - `find_references`, `trace_call_path` and `get_code_snippet` answer from the one
+    repo with the symbol, or list the repos to pick if several have it. If none
+    do, `find_references` returns text hits from every repo, `trace_call_path`
+    gathers suggestions from every repo, and `get_code_snippet` reports not found.
+  - `get_file_outline`'s `file`, `get_code_snippet`'s `file` and `query_graph`'s
+    `path` follow the ownership rule above. One real file routes the call to its
+    repo. Several: `get_file_outline` lists them with repo and relative path,
+    `get_code_snippet` answers from the one holding the symbol or lists those that
+    do, and `query_graph` returns each file's nodes, labelled. None: the reply says
+    no served repo has the file.
+- `search_content`, with one served repo or several, lists the folder's matches
+  first, then each repo's, every match labelled with its repo or the folder.
+  `offset` and `limit` page that joined list. With `language`, the folder is not
+  searched. A part that cannot be read or listed is left out and named in the reply.
+- An unfinished or refreshing repo is reported once, through the answering repo's
+  own hint or in `notes`.
 
 ### Session start in a folder without code
 

@@ -107,7 +107,7 @@ func recordMemory(ctx context.Context, a *app.App, in RecordMemoryInput) (Record
 	worktree := a.Git.Worktree
 	refWorktree := a.Git.Worktree
 	files := in.Files
-	routed := in.Repo == "" && (in.Scope == "" || in.Scope == scopeRepo) && a.Codeless
+	routed := in.Repo == "" && (in.Scope == "" || in.Scope == scopeRepo) && a.CodelessWithRepos()
 	var w anchors
 	var rt route
 	if in.Repo != "" {
@@ -395,7 +395,7 @@ func recordBug(ctx context.Context, a *app.App, in RecordBugInput) (RecordBugOut
 	var label string
 	var t *app.RepoContext
 	var err error
-	if in.Repo == "" && a.Codeless {
+	if in.Repo == "" && a.CodelessWithRepos() {
 		rt, routeErr := routeWrite(ctx, a, anchors{files: files, symbols: in.Symbols, bug: true})
 		if routeErr != nil {
 			return RecordBugOutput{}, routeErr

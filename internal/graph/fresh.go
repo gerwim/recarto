@@ -100,6 +100,19 @@ func (p *refreshProgress) detail() string {
 // attempt no new one starts for refreshFailureCooldown; the failure rides along
 // in Detail.
 func (e *Engine) EnsureFresh(ctx context.Context, worktree string, src Source, token string, wait time.Duration) Freshness {
+	return e.ensureFresh(ctx, worktree, src, token, func() time.Duration { return wait })
+}
+
+// EnsureFreshBy is EnsureFresh waiting until deadline instead of for a duration:
+// the bound is applied where the wait starts, so callers sharing one deadline
+// never wait past it.
+func (e *Engine) EnsureFreshBy(ctx context.Context, worktree string, src Source, token string, deadline time.Time) Freshness {
+	return e.ensureFresh(ctx, worktree, src, token, func() time.Duration {
+		return max(time.Until(deadline), 0)
+	})
+}
+
+func (e *Engine) ensureFresh(ctx context.Context, worktree string, src Source, token string, wait func() time.Duration) Freshness {
 	// A lost mark only lets the sweep drop this graph sooner, and the next query
 	// re-indexes it; a query must never fail over it. NoteUsed writes only an
 	// hour-old mark, so most queries take no write lock.
@@ -109,28 +122,37 @@ func (e *Engine) EnsureFresh(ctx context.Context, worktree string, src Source, t
 	}
 	r := e.startOrJoinRefresh(ctx, worktree, src, token)
 
-	if wait < 0 {
-		wait = 0
+	// A completed failed run must win even when a shared deadline has expired.
+	select {
+	case <-r.done:
+		return e.refreshResult(ctx, worktree, token, r)
+	default:
 	}
-	timer := time.NewTimer(wait)
+	d := wait()
+	if d < 0 {
+		d = 0
+	}
+	timer := time.NewTimer(d)
 	defer timer.Stop()
 	select {
 	case <-r.done:
-		if r.err != nil {
-			return e.staleStatus(ctx, worktree, "graph refresh failed: "+r.err.Error())
-		}
-		// The refresh completed for the token it started with; the worktree may
-		// have moved again meanwhile, so report Fresh only if it still holds.
-		// An empty token (worktree outside git) never matches anything, so there
-		// a completed refresh IS freshness.
-		if token == "" || e.graphFresh(ctx, worktree, token) {
-			return Freshness{State: Fresh}
-		}
-		return e.staleStatus(ctx, worktree, "worktree changed during refresh")
+		return e.refreshResult(ctx, worktree, token, r)
 	case <-timer.C:
 	case <-ctx.Done():
 	}
 	return e.staleStatus(ctx, worktree, r.prog.detail())
+}
+
+func (e *Engine) refreshResult(ctx context.Context, worktree, token string, r *refreshRun) Freshness {
+	if r.err != nil {
+		return e.staleStatus(ctx, worktree, "graph refresh failed: "+r.err.Error())
+	}
+	// An empty token (worktree outside git) never matches anything, so a
+	// completed refresh is freshness.
+	if token == "" || e.graphFresh(ctx, worktree, token) {
+		return Freshness{State: Fresh}
+	}
+	return e.staleStatus(ctx, worktree, "worktree changed during refresh")
 }
 
 // graphFresh reports whether worktree's stored graph already matches token and

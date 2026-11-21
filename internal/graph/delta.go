@@ -171,7 +171,7 @@ func splitDeltaKey(key string) (qn, kind string) {
 // total is the folded count before limit.
 func (e *Engine) DeltasSince(ctx context.Context, worktree string, sinceMs int64, limit int) ([]Delta, int, error) {
 	if limit <= 0 {
-		limit = 50
+		limit = DefaultListLimit
 	}
 	// at ties are common (one transaction stamps a whole batch); id is UUIDv7,
 	// monotonic with insertion, so it pins chronological order within a tie.

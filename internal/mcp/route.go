@@ -40,23 +40,27 @@ const presentCandidates = 8
 
 func readIndex(ctx context.Context, a *app.App, rc *app.RepoContext, symbols []string) (repoIndex, []bool, error) {
 	wt := rc.Git.Worktree
+	if nothingToIndex(ctx, rc) {
+		return indexEmpty, nil, nil
+	}
 	built, has, err := rc.Graph.IndexedSymbols(ctx, wt, rc.Git.NonGit, symbols)
 	if err != nil {
 		return indexEmpty, nil, fmt.Errorf("read the index of %s: %w", repoLabel(a, rc), err)
-	}
-	present, _, err := rc.Graph.PresentFiles(ctx, wt, presentCandidates)
-	if err != nil {
-		present = nil // Without the stored files HasCode lists the whole worktree.
-	}
-	code, err := graph.HasCode(ctx, wt, rc.Git.NonGit, present...)
-	if err == nil && !code {
-		return indexEmpty, nil, nil
 	}
 	if !built {
 		return indexUnfinished, nil, nil
 	}
 	// A listing that fails proves nothing, so the index state decides.
 	return indexFinished, has, nil
+}
+
+func nothingToIndex(ctx context.Context, rc *app.RepoContext) bool {
+	present, _, err := rc.Graph.PresentFiles(ctx, rc.Git.Worktree, presentCandidates)
+	if err != nil {
+		present = nil // Without the stored files HasCode lists the whole worktree.
+	}
+	code, err := graph.HasCode(ctx, rc.Git.Worktree, rc.Git.NonGit, present...)
+	return err == nil && !code
 }
 
 type resolvedAnchor struct {

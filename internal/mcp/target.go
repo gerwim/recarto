@@ -10,7 +10,7 @@ import (
 // servedRepos returns the repos replies list as served: the RECARTO_REPOS
 // repos, and the session's own folder too unless it is a code-less one.
 func servedRepos(a *app.App) []*app.RepoContext {
-	if a.Codeless {
+	if a.CodelessWithRepos() {
 		return a.Repos
 	}
 	return a.AllRepos()
@@ -19,7 +19,7 @@ func servedRepos(a *app.App) []*app.RepoContext {
 // repoLabel names rc in a reply. From a code-less folder it is rc's selector,
 // the repo value that reaches rc alone; elsewhere it is its name, as before.
 func repoLabel(a *app.App, rc *app.RepoContext) string {
-	if !a.Codeless {
+	if !a.CodelessWithRepos() {
 		return rc.Git.RepoName
 	}
 	if sel, ok := a.Selector(rc); ok {
