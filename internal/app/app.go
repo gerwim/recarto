@@ -45,8 +45,11 @@ type Config struct {
 	// cheap as before.
 	QuickCheck bool
 	// DecideCodeless asks Open to decide once whether a non-git session folder
-	// with served repos holds no indexable code. Only the MCP server sets it.
+	// holds no indexable code. Only the MCP server sets it.
 	DecideCodeless bool
+	// Codeless, when set, is the code-less decision made before the open; Open
+	// uses it instead of deciding (Serve decides before answering the handshake).
+	Codeless *bool
 	// SkipWorkspace leaves App.Workspace nil, so its store is never opened —
 	// for the per-tool hooks (post-read, post-edit, augment), which never touch
 	// it and run on nearly every tool call.
@@ -85,9 +88,8 @@ type App struct {
 	// repos they work with, e.g. a multi-repo verifier running from a
 	// scratch directory.
 	Repos []*RepoContext
-	// Codeless records whether this App, opened with Config.DecideCodeless, was
-	// outside git and held no file an index would take in, with at least one
-	// RECARTO_REPOS repo open. It is fixed for this App's lifetime.
+	// Codeless records whether the folder was outside git and held no file an
+	// index would take in when the server started; fixed for the App's lifetime.
 	Codeless bool
 	// Sync is the HTTP memory-sync client, or nil when unconfigured (no
 	// RECARTO_SYNC_URL/RECARTO_SYNC_KEY, or the repo has no resolvable
@@ -127,6 +129,10 @@ func (rc *RepoContext) AnswersTo(v string) bool {
 		strings.EqualFold(filepath.Base(rc.Git.Worktree), v) ||
 		strings.EqualFold(filepath.Clean(rc.Git.Worktree), filepath.Clean(v))
 }
+
+// CodelessWithRepos reports whether tools called without repo act on the
+// RECARTO_REPOS repos: the folder held no code at start and a repo is served.
+func (a *App) CodelessWithRepos() bool { return a.Codeless && len(a.Repos) > 0 }
 
 // Close releases rc's graph engine and store.
 func (rc *RepoContext) Close() error {
@@ -217,7 +223,10 @@ func OpenContext(ctx context.Context, cfg Config) (*App, error) {
 	}
 	extras := extraRepos(gc.RepoID)
 	// Judged before any store opens, so the folder counts as it was when the server started.
-	codeless := cfg.DecideCodeless && len(extras) > 0 && CodeLess(ctx, gc)
+	codeless := cfg.DecideCodeless && CodeLess(ctx, gc)
+	if cfg.Codeless != nil {
+		codeless = *cfg.Codeless
+	}
 	clk := cfg.Clock
 	if clk == nil {
 		clk = clock.Real{}
@@ -254,12 +263,26 @@ func OpenContext(ctx context.Context, cfg Config) (*App, error) {
 		Sync: syncer, Workspace: ws, Repos: openRepos(extras, clk, storeOpts...), SyncTrigger: make(chan struct{}, 1),
 		Features: features.Load(),
 	}
-	a.Codeless = codeless && len(a.Repos) > 0
+	a.Codeless = codeless
 	if err := a.writeMeta(ctx); err != nil {
 		_ = a.Close()
 		return nil, err
 	}
 	return a, nil
+}
+
+// CodelessNow returns the decision an App opened with cfg makes: false unless
+// cfg.DecideCodeless; else whether cfg's folder is outside git and holds no
+// file an index would take in now.
+func CodelessNow(ctx context.Context, cfg Config) (bool, error) {
+	if !cfg.DecideCodeless {
+		return false, nil
+	}
+	_, gc, _, err := resolvePrimary(cfg)
+	if err != nil {
+		return false, err
+	}
+	return CodeLess(ctx, gc), nil
 }
 
 // CodeLess reports whether gc is outside git and holds no file an index would

@@ -88,7 +88,7 @@ func (e *Engine) TraceCallPathFiltered(ctx context.Context, worktree, symbol, di
 		// No exact match: offer lenient candidates (mirrors search_graph's hint)
 		// instead of a silent empty result.
 		var suggestions []string
-		if res, serr := e.SearchGuided(ctx, worktree, symbol, []string{symbol}, "", "", 5); serr == nil {
+		if res, serr := e.SearchGuided(ctx, worktree, symbol, []string{symbol}, "", "", TraceSuggestions); serr == nil {
 			for _, r := range res {
 				suggestions = append(suggestions, r.Name)
 			}
@@ -228,7 +228,7 @@ func (e *Engine) nodesByName(ctx context.Context, worktree, name string) ([]Call
 	rows, err := e.st.DB.QueryContext(ctx, `
 SELECT n.id, n.name, n.kind, f.path, n.start_line, (n.qualified_name = ?) AS exact
   FROM nodes n JOIN files f ON f.id = n.file_id
- WHERE f.worktree = ? AND (n.name = ? OR n.qualified_name = ? OR n.qualified_name LIKE ?)
+ WHERE f.worktree = ? AND `+nameMatchCond+`
  ORDER BY exact DESC, f.path, n.start_byte
  LIMIT ?`, name, worktree, name, name, suffix, maxAmbiguousStarts)
 	if err != nil {

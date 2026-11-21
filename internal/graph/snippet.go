@@ -38,6 +38,15 @@ type SnippetCandidate struct {
 // blow the token budget; the count reported to the caller is the true total.
 const maxSnippetCandidates = 25
 
+const nameMatchCond = `(n.name = ? OR n.qualified_name = ? OR n.qualified_name LIKE ?)`
+
+func nameSuffix(symbol string) string {
+	if strings.Contains(symbol, ".") {
+		return "%" + "." + symbol
+	}
+	return "\x00"
+}
+
 // SnippetByName resolves a symbol when the file is unknown — the common case
 // right after a search returns a name. It matches name or qualified_name across
 // the worktree: exactly one definition returns its source (Found=true, no
@@ -60,9 +69,9 @@ func (e *Engine) SnippetByName(ctx context.Context, worktree, symbol string) (Sn
 	rows, err := e.st.DB.QueryContext(ctx, `
 SELECT f.path, n.start_line, n.kind, n.qualified_name, (n.qualified_name = ?) AS exact
   FROM nodes n JOIN files f ON f.id = n.file_id
- WHERE f.worktree = ? AND (n.name = ? OR n.qualified_name = ? OR n.qualified_name LIKE ?)
+ WHERE f.worktree = ? AND `+nameMatchCond+`
  ORDER BY exact DESC, f.path, n.start_line
- LIMIT ?`, symbol, worktree, symbol, symbol, suffix, maxSnippetCandidates+1)
+	 LIMIT ?`, symbol, worktree, symbol, symbol, suffix, maxSnippetCandidates+1)
 	if err != nil {
 		return SnippetResult{}, nil, err
 	}
@@ -107,6 +116,24 @@ SELECT f.path, n.start_line, n.kind, n.qualified_name, (n.qualified_name = ?) AS
 	default:
 		return SnippetResult{Found: false}, cands, nil
 	}
+}
+
+// HasSymbol reports whether worktree's graph holds a symbol the read tools
+// resolve symbol to, within file path when path is not "".
+func (e *Engine) HasSymbol(ctx context.Context, worktree, path, symbol string) (bool, error) {
+	symbol = canonicalSymbol(symbol)
+	args := []any{worktree, symbol, symbol, nameSuffix(symbol)}
+	query := `SELECT 1 FROM nodes n JOIN files f ON f.id = n.file_id WHERE f.worktree = ? AND ` + nameMatchCond
+	if path != "" {
+		query += " AND f.path = ?"
+		args = append(args, path)
+	}
+	var one int
+	err := e.st.DB.QueryRowContext(ctx, query+" LIMIT 1", args...).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return err == nil, err
 }
 
 // literalSymbol returns the condition on nodes n that n is symbol as written,
@@ -334,9 +361,9 @@ func (e *Engine) Snippet(ctx context.Context, worktree, path, symbol string) (Sn
 	err := e.st.DB.QueryRowContext(ctx, `
 SELECT n.start_byte, n.end_byte, n.start_line, n.end_line, n.qualified_name
   FROM nodes n JOIN files f ON f.id = n.file_id
- WHERE f.worktree = ? AND f.path = ? AND (n.name = ? OR n.qualified_name = ? OR n.qualified_name LIKE ?)
+ WHERE f.worktree = ? AND f.path = ? AND `+nameMatchCond+`
  ORDER BY (n.qualified_name = ?) DESC, n.start_byte
- LIMIT 1`, worktree, path, symbol, symbol, suffix, symbol).Scan(&sb, &eb, &sl, &el, &qn)
+	LIMIT 1`, worktree, path, symbol, symbol, suffix, symbol).Scan(&sb, &eb, &sl, &el, &qn)
 	if errors.Is(err, sql.ErrNoRows) {
 		return SnippetResult{Found: false}, nil
 	}

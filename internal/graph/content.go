@@ -38,6 +38,23 @@ type ContentSearchOpts struct {
 	Limit      int    // max matches returned (default 50)
 	MaxPerFile int    // max matches per file (default 5)
 	Offset     int    // skip the first N matches of the stable result order (paging)
+	NoSymbols  bool   // leave matches without enclosing-symbol attribution
+}
+
+// ListError is a content search that could not list its worktree's files.
+type ListError struct{ Err error }
+
+func (e *ListError) Error() string { return e.Err.Error() }
+func (e *ListError) Unwrap() error { return e.Err }
+
+// CanList reports, as a *ListError, why worktree's files cannot be listed the
+// way a content search without language lists them (git, else a walk).
+func CanList(worktree string) error {
+	_, err := listSearchableFiles(worktree)
+	if err != nil {
+		return &ListError{Err: err}
+	}
+	return nil
 }
 
 // ContentMeta describes the completeness of a content search so a caller can tell
@@ -72,7 +89,7 @@ func (e *Engine) SearchContent(ctx context.Context, worktree, pattern string, op
 // instead of presenting a silently-truncated page as the whole answer.
 func (e *Engine) SearchContentWithMeta(ctx context.Context, worktree, pattern string, opts ContentSearchOpts) ([]ContentMatch, ContentMeta, error) {
 	if opts.Limit <= 0 {
-		opts.Limit = 50
+		opts.Limit = DefaultContentLimit
 	}
 	if opts.MaxPerFile <= 0 {
 		opts.MaxPerFile = 5
@@ -112,7 +129,7 @@ func (e *Engine) SearchContentWithMeta(ctx context.Context, worktree, pattern st
 	} else {
 		all, lerr := listSearchableFiles(worktree)
 		if lerr != nil {
-			return nil, meta, lerr
+			return nil, meta, &ListError{Err: lerr}
 		}
 		paths = all
 	}
@@ -147,7 +164,7 @@ func (e *Engine) SearchContentWithMeta(ctx context.Context, worktree, pattern st
 		sem <- struct{}{}
 		go func(i int, p string) {
 			defer func() { <-sem; wg.Done() }()
-			results[i] = e.scanFile(ctx, worktree, p, re, prefilter, opts.MaxPerFile)
+			results[i] = e.scanFile(ctx, worktree, p, re, prefilter, opts.MaxPerFile, opts.NoSymbols)
 		}(i, p)
 	}
 	wg.Wait()
@@ -208,7 +225,7 @@ type fileScan struct {
 // each line is matched on its own, so ^ anchors to the line and a cross-line
 // pattern never matches — identical to the original SplitAfter loop, but
 // without materializing the file as strings.
-func (e *Engine) scanFile(ctx context.Context, worktree, p string, re *regexp.Regexp, prefilter string, maxPerFile int) *fileScan {
+func (e *Engine) scanFile(ctx context.Context, worktree, p string, re *regexp.Regexp, prefilter string, maxPerFile int, noSymbols bool) *fileScan {
 	content, err := os.ReadFile(filepath.Join(worktree, filepath.FromSlash(p)))
 	if err != nil {
 		return nil // file vanished since listing; skip
@@ -232,9 +249,13 @@ func (e *Engine) scanFile(ctx context.Context, worktree, p string, re *regexp.Re
 			return nil
 		}
 	}
-	spans, serr := e.fileSpans(ctx, worktree, p)
-	if serr != nil {
-		return &fileScan{path: p, err: serr}
+	var spans fileSpanSet
+	if !noSymbols {
+		var serr error
+		spans, serr = e.fileSpans(ctx, worktree, p)
+		if serr != nil {
+			return &fileScan{path: p, err: serr}
+		}
 	}
 	fs := &fileScan{path: p}
 	var off int64
@@ -351,6 +372,12 @@ func compilePattern(pattern string, asRegex, ignoreCase bool) (*regexp.Regexp, e
 		expr = "(?i)" + expr
 	}
 	return regexp.Compile(expr)
+}
+
+// CheckPattern validates a content-search pattern without reading any files.
+func CheckPattern(pattern string, regex, ignoreCase bool) error {
+	_, err := compilePattern(pattern, regex, ignoreCase)
+	return err
 }
 
 // listSearchableFiles enumerates every file grep should scan in worktree. When

@@ -141,12 +141,30 @@ func addToolSchema[In, Out any](s *sdk.Server, get func(context.Context) (*app.A
 // Serve runs the MCP server over stdio until the client disconnects. It is the
 // body of `recarto serve`: the handshake is answered before any store opens.
 func Serve(ctx context.Context, cfg app.Config) error {
-	sv, err := app.Describe(cfg)
+	sv, cfg, err := prepareServe(ctx, cfg)
 	if err != nil {
 		return err
 	}
 	return serve(ctx, sv, func(ctx context.Context) (*app.App, error) { return app.OpenContext(ctx, cfg) },
 		&sdk.StdioTransport{})
+}
+
+// prepareServe returns what a server offers and the config its open uses, with
+// the code-less decision fixed now, before the handshake is answered: a file
+// created after the server started never changes what tools without repo act on.
+func prepareServe(ctx context.Context, cfg app.Config) (app.Served, app.Config, error) {
+	sv, err := app.Describe(cfg)
+	if err != nil {
+		return app.Served{}, cfg, err
+	}
+	if cfg.DecideCodeless {
+		codeless, err := app.CodelessNow(ctx, cfg)
+		if err != nil {
+			return app.Served{}, cfg, err
+		}
+		cfg.Codeless = &codeless
+	}
+	return sv, cfg, nil
 }
 
 // serve is Serve with the opener and transport injected, so tests can drive the

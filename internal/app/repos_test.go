@@ -134,14 +134,24 @@ func TestOpenDecidesCodelessOnlyWhenRequested(t *testing.T) {
 	_ = a.Close()
 
 	a = open(t.TempDir(), true, false)
-	if a.Codeless {
-		t.Fatal("code-less decision was set without served repos")
+	if !a.Codeless || a.CodelessWithRepos() {
+		t.Fatal("empty folder decision should be code-less but not code-less with served repos")
 	}
 	_ = a.Close()
 
 	a = open(t.TempDir(), false, true)
 	if a.Codeless {
 		t.Fatal("code-less decision ran with DecideCodeless disabled")
+	}
+	_ = a.Close()
+
+	codeless := false
+	a, err := Open(Config{CWD: t.TempDir(), DecideCodeless: true, Codeless: &codeless})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.Codeless {
+		t.Fatal("explicit false code-less decision was ignored")
 	}
 	_ = a.Close()
 }

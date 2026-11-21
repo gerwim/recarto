@@ -95,6 +95,7 @@ type SearchGraphInput struct {
 	Limit            int      `json:"limit,omitempty" jsonschema:"max results"`
 }
 type GraphSymbol struct {
+	Repo          string  `json:"repo,omitempty"`
 	Name          string  `json:"name,omitempty"`
 	QualifiedName string  `json:"qualified_name"`
 	Kind          string  `json:"kind"`
@@ -107,6 +108,7 @@ type SearchGraphOutput struct {
 	Count   int           `json:"count"`
 	Results []GraphSymbol `json:"results"`
 	Hint    string        `json:"hint,omitempty"`
+	Notes   []string      `json:"notes,omitempty"`
 }
 
 // weakResultHint nudges the agent to use candidate_symbols when a concept query
@@ -127,11 +129,17 @@ const (
 func roundScore(s float64) float64 { return math.Round(s*1e4) / 1e4 }
 
 func searchGraph(ctx context.Context, a *app.App, in SearchGraphInput) (SearchGraphOutput, error) {
-	t, err := repoTarget(a, in.Repo)
+	t, served, err := graphTarget(a, in.Repo)
 	if err != nil {
 		return SearchGraphOutput{}, err
 	}
-	fresh := ensureFresh(ctx, t)
+	if served {
+		return searchGraphServed(ctx, a, in)
+	}
+	return searchGraphIn(ctx, t, in, ensureFresh(ctx, t))
+}
+
+func searchGraphIn(ctx context.Context, t *app.RepoContext, in SearchGraphInput, fresh string) (SearchGraphOutput, error) {
 	res, err := t.Graph.SearchGuided(ctx, t.Git.Worktree, in.Query, in.CandidateSymbols, in.Kind, in.Language, in.Limit)
 	if err != nil {
 		return SearchGraphOutput{}, err
@@ -152,7 +160,7 @@ func searchGraph(ctx context.Context, a *app.App, in SearchGraphInput) (SearchGr
 	// than imply exhaustiveness and name the levers that sharpen the ranking.
 	limit := in.Limit
 	if limit <= 0 {
-		limit = 20
+		limit = graph.DefaultSearchLimit
 	}
 	if out.Count >= limit {
 		out.Hint = fmt.Sprintf("Showing the top %d by relevance; more may match. Narrow with candidate_symbols, a kind, a language, or more specific query terms.", limit)
@@ -183,8 +191,12 @@ type TraceHop struct {
 	IsTest     bool   `json:"is_test,omitempty"`    // hop lives in test code
 }
 type TraceCallPathOutput struct {
-	Chains      [][]TraceHop `json:"chains"`
-	Suggestions []string     `json:"suggestions,omitempty"`
+	Chains          [][]TraceHop     `json:"chains"`
+	Suggestions     []string         `json:"suggestions,omitempty"`
+	Repo            string           `json:"repo,omitempty"`
+	Repos           []string         `json:"repos,omitempty"`
+	RepoSuggestions []RepoSuggestion `json:"repo_suggestions,omitempty"`
+	Notes           []string         `json:"notes,omitempty"`
 	// Legend states how to read a chain. The engine roots every chain at the queried
 	// symbol, so callers chains are target→caller order — the same shape as callees
 	// (target→callee) but the opposite call direction. Without a legend an LLM reads
@@ -198,11 +210,17 @@ type TraceCallPathOutput struct {
 }
 
 func traceCallPath(ctx context.Context, a *app.App, in TraceCallPathInput) (TraceCallPathOutput, error) {
-	t, err := repoTarget(a, in.Repo)
+	t, served, err := graphTarget(a, in.Repo)
 	if err != nil {
 		return TraceCallPathOutput{}, err
 	}
-	fresh := ensureFresh(ctx, t)
+	if served {
+		return traceCallPathServed(ctx, a, in)
+	}
+	return traceIn(ctx, t, in, ensureFresh(ctx, t))
+}
+
+func traceIn(ctx context.Context, t *app.RepoContext, in TraceCallPathInput, fresh string) (TraceCallPathOutput, error) {
 	dir := in.Direction
 	if dir == "" {
 		dir = "callees"
@@ -291,22 +309,26 @@ type GetArchitectureInput struct {
 	Limit int    `json:"limit,omitempty" jsonschema:"max modules and max dependencies (default 80)"`
 }
 type ArchModule struct {
+	Repo    string `json:"repo,omitempty"`
 	Name    string `json:"name"`
 	Files   int    `json:"files"`
 	Symbols int    `json:"symbols"`
 }
 type ModuleDep struct {
+	Repo  string `json:"repo,omitempty"`
 	From  string `json:"from"`
 	To    string `json:"to"`
 	Count int    `json:"count"`
 }
 type GetArchitectureOutput struct {
-	Modules     []ArchModule `json:"modules"`
-	Deps        []ModuleDep  `json:"deps,omitempty"`
-	ModuleCount int          `json:"module_count"`        // total modules before the limit cap
-	DepCount    int          `json:"dep_count"`           // total dependency edges before the limit cap
-	Truncated   bool         `json:"truncated,omitempty"` // true when the cap dropped lower-signal entries
-	Hint        string       `json:"hint,omitempty"`      // freshness status while a refresh is in flight
+	Modules     []ArchModule  `json:"modules"`
+	Deps        []ModuleDep   `json:"deps,omitempty"`
+	ModuleCount int           `json:"module_count"`        // total modules before the limit cap
+	DepCount    int           `json:"dep_count"`           // total dependency edges before the limit cap
+	Truncated   bool          `json:"truncated,omitempty"` // true when the cap dropped lower-signal entries
+	Hint        string        `json:"hint,omitempty"`      // freshness status while a refresh is in flight
+	Sections    []ArchSection `json:"sections,omitempty"`
+	Notes       []string      `json:"notes,omitempty"`
 }
 
 // budgetArchitecture delegates to graph.BudgetArchitecture so the CLI (`graph
@@ -317,9 +339,12 @@ func budgetArchitecture(arch graph.Architecture, limit int) (mods []graph.Module
 }
 
 func getArchitecture(ctx context.Context, a *app.App, in GetArchitectureInput) (GetArchitectureOutput, error) {
-	t, err := repoTarget(a, in.Repo)
+	t, served, err := graphTarget(a, in.Repo)
 	if err != nil {
 		return GetArchitectureOutput{}, err
+	}
+	if served {
+		return getArchitectureServed(ctx, a, in)
 	}
 	fresh := ensureFresh(ctx, t)
 	arch, err := t.Graph.Architecture(ctx, t.Git.Worktree, in.Scope)
@@ -357,25 +382,42 @@ type QueryGraphOutput struct {
 	Count int           `json:"count"`
 	Nodes []GraphSymbol `json:"nodes"`
 	Hint  string        `json:"hint,omitempty"` // freshness status while a refresh is in flight
+	Repo  string        `json:"repo,omitempty"`
+	Notes []string      `json:"notes,omitempty"`
 }
 
 func queryGraph(ctx context.Context, a *app.App, in QueryGraphInput) (QueryGraphOutput, error) {
-	t, err := repoTarget(a, in.Repo)
+	spec := querySpec(in)
+	if spec.IsEmpty() {
+		return QueryGraphOutput{}, graph.ErrEmptyQuery
+	}
+	t, served, err := graphTarget(a, in.Repo)
 	if err != nil {
 		return QueryGraphOutput{}, err
 	}
-	fresh := ensureFresh(ctx, t)
-	spec := graph.QuerySpec{
-		Kind: in.Kind, NameLike: in.NameContains, Path: in.Path,
-		Language: in.Language, Limit: in.Limit,
+	if served {
+		return queryGraphServed(ctx, a, in, spec)
 	}
+	return queryIn(ctx, t, spec, ensureFresh(ctx, t))
+}
+
+func querySpec(in QueryGraphInput) graph.QuerySpec {
+	spec := graph.QuerySpec{Kind: in.Kind, NameLike: in.NameContains, Path: in.Path, Language: in.Language, Limit: in.Limit}
 	if in.EdgeKind != "" {
 		spec.Edge = &graph.EdgeFilter{Kind: in.EdgeKind, Direction: in.EdgeDirection}
 	}
+	return spec
+}
+
+func queryIn(ctx context.Context, t *app.RepoContext, spec graph.QuerySpec, fresh string) (QueryGraphOutput, error) {
 	nodes, err := t.Graph.Query(ctx, t.Git.Worktree, spec)
 	if err != nil {
 		return QueryGraphOutput{}, err
 	}
+	return queryOut(nodes, fresh), nil
+}
+
+func queryOut(nodes []graph.QueryNode, fresh string) QueryGraphOutput {
 	out := QueryGraphOutput{Count: len(nodes), Nodes: make([]GraphSymbol, 0, len(nodes)), Hint: fresh}
 	for _, n := range nodes {
 		name, qual := canonicalIdentifier(n.Name, n.QualifiedName)
@@ -383,7 +425,7 @@ func queryGraph(ctx context.Context, a *app.App, in QueryGraphInput) (QueryGraph
 			Name: name, QualifiedName: qual, Kind: n.Kind, Path: n.Path, Signature: n.Signature, Line: n.Line,
 		})
 	}
-	return out, nil
+	return out
 }
 
 // --- search_content ---
@@ -400,6 +442,7 @@ type SearchContentInput struct {
 	Offset     int    `json:"offset,omitempty" jsonschema:"skip the first N matches, to page with offset+limit"`
 }
 type ContentMatch struct {
+	Repo   string `json:"repo,omitempty"`
 	Path   string `json:"path"`
 	Line   int    `json:"line"`
 	Text   string `json:"text"`
@@ -413,12 +456,16 @@ type SearchContentOutput struct {
 	// Truncated reports that the page is partial (Total > Count): the agent must
 	// not treat these matches as the complete set. PerFileCapped flags that the
 	// per-file cap (max_per_file) withheld matches in at least one file.
-	Truncated     bool   `json:"truncated,omitempty"`
-	PerFileCapped bool   `json:"per_file_capped,omitempty"`
-	Hint          string `json:"hint,omitempty"` // freshness status while a refresh is in flight
+	Truncated     bool     `json:"truncated,omitempty"`
+	PerFileCapped bool     `json:"per_file_capped,omitempty"`
+	Hint          string   `json:"hint,omitempty"` // freshness status while a refresh is in flight
+	Notes         []string `json:"notes,omitempty"`
 }
 
 func searchContent(ctx context.Context, a *app.App, in SearchContentInput) (SearchContentOutput, error) {
+	if in.Repo == "" && a.CodelessWithRepos() {
+		return searchContentServed(ctx, a, in)
+	}
 	t, err := repoTarget(a, in.Repo)
 	if err != nil {
 		return SearchContentOutput{}, err
@@ -472,11 +519,16 @@ type GetCodeSnippetOutput struct {
 	// order; the top-level fields above stay zero. Skipped lists symbols beyond
 	// the batch cap that were NOT fetched — re-call with them rather than
 	// assuming coverage.
-	Snippets []BatchSnippet `json:"snippets,omitempty"`
-	Skipped  []string       `json:"skipped,omitempty"`
-	Hint     string         `json:"hint,omitempty"` // freshness status while a refresh is in flight
+	Snippets []BatchSnippet  `json:"snippets,omitempty"`
+	Skipped  []string        `json:"skipped,omitempty"`
+	Hint     string          `json:"hint,omitempty"` // freshness status while a refresh is in flight
+	Repo     string          `json:"repo,omitempty"`
+	Repos    []string        `json:"repos,omitempty"`
+	Files    []FileCandidate `json:"files,omitempty"`
+	Notes    []string        `json:"notes,omitempty"`
 }
 type BatchSnippet struct {
+	Repo          string             `json:"repo,omitempty"`
 	Symbol        string             `json:"symbol"` // as requested
 	Found         bool               `json:"found"`
 	Path          string             `json:"path,omitempty"`
@@ -485,6 +537,33 @@ type BatchSnippet struct {
 	QualifiedName string             `json:"qualified_name,omitempty"`
 	Snippet       string             `json:"snippet,omitempty"`
 	Candidates    []SnippetCandidate `json:"candidates,omitempty"`
+	Repos         []string           `json:"repos,omitempty"`
+	Files         []FileCandidate    `json:"files,omitempty"`
+	Hint          string             `json:"hint,omitempty"`
+}
+
+type FileCandidate struct {
+	Repo string `json:"repo"`
+	Path string `json:"path"`
+}
+
+type RepoSuggestion struct {
+	Repo   string `json:"repo"`
+	Symbol string `json:"symbol"`
+}
+
+type ArchSection struct {
+	Repo        string `json:"repo"`
+	ModuleCount int    `json:"module_count"`
+	DepCount    int    `json:"dep_count"`
+	Note        string `json:"note,omitempty"`
+}
+
+type DeltaSection struct {
+	Repo       string `json:"repo"`
+	BaselineAt string `json:"baseline_at,omitempty"`
+	Total      int    `json:"total"`
+	Note       string `json:"note,omitempty"`
 }
 
 // maxBatchSnippets caps one batch call so a pathological symbol list cannot blow
@@ -522,11 +601,17 @@ func snippetForSymbol(ctx context.Context, t *app.RepoContext, file, symbol stri
 }
 
 func getCodeSnippet(ctx context.Context, a *app.App, in GetCodeSnippetInput) (GetCodeSnippetOutput, error) {
-	t, err := repoTarget(a, in.Repo)
+	t, served, err := graphTarget(a, in.Repo)
 	if err != nil {
 		return GetCodeSnippetOutput{}, err
 	}
-	fresh := ensureFresh(ctx, t)
+	if served {
+		return getCodeSnippetServed(ctx, a, in)
+	}
+	return getCodeSnippetIn(ctx, t, in, ensureFresh(ctx, t))
+}
+
+func getCodeSnippetIn(ctx context.Context, t *app.RepoContext, in GetCodeSnippetInput, fresh string) (GetCodeSnippetOutput, error) {
 	if len(in.Symbols) > 0 {
 		var out GetCodeSnippetOutput
 		batch := in.Symbols
@@ -576,9 +661,12 @@ type OutlineSym struct {
 	EndLine       int    `json:"end_line,omitempty"`
 }
 type GetFileOutlineOutput struct {
-	Count   int          `json:"count"`
-	Symbols []OutlineSym `json:"symbols"`
-	Hint    string       `json:"hint,omitempty"`
+	Count   int             `json:"count"`
+	Symbols []OutlineSym    `json:"symbols"`
+	Hint    string          `json:"hint,omitempty"`
+	Repo    string          `json:"repo,omitempty"`
+	Files   []FileCandidate `json:"files,omitempty"`
+	Notes   []string        `json:"notes,omitempty"`
 }
 
 // outlineMissHint distinguishes "file genuinely has no symbols" from the common
@@ -587,15 +675,25 @@ type GetFileOutlineOutput struct {
 const outlineMissHint = "No symbols. The file may be unindexed, or `file` may not match the indexed repo-relative path (pass a path relative to the repo root, e.g. src/Foo/Bar.cs — not an absolute path)."
 
 func getFileOutline(ctx context.Context, a *app.App, in GetFileOutlineInput) (GetFileOutlineOutput, error) {
-	t, err := repoTarget(a, in.Repo)
+	t, served, err := graphTarget(a, in.Repo)
 	if err != nil {
 		return GetFileOutlineOutput{}, err
 	}
-	fresh := ensureFresh(ctx, t)
-	syms, err := t.Graph.Outline(ctx, t.Git.Worktree, in.File)
+	if served {
+		return getFileOutlineServed(ctx, a, in)
+	}
+	return outlineIn(ctx, t, in.File, ensureFresh(ctx, t))
+}
+
+func outlineIn(ctx context.Context, t *app.RepoContext, file, fresh string) (GetFileOutlineOutput, error) {
+	syms, err := t.Graph.Outline(ctx, t.Git.Worktree, file)
 	if err != nil {
 		return GetFileOutlineOutput{}, err
 	}
+	return outlineOut(syms, fresh), nil
+}
+
+func outlineOut(syms []graph.OutlineSymbol, fresh string) GetFileOutlineOutput {
 	out := GetFileOutlineOutput{Count: len(syms), Symbols: make([]OutlineSym, 0, len(syms))}
 	for _, s := range syms {
 		name, qual := canonicalIdentifier(s.Name, s.QualifiedName)
@@ -609,7 +707,7 @@ func getFileOutline(ctx context.Context, a *app.App, in GetFileOutlineInput) (Ge
 		out.Hint = outlineMissHint
 	}
 	out.Hint = joinHints(fresh, out.Hint)
-	return out, nil
+	return out
 }
 
 // --- find_implementations ---
@@ -621,6 +719,7 @@ type FindImplementationsInput struct {
 	Limit     int    `json:"limit,omitempty" jsonschema:"max results (default 50)"`
 }
 type ImplSymbol struct {
+	Repo          string `json:"repo,omitempty"`
 	Name          string `json:"name,omitempty"`
 	QualifiedName string `json:"qualified_name,omitempty"`
 	Kind          string `json:"kind,omitempty"`
@@ -632,14 +731,21 @@ type FindImplementationsOutput struct {
 	Count   int          `json:"count"`
 	Results []ImplSymbol `json:"results"`
 	Hint    string       `json:"hint,omitempty"` // freshness status while a refresh is in flight
+	Notes   []string     `json:"notes,omitempty"`
 }
 
 func findImplementations(ctx context.Context, a *app.App, in FindImplementationsInput) (FindImplementationsOutput, error) {
-	t, err := repoTarget(a, in.Repo)
+	t, served, err := graphTarget(a, in.Repo)
 	if err != nil {
 		return FindImplementationsOutput{}, err
 	}
-	fresh := ensureFresh(ctx, t)
+	if served {
+		return findImplementationsServed(ctx, a, in)
+	}
+	return implementationsIn(ctx, t, in, ensureFresh(ctx, t))
+}
+
+func implementationsIn(ctx context.Context, t *app.RepoContext, in FindImplementationsInput, fresh string) (FindImplementationsOutput, error) {
 	dir := in.Direction
 	if dir == "" {
 		dir = "down"
@@ -667,6 +773,7 @@ type FindAnnotatedInput struct {
 	Limit     int    `json:"limit,omitempty" jsonschema:"max results (default 50)"`
 }
 type AnnotatedSym struct {
+	Repo          string `json:"repo,omitempty"`
 	Name          string `json:"name,omitempty"`
 	QualifiedName string `json:"qualified_name,omitempty"`
 	Kind          string `json:"kind,omitempty"`
@@ -678,14 +785,21 @@ type FindAnnotatedOutput struct {
 	Count   int            `json:"count"`
 	Results []AnnotatedSym `json:"results"`
 	Hint    string         `json:"hint,omitempty"` // freshness status while a refresh is in flight
+	Notes   []string       `json:"notes,omitempty"`
 }
 
 func findAnnotated(ctx context.Context, a *app.App, in FindAnnotatedInput) (FindAnnotatedOutput, error) {
-	t, err := repoTarget(a, in.Repo)
+	t, served, err := graphTarget(a, in.Repo)
 	if err != nil {
 		return FindAnnotatedOutput{}, err
 	}
-	fresh := ensureFresh(ctx, t)
+	if served {
+		return findAnnotatedServed(ctx, a, in)
+	}
+	return annotatedIn(ctx, t, in, ensureFresh(ctx, t))
+}
+
+func annotatedIn(ctx context.Context, t *app.RepoContext, in FindAnnotatedInput, fresh string) (FindAnnotatedOutput, error) {
 	rels, err := t.Graph.Annotated(ctx, t.Git.Worktree, in.Attribute, in.Limit)
 	if err != nil {
 		return FindAnnotatedOutput{}, err
@@ -709,6 +823,7 @@ type FindReferencesInput struct {
 	Limit  int    `json:"limit,omitempty" jsonschema:"max references (default 50)"`
 }
 type ReferenceOut struct {
+	Repo   string `json:"repo,omitempty"`
 	Path   string `json:"path"`
 	Line   int    `json:"line"`
 	Kind   string `json:"kind"`              // calls|imports|extends|implements|annotates|references|text
@@ -725,14 +840,23 @@ type FindReferencesOutput struct {
 	Truncated  bool           `json:"truncated,omitempty"`
 	References []ReferenceOut `json:"references"`
 	Hint       string         `json:"hint,omitempty"` // freshness status while a refresh is in flight
+	Repo       string         `json:"repo,omitempty"`
+	Repos      []string       `json:"repos,omitempty"`
+	Notes      []string       `json:"notes,omitempty"`
 }
 
 func findReferences(ctx context.Context, a *app.App, in FindReferencesInput) (FindReferencesOutput, error) {
-	t, err := repoTarget(a, in.Repo)
+	t, served, err := graphTarget(a, in.Repo)
 	if err != nil {
 		return FindReferencesOutput{}, err
 	}
-	fresh := ensureFresh(ctx, t)
+	if served {
+		return findReferencesServed(ctx, a, in)
+	}
+	return referencesIn(ctx, t, in, ensureFresh(ctx, t))
+}
+
+func referencesIn(ctx context.Context, t *app.RepoContext, in FindReferencesInput, fresh string) (FindReferencesOutput, error) {
 	refs, meta, err := t.Graph.References(ctx, t.Git.Worktree, in.Symbol, in.Limit)
 	if err != nil {
 		return FindReferencesOutput{}, err
@@ -757,6 +881,7 @@ type GetGraphDeltaInput struct {
 	Limit int    `json:"limit,omitempty" jsonschema:"max symbol changes to return (default 50)"`
 }
 type GraphDeltaEntry struct {
+	Repo          string `json:"repo,omitempty"`
 	Path          string `json:"path"`
 	QualifiedName string `json:"qualified_name"`
 	Kind          string `json:"kind"`
@@ -773,14 +898,22 @@ type GetGraphDeltaOutput struct {
 	Deltas     []GraphDeltaEntry `json:"deltas"`
 	Note       string            `json:"note,omitempty"`
 	Hint       string            `json:"hint,omitempty"` // freshness status while a refresh is in flight
+	Sections   []DeltaSection    `json:"sections,omitempty"`
+	Notes      []string          `json:"notes,omitempty"`
 }
 
 func getGraphDelta(ctx context.Context, a *app.App, in GetGraphDeltaInput) (GetGraphDeltaOutput, error) {
-	t, err := repoTarget(a, in.Repo)
+	t, served, err := graphTarget(a, in.Repo)
 	if err != nil {
 		return GetGraphDeltaOutput{}, err
 	}
-	fresh := ensureFresh(ctx, t)
+	if served {
+		return getGraphDeltaServed(ctx, a, in)
+	}
+	return graphDeltaIn(ctx, a, t, in, ensureFresh(ctx, t))
+}
+
+func graphDeltaIn(ctx context.Context, a *app.App, t *app.RepoContext, in GetGraphDeltaInput, fresh string) (GetGraphDeltaOutput, error) {
 	now := a.Clock.Now().UnixMilli()
 	at, ok, err := t.Graph.DeltaBaseline(ctx, t.Git.Worktree, now)
 	if err != nil {
