@@ -38,11 +38,13 @@ type SnippetCandidate struct {
 // blow the token budget; the count reported to the caller is the true total.
 const maxSnippetCandidates = 25
 
+// nameMatchCond is the condition on nodes n under which get_code_snippet, find_references and trace_call_path resolve a symbol: its bare name, its qualified name, or a qualified name ending in "."+symbol. Arguments: symbol, symbol, nameSuffix(symbol).
 const nameMatchCond = `(n.name = ? OR n.qualified_name = ? OR n.qualified_name LIKE ?)`
 
+// nameSuffix is nameMatchCond's LIKE argument. It is armed only for a dotted input so a bare name never runs a broad LIKE; "\x00" never matches.
 func nameSuffix(symbol string) string {
 	if strings.Contains(symbol, ".") {
-		return "%" + "." + symbol
+		return "%." + symbol
 	}
 	return "\x00"
 }
@@ -62,16 +64,13 @@ func (e *Engine) SnippetByName(ctx context.Context, worktree, symbol string) (Sn
 	// instead of falsely missing and forcing a whole-file read. The suffix is only
 	// armed when the input contains a dot, so a bare name never triggers a broad
 	// LIKE; an exact qualified_name match is flagged and preferred over loose hits.
-	suffix := "\x00" // sentinel: never matches when input has no dot
-	if strings.Contains(symbol, ".") {
-		suffix = "%." + symbol
-	}
+	suffix := nameSuffix(symbol)
 	rows, err := e.st.DB.QueryContext(ctx, `
 SELECT f.path, n.start_line, n.kind, n.qualified_name, (n.qualified_name = ?) AS exact
   FROM nodes n JOIN files f ON f.id = n.file_id
  WHERE f.worktree = ? AND `+nameMatchCond+`
  ORDER BY exact DESC, f.path, n.start_line
-	 LIMIT ?`, symbol, worktree, symbol, symbol, suffix, maxSnippetCandidates+1)
+ LIMIT ?`, symbol, worktree, symbol, symbol, suffix, maxSnippetCandidates+1)
 	if err != nil {
 		return SnippetResult{}, nil, err
 	}
@@ -354,16 +353,13 @@ func (e *Engine) Snippet(ctx context.Context, worktree, path, symbol string) (Sn
 	// name, so the form resolved by SnippetByName (and by trace) resolves here too.
 	// Exact qualified_name is ordered first so a precise input never loses to a
 	// looser suffix collision within the same file.
-	suffix := "\x00"
-	if strings.Contains(symbol, ".") {
-		suffix = "%." + symbol
-	}
+	suffix := nameSuffix(symbol)
 	err := e.st.DB.QueryRowContext(ctx, `
 SELECT n.start_byte, n.end_byte, n.start_line, n.end_line, n.qualified_name
   FROM nodes n JOIN files f ON f.id = n.file_id
  WHERE f.worktree = ? AND f.path = ? AND `+nameMatchCond+`
  ORDER BY (n.qualified_name = ?) DESC, n.start_byte
-	LIMIT 1`, worktree, path, symbol, symbol, suffix, symbol).Scan(&sb, &eb, &sl, &el, &qn)
+ LIMIT 1`, worktree, path, symbol, symbol, suffix, symbol).Scan(&sb, &eb, &sl, &el, &qn)
 	if errors.Is(err, sql.ErrNoRows) {
 		return SnippetResult{Found: false}, nil
 	}

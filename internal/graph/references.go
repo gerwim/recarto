@@ -63,10 +63,7 @@ func (e *Engine) References(ctx context.Context, worktree, symbol string, limit 
 			recv = prefix
 		}
 	}
-	suffix := "\x00" // sentinel: never matches when input has no dot (see SnippetByName)
-	if strings.Contains(symbol, ".") {
-		suffix = "%." + symbol
-	}
+	suffix := nameSuffix(symbol)
 
 	var nodeCount int
 	if err := e.st.DB.QueryRowContext(ctx, `
@@ -104,7 +101,7 @@ SELECT f.path AS path, e2.line AS line, e2.kind AS kind, COALESCE(sn.qualified_n
 UNION` + edgeSelect + `
  WHERE f.worktree = ? AND e2.dst_node_id IN (
        SELECT n.id FROM nodes n JOIN files f2 ON f2.id = n.file_id
-         WHERE f2.worktree = ? AND ` + nameMatchCond + `)
+        WHERE f2.worktree = ? AND ` + nameMatchCond + `)
 ) ORDER BY path, line LIMIT ?`
 		args = []any{worktree, leaf, recv, worktree, worktree, symbol, symbol, suffix, limit + 1}
 	} else {
@@ -114,7 +111,7 @@ UNION` + edgeSelect + `
 UNION` + edgeSelect + `
  WHERE f.worktree = ? AND e2.dst_node_id IN (
        SELECT n.id FROM nodes n JOIN files f2 ON f2.id = n.file_id
-         WHERE f2.worktree = ? AND ` + nameMatchCond + `)
+        WHERE f2.worktree = ? AND ` + nameMatchCond + `)
 ) ORDER BY path, line LIMIT ?`
 		args = []any{worktree, leaf, worktree, worktree, symbol, symbol, suffix, limit + 1}
 	}
@@ -147,7 +144,7 @@ UNION` + edgeSelect + `
 	} else {
 		// Always run the text sweep — even when edge hits == limit — so that
 		// unseen text refs are discovered and Truncated is set honestly.
-		refs, meta.Truncated, err = e.textSweep(ctx, worktree, leaf, limit, refs, seen, false)
+		refs, meta.Truncated, err = e.textSweep(ctx, worktree, leaf, limit+len(seen), limit, refs, seen, false)
 		if err != nil {
 			return nil, meta, err
 		}
@@ -156,10 +153,10 @@ UNION` + edgeSelect + `
 	return refs, meta, nil
 }
 
-func (e *Engine) textSweep(ctx context.Context, worktree, leaf string, limit int, refs []Reference, seen map[string]bool, noSymbols bool) ([]Reference, bool, error) {
+func (e *Engine) textSweep(ctx context.Context, worktree, leaf string, fetch, limit int, refs []Reference, seen map[string]bool, noSymbols bool) ([]Reference, bool, error) {
 	pattern := `\b` + regexp.QuoteMeta(leaf) + `\b`
 	matches, _, err := e.SearchContentWithMeta(ctx, worktree, pattern, ContentSearchOpts{
-		Regex: true, Limit: limit + len(seen), MaxPerFile: 10, NoSymbols: noSymbols,
+		Regex: true, Limit: fetch, MaxPerFile: 10, NoSymbols: noSymbols,
 	})
 	if err != nil {
 		return nil, false, err
@@ -184,7 +181,9 @@ func (e *Engine) textSweep(ctx context.Context, worktree, leaf string, limit int
 
 // TextReferences is References' word-boundary text sweep alone: every hit is
 // kind "text". noSymbols leaves hits without their enclosing symbol, for a
-// worktree whose graph is set aside. Resolved is false.
+// worktree whose graph is set aside. Resolved is false. Truncated is set when
+// more hits than limit exist; matches withheld by the per-file cap of 10 are
+// not counted, as in References.
 func (e *Engine) TextReferences(ctx context.Context, worktree, symbol string, limit int, noSymbols bool) ([]Reference, ReferencesMeta, error) {
 	if limit <= 0 {
 		limit = DefaultListLimit
@@ -197,7 +196,8 @@ func (e *Engine) TextReferences(ctx context.Context, worktree, symbol string, li
 	if i := lastDot(symbol); i >= 0 {
 		leaf = symbol[i+1:]
 	}
-	refs, truncated, err := e.textSweep(ctx, worktree, leaf, limit, nil, map[string]bool{}, noSymbols)
+	// One hit past the limit shows whether the sweep omitted a match.
+	refs, truncated, err := e.textSweep(ctx, worktree, leaf, limit+1, limit, nil, map[string]bool{}, noSymbols)
 	if err != nil {
 		return nil, ReferencesMeta{}, err
 	}

@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/gerwim/recarto/internal/app"
+	"github.com/gerwim/recarto/internal/graph"
 )
 
 func TestGraphToolsRejectCodeLessFolderWithoutRepos(t *testing.T) {
@@ -29,7 +30,7 @@ func TestGraphToolsRejectCodeLessFolderWithoutRepos(t *testing.T) {
 		}()},
 		{"get_architecture", func() error { _, err := getArchitecture(context.Background(), a, GetArchitectureInput{}); return err }()},
 		{"query_graph", func() error {
-			_, err := queryGraph(context.Background(), a, QueryGraphInput{Kind: "function"})
+			_, err := queryGraph(context.Background(), a, QueryGraphInput{})
 			return err
 		}()},
 		{"get_code_snippet", func() error {
@@ -193,5 +194,73 @@ func TestOneServedRepoGraphMatchesExplicit(t *testing.T) {
 	withRepo, err := searchGraph(context.Background(), one, SearchGraphInput{Repo: recarto, Query: "TryLockFile", CandidateSymbols: []string{"TryLockFile"}})
 	if err != nil || !reflect.DeepEqual(withoutRepo, withRepo) {
 		t.Fatalf("one-repo implicit result = %+v, explicit = %+v, err %v", withoutRepo, withRepo, err)
+	}
+}
+
+func TestQueryGraphResolvesRepoBeforeFilters(t *testing.T) {
+	_, _, _, a := servedGraphFixture(t, true)
+	_, err := queryGraph(context.Background(), a, QueryGraphInput{Repo: "missing"})
+	if err == nil || !strings.HasPrefix(err.Error(), `unknown repo "missing"`) || errors.Is(err, graph.ErrEmptyQuery) {
+		t.Fatalf("unknown repo with empty query = %v", err)
+	}
+	_, err = queryGraph(context.Background(), a, QueryGraphInput{})
+	if !errors.Is(err, graph.ErrEmptyQuery) {
+		t.Fatalf("served empty query = %v, want %v", err, graph.ErrEmptyQuery)
+	}
+}
+
+func TestServedSnippetBatchRoutedByFileKeepsSkipped(t *testing.T) {
+	_, _, _, a := servedGraphFixture(t, true)
+	symbols := []string{"TryLockFile", "Missing1", "Missing2", "Missing3", "Missing4", "Missing5", "Missing6", "Missing7", "Missing8", "Missing9", "Missing10"}
+	explicit, err := getCodeSnippet(context.Background(), a, GetCodeSnippetInput{Repo: "second", File: "store/filelock.go", Symbols: symbols})
+	if err != nil {
+		t.Fatal(err)
+	}
+	routed, err := getCodeSnippet(context.Background(), a, GetCodeSnippetInput{File: "store/filelock.go", Symbols: symbols})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := explicit
+	for i := range want.Snippets {
+		want.Snippets[i].Repo = "second"
+	}
+	want.Repo = "second"
+	if !reflect.DeepEqual(routed, want) || !reflect.DeepEqual(routed.Skipped, []string{"Missing10"}) {
+		t.Fatalf("routed batch = %+v, want %+v with skipped %q", routed, want, "Missing10")
+	}
+}
+
+func TestServedSnippetBatchHintsOnce(t *testing.T) {
+	_, _, _, a := servedGraphFixture(t, true)
+	out, err := getCodeSnippet(context.Background(), a, GetCodeSnippetInput{Symbols: []string{"SessionStart", "TryLockFile", "NoSuchA", "NoSuchB"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantRepos := []string{"recarto", "second"}
+	if len(out.Snippets) != 4 || !reflect.DeepEqual(out.Snippets[0].Repos, wantRepos) || !reflect.DeepEqual(out.Snippets[1].Repos, wantRepos) {
+		t.Fatalf("ambiguous batch entries = %+v", out.Snippets)
+	}
+	if strings.Count(out.Hint, "call again with one of them as repo") != 1 || !strings.Contains(out.Hint, noSymbolHint("NoSuchA or NoSuchB", "recarto, second")) {
+		t.Fatalf("batch hint = %q", out.Hint)
+	}
+	out, err = getCodeSnippet(context.Background(), a, GetCodeSnippetInput{Symbols: []string{"TryLockFile", "Warm"}, File: "no/such/file.go"})
+	if err != nil || out.Hint != noFileHint("no/such/file.go", "recarto, second") {
+		t.Fatalf("missing-file batch hint = %q, err %v", out.Hint, err)
+	}
+}
+
+func TestServedTextReferencesReportOmittedHits(t *testing.T) {
+	_, recarto, _, a := servedGraphFixture(t, true)
+	content := []byte("RECARTO_QUICKCHECK_INTERVAL\nRECARTO_QUICKCHECK_INTERVAL\nRECARTO_QUICKCHECK_INTERVAL\n")
+	if err := os.WriteFile(filepath.Join(recarto, "NOTES.md"), content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, err := findReferences(context.Background(), a, FindReferencesInput{Symbol: "RECARTO_QUICKCHECK_INTERVAL", Limit: 2})
+	if err != nil || out.Count != 2 || !out.Truncated || out.Resolved || !strings.Contains(out.Hint, "limit is shared") {
+		t.Fatalf("limited text references = %+v, err %v", out, err)
+	}
+	out, err = findReferences(context.Background(), a, FindReferencesInput{Symbol: "RECARTO_QUICKCHECK_INTERVAL", Limit: 3})
+	if err != nil || out.Count != 3 || out.Truncated || out.Resolved || out.Hint != "" {
+		t.Fatalf("complete text references = %+v, err %v", out, err)
 	}
 }

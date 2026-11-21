@@ -213,6 +213,14 @@ func severalReposHint(name string, rs []repoState) string {
 	return fmt.Sprintf("%s is in several served repos. Pass repo as one of: %s.", name, strings.Join(args, ", "))
 }
 
+func noSymbolHint(names, searched string) string {
+	return fmt.Sprintf("No served repo has a symbol named %s (searched: %s).", names, searched)
+}
+
+func noFileHint(file, searched string) string {
+	return fmt.Sprintf("No served repo has the file %s (searched: %s).", file, searched)
+}
+
 const noBaselineNote = "no prior working session has changed the code graph here — nothing to compare against."
 
 const emptyRepoNote = "it holds no files Recarto indexes."

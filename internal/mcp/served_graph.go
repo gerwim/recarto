@@ -42,6 +42,9 @@ func searchGraphServed(ctx context.Context, a *app.App, in SearchGraphInput) (Se
 }
 
 func queryGraphServed(ctx context.Context, a *app.App, in QueryGraphInput, spec graph.QuerySpec) (QueryGraphOutput, error) {
+	if spec.IsEmpty() {
+		return QueryGraphOutput{}, graph.ErrEmptyQuery
+	}
 	rs, err := freshenServed(ctx, a)
 	if err != nil {
 		return QueryGraphOutput{}, err
@@ -50,7 +53,7 @@ func queryGraphServed(ctx context.Context, a *app.App, in QueryGraphInput, spec 
 		owned := app.OwnedFiles(a.Repos, in.Path)
 		switch len(owned) {
 		case 0:
-			return QueryGraphOutput{Nodes: []GraphSymbol{}, Hint: fmt.Sprintf("No served repo has the file %s (searched: %s).", in.Path, servedLabels(rs)), Notes: replyNotes(rs, nil, nil)}, nil
+			return QueryGraphOutput{Nodes: []GraphSymbol{}, Hint: noFileHint(in.Path, servedLabels(rs)), Notes: replyNotes(rs, nil, nil)}, nil
 		case 1:
 			owner := stateFor(rs, owned[0].Repo)
 			if owner.empty {
@@ -348,7 +351,7 @@ func traceCallPathServed(ctx context.Context, a *app.App, in TraceCallPathInput)
 			avail[i] = len(parts[i])
 		}
 		shares := shareCap(avail, graph.TraceSuggestions)
-		out := TraceCallPathOutput{Chains: [][]TraceHop{}, RepoSuggestions: []RepoSuggestion{}, Hint: fmt.Sprintf("No served repo has a symbol named %s (searched: %s).", in.Symbol, servedLabels(rs)), Notes: replyNotes(rs, nil, nil)}
+		out := TraceCallPathOutput{Chains: [][]TraceHop{}, RepoSuggestions: []RepoSuggestion{}, Hint: noSymbolHint(in.Symbol, servedLabels(rs)), Notes: replyNotes(rs, nil, nil)}
 		for i, suggestions := range parts {
 			for _, name := range suggestions[:min(len(suggestions), shares[i])] {
 				out.RepoSuggestions = append(out.RepoSuggestions, RepoSuggestion{Repo: rs[i].label, Symbol: name})
@@ -427,7 +430,7 @@ func getFileOutlineServed(ctx context.Context, a *app.App, in GetFileOutlineInpu
 	owned := app.OwnedFiles(a.Repos, in.File)
 	switch len(owned) {
 	case 0:
-		return GetFileOutlineOutput{Symbols: []OutlineSym{}, Hint: fmt.Sprintf("No served repo has the file %s (searched: %s).", in.File, servedLabels(rs)), Notes: replyNotes(rs, nil, nil)}, nil
+		return GetFileOutlineOutput{Symbols: []OutlineSym{}, Hint: noFileHint(in.File, servedLabels(rs)), Notes: replyNotes(rs, nil, nil)}, nil
 	case 1:
 		owner := stateFor(rs, owned[0].Repo)
 		var out GetFileOutlineOutput
@@ -539,13 +542,13 @@ func getCodeSnippetServed(ctx context.Context, a *app.App, in GetCodeSnippetInpu
 	if len(in.Symbols) == 0 && in.Symbol == "" {
 		return GetCodeSnippetOutput{}, fmt.Errorf("pass symbol (one) or symbols (batch)")
 	}
-	var owned []app.OwnedFile
-	if in.File != "" {
-		owned = app.OwnedFiles(a.Repos, in.File)
-	}
 	rs, err := freshenServed(ctx, a)
 	if err != nil {
 		return GetCodeSnippetOutput{}, err
+	}
+	var owned []app.OwnedFile
+	if in.File != "" {
+		owned = app.OwnedFiles(a.Repos, in.File)
 	}
 	if len(in.Symbols) == 0 {
 		settled, err := settleSnippet(ctx, rs, in.File != "", owned, in.Symbol)
@@ -565,9 +568,9 @@ func getCodeSnippetServed(ctx context.Context, a *app.App, in GetCodeSnippetInpu
 		} else {
 			searched := settled.searched
 			if in.File != "" && len(owned) == 0 {
-				out.Hint = fmt.Sprintf("No served repo has the file %s (searched: %s).", in.File, servedLabels(rs))
+				out.Hint = noFileHint(in.File, servedLabels(rs))
 			} else {
-				out.Hint = fmt.Sprintf("No served repo has a symbol named %s (searched: %s).", in.Symbol, labelsForStates(searched))
+				out.Hint = noSymbolHint(in.Symbol, labelsForStates(searched))
 			}
 		}
 		return out, nil
@@ -606,7 +609,7 @@ func getCodeSnippetBatchServed(ctx context.Context, a *app.App, rs []repoState, 
 			}
 		} else {
 			var err error
-			out, err = getCodeSnippetIn(ctx, owner.rc, GetCodeSnippetInput{File: owned[0].Rel, Symbols: batch}, owner.hint())
+			out, err = getCodeSnippetIn(ctx, owner.rc, GetCodeSnippetInput{File: owned[0].Rel, Symbols: in.Symbols}, owner.hint())
 			if err != nil {
 				return GetCodeSnippetOutput{}, err
 			}
@@ -623,7 +626,11 @@ func getCodeSnippetBatchServed(ctx context.Context, a *app.App, rs []repoState, 
 	}
 	answered := map[*app.RepoContext]bool{}
 	answeredHint := map[*app.RepoContext]bool{}
-	var hints []string
+	var (
+		severalRepos, severalFiles bool
+		notFound                   []string
+		searched                   []repoState
+	)
 	for _, symbol := range batch {
 		settled, err := settleSnippet(ctx, rs, in.File != "", owned, symbol)
 		if err != nil {
@@ -649,21 +656,29 @@ func getCodeSnippetBatchServed(ctx context.Context, a *app.App, rs []repoState, 
 			}
 		case len(settled.repos) > 0:
 			entry.Repos = repoNames(settled.repos)
-			hints = append(hints, "For a symbol listed with repos, call again with one of them as repo and only those symbols.")
+			severalRepos = true
 		case len(settled.files) > 0:
 			entry.Files = fileCandidates(a, settled.files)
-			hints = append(hints, "For a symbol listed with files, call again with that file's repo as repo and its path as file.")
+			severalFiles = true
 		default:
-			searched := settled.searched
-			if in.File != "" && len(owned) == 0 {
-				hints = append(hints, fmt.Sprintf("No served repo has the file %s (searched: %s).", in.File, servedLabels(rs)))
-			} else {
-				hints = append(hints, fmt.Sprintf("%s: not found (searched: %s).", symbol, labelsForStates(searched)))
-			}
+			notFound = append(notFound, symbol)
+			searched = settled.searched
 		}
 		out.Snippets = append(out.Snippets, entry)
 	}
 	out.Notes = replyNotes(rs, answered, nil)
+	var hints []string
+	if severalRepos {
+		hints = append(hints, "For a symbol listed with repos, call again with one of them as repo and only those symbols.")
+	}
+	if severalFiles {
+		hints = append(hints, "For a symbol listed with files, call again with that file's repo as repo and its path as file.")
+	}
+	if in.File != "" && len(owned) == 0 {
+		hints = append(hints, noFileHint(in.File, servedLabels(rs)))
+	} else if len(notFound) > 0 {
+		hints = append(hints, noSymbolHint(strings.Join(notFound, " or "), labelsForStates(searched)))
+	}
 	out.Hint = strings.Join(hints, " ")
 	return out, nil
 }

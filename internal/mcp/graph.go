@@ -387,14 +387,11 @@ type QueryGraphOutput struct {
 }
 
 func queryGraph(ctx context.Context, a *app.App, in QueryGraphInput) (QueryGraphOutput, error) {
-	spec := querySpec(in)
-	if spec.IsEmpty() {
-		return QueryGraphOutput{}, graph.ErrEmptyQuery
-	}
 	t, served, err := graphTarget(a, in.Repo)
 	if err != nil {
 		return QueryGraphOutput{}, err
 	}
+	spec := querySpec(in)
 	if served {
 		return queryGraphServed(ctx, a, in, spec)
 	}

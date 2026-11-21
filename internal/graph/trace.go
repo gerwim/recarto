@@ -221,10 +221,7 @@ func (e *Engine) nodesByName(ctx context.Context, worktree, name string) ([]Call
 	// as a suffix of the fully qualified name — but only when it contains a dot,
 	// so a bare name never triggers a broad LIKE. An exact qualified_name match is
 	// still flagged and preferred over any looser hit.
-	suffix := "\x00" // sentinel: never matches when input has no dot
-	if strings.Contains(name, ".") {
-		suffix = "%." + name
-	}
+	suffix := nameSuffix(name)
 	rows, err := e.st.DB.QueryContext(ctx, `
 SELECT n.id, n.name, n.kind, f.path, n.start_line, (n.qualified_name = ?) AS exact
   FROM nodes n JOIN files f ON f.id = n.file_id
