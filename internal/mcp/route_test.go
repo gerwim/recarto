@@ -203,6 +203,13 @@ func TestRouteWriteTwoIndexedRepos(t *testing.T) {
 					t.Errorf("refusal %q does not contain %q", err, want)
 				}
 			}
+			for _, anchors := range [][]string{tc.files, tc.symbols} {
+				for _, anchor := range anchors {
+					if want := "- " + anchor + ":"; !strings.Contains(err.Error(), want) {
+						t.Errorf("refusal %q does not contain anchor %q", err, want)
+					}
+				}
+			}
 			if got := totalMemoryRows(t, a); got != before {
 				t.Fatalf("memory rows = %d, want unchanged %d", got, before)
 			}

@@ -267,12 +267,10 @@ func assess(repos []*app.RepoContext, anchors []resolvedAnchor, states []repoInd
 
 func settled(repos []*app.RepoContext, anchors []resolvedAnchor, states []repoIndex) (int, bool) {
 	choice := assess(repos, anchors, states)
-	return func() int {
-		if len(choice.common) == 1 && choice.blocked < 0 && len(choice.multiple) == 0 {
-			return choice.common[0]
-		}
-		return -1
-	}(), len(choice.common) == 1 && choice.blocked < 0 && len(choice.multiple) == 0
+	if len(choice.common) != 1 || choice.blocked >= 0 || len(choice.multiple) > 0 {
+		return -1, false
+	}
+	return choice.common[0], true
 }
 
 func anchorLines(a *app.App, anchors []resolvedAnchor, states []repoIndex) []string {
