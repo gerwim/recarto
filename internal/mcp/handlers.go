@@ -8,6 +8,7 @@ package mcp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 
@@ -32,7 +33,8 @@ type MemoryView struct {
 	// empty (omitted) for repo memories.
 	Scope string `json:"scope,omitempty"`
 	// Repo names the served repo (RECARTO_REPOS) a memory came from; empty
-	// (omitted) for the primary repo's own memories.
+	// (omitted) for the primary repo's own memories. From a code-less folder it
+	// uses that repo's selector.
 	Repo string `json:"repo,omitempty"`
 }
 
@@ -71,6 +73,8 @@ type ConflictCandidateOut struct {
 type RecordMemoryOutput struct {
 	ID         string `json:"id" jsonschema:"id of the recorded or reinforced memory"`
 	Reinforced bool   `json:"reinforced" jsonschema:"true if an existing near-duplicate was reinforced"`
+	Repo       string `json:"repo,omitempty" jsonschema:"the served repo it was stored in"`
+	Superseded string `json:"superseded_id,omitempty" jsonschema:"id of the memory it replaced"`
 	// ConflictCandidates are existing memories the new one may contradict or
 	// supersede — similar topic, different claim. Advisory: the write already
 	// happened; review and resolve via Note's instructions.
@@ -102,6 +106,10 @@ func recordMemory(ctx context.Context, a *app.App, in RecordMemoryInput) (Record
 	branch := a.Git.Branch
 	worktree := a.Git.Worktree
 	refWorktree := a.Git.Worktree
+	files := in.Files
+	routed := in.Repo == "" && (in.Scope == "" || in.Scope == scopeRepo) && a.Codeless
+	var w anchors
+	var rt route
 	if in.Repo != "" {
 		if in.Scope == scopeWorkspace {
 			return RecordMemoryOutput{}, fmt.Errorf("repo and scope=workspace are mutually exclusive")
@@ -113,6 +121,15 @@ func recordMemory(ctx context.Context, a *app.App, in RecordMemoryInput) (Record
 			return RecordMemoryOutput{}, err
 		}
 		eng, branch, worktree, refWorktree = t.Engine, t.Git.Branch, t.Git.Worktree, t.Git.Worktree
+	}
+	if routed {
+		w = anchors{files: in.Files, symbols: in.Symbols, supersedes: in.SupersedesID}
+		var err error
+		rt, err = routeWrite(ctx, a, w)
+		if err != nil {
+			return RecordMemoryOutput{}, err
+		}
+		eng, branch, worktree, refWorktree, files = rt.rc.Engine, rt.rc.Git.Branch, rt.rc.Git.Worktree, rt.rc.Git.Worktree, rt.files
 	}
 	switch in.Scope {
 	case "", scopeRepo:
@@ -130,23 +147,44 @@ func recordMemory(ctx context.Context, a *app.App, in RecordMemoryInput) (Record
 	if in.Global {
 		branch = ""
 	}
-	id, reinforced, conflicts, err := eng.Record(ctx, memory.NewMemory{
+	nm := memory.NewMemory{
 		Kind:         kind,
 		Title:        in.Title,
 		Body:         in.Body,
-		Refs:         refsFrom(refWorktree, in.Files, in.Symbols, in.Tags),
+		Refs:         refsFrom(refWorktree, files, in.Symbols, in.Tags),
 		Branch:       branch,
 		Worktree:     worktree,
 		Author:       "mcp",
 		Source:       "mcp",
 		Pinned:       in.Pinned,
 		SupersedesID: in.SupersedesID,
-	})
+	}
+	if routed && beforeRoutedWrite != nil {
+		beforeRoutedWrite()
+	}
+	var id string
+	var reinforced, replaced bool
+	var conflicts []memory.ConflictCandidate
+	var err error
+	if routed && in.SupersedesID != "" {
+		id, reinforced, replaced, conflicts, err = eng.RecordReplacing(ctx, nm)
+		if errors.Is(err, memory.ErrNotHeld) {
+			return RecordMemoryOutput{}, replaceMissed(ctx, a, w, rt.rc)
+		}
+	} else {
+		id, reinforced, conflicts, err = eng.Record(ctx, nm)
+	}
 	if err != nil {
 		return RecordMemoryOutput{}, err
 	}
 	a.SignalSync()
 	out := RecordMemoryOutput{ID: id, Reinforced: reinforced}
+	if routed {
+		out.Repo = repoLabel(a, rt.rc)
+		if replaced {
+			out.Superseded = in.SupersedesID
+		}
+	}
 	for _, c := range conflicts {
 		out.ConflictCandidates = append(out.ConflictCandidates, ConflictCandidateOut{
 			ID: c.ID, Title: c.Title, Snippet: c.Snippet, Reason: c.Reason,
@@ -210,7 +248,7 @@ func recallScoped(ctx context.Context, a *app.App, q memory.RecallQuery) ([]scop
 		rq.Branch, rq.Worktree = rc.Git.Branch, rc.Git.Worktree
 		if rset, err := rc.Engine.Recall(ctx, rq); err == nil {
 			for _, r := range rset.Results {
-				merged = append(merged, scopedResult{RecallResult: r, repo: rc.Git.RepoName})
+				merged = append(merged, scopedResult{RecallResult: r, repo: repoLabel(a, rc)})
 			}
 			used += rset.TokensUsed
 			truncated = truncated || rset.Truncated
@@ -343,15 +381,31 @@ type RecordBugInput struct {
 type RecordBugOutput struct {
 	ID         string `json:"id"`
 	Reinforced bool   `json:"reinforced"`
+	Repo       string `json:"repo,omitempty" jsonschema:"the served repo it was stored in"`
 }
 
 func recordBug(ctx context.Context, a *app.App, in RecordBugInput) (RecordBugOutput, error) {
 	if in.ErrorMessage == "" {
 		return RecordBugOutput{}, fmt.Errorf("error_message is required")
 	}
-	t, err := repoTarget(a, in.Repo)
-	if err != nil {
-		return RecordBugOutput{}, err
+	var files []string
+	if in.File != "" {
+		files = []string{in.File}
+	}
+	var label string
+	var t *app.RepoContext
+	var err error
+	if in.Repo == "" && a.Codeless {
+		rt, routeErr := routeWrite(ctx, a, anchors{files: files, symbols: in.Symbols, bug: true})
+		if routeErr != nil {
+			return RecordBugOutput{}, routeErr
+		}
+		t, files, label = rt.rc, rt.files, repoLabel(a, rt.rc)
+	} else {
+		t, err = repoTarget(a, in.Repo)
+		if err != nil {
+			return RecordBugOutput{}, err
+		}
 	}
 	extra := map[string]any{
 		"error_message": in.ErrorMessage,
@@ -363,8 +417,8 @@ func recordBug(ctx context.Context, a *app.App, in RecordBugInput) (RecordBugOut
 		extra["tags"] = in.Tags
 	}
 	var refs []memory.Ref
-	if in.File != "" {
-		refs = append(refs, memory.Ref{Type: memory.RefFile, Value: memory.RelFileRef(t.Git.Worktree, in.File)})
+	for _, f := range files {
+		refs = append(refs, memory.Ref{Type: memory.RefFile, Value: memory.RelFileRef(t.Git.Worktree, f)})
 	}
 	for _, s := range in.Symbols {
 		refs = append(refs, memory.Ref{Type: memory.RefSymbol, Value: s})
@@ -389,7 +443,7 @@ func recordBug(ctx context.Context, a *app.App, in RecordBugInput) (RecordBugOut
 		return RecordBugOutput{}, err
 	}
 	a.SignalSync()
-	return RecordBugOutput{ID: id, Reinforced: reinforced}, nil
+	return RecordBugOutput{ID: id, Reinforced: reinforced, Repo: label}, nil
 }
 
 // SearchBugsInput is the argument to the search_bugs tool.
@@ -449,7 +503,7 @@ func getMemory(ctx context.Context, a *app.App, in GetMemoryInput) (GetMemoryOut
 		if rec != nil {
 			v := viewOf(rec)
 			if rc.Git.RepoID != a.Git.RepoID {
-				v.Repo = rc.Git.RepoName
+				v.Repo = repoLabel(a, rc)
 			}
 			return GetMemoryOutput{Found: true, Memory: &v}, nil
 		}
@@ -505,7 +559,7 @@ func listMemory(ctx context.Context, a *app.App, in ListMemoryInput) (ListMemory
 			merged = merged || len(rrecs) > 0
 			for _, r := range rrecs {
 				v := viewOf(r)
-				v.Repo = rc.Git.RepoName
+				v.Repo = repoLabel(a, rc)
 				views = append(views, v)
 				at[r.ID] = r.UpdatedAt
 			}

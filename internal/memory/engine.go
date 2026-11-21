@@ -192,6 +192,9 @@ func marshalExtra(m map[string]any) (string, error) {
 // errInvalidKind is returned by Record for an unknown kind.
 var errInvalidKind = errors.New("memory: invalid kind")
 
+// ErrNotHeld means a replacing write's target is not in this store.
+var ErrNotHeld = errors.New("the memory to replace is not in this store")
+
 // dedupThreshold is the Jaccard similarity (over 2-word shingles) at/above which
 // a new memory reinforces an existing same-kind record instead of inserting a
 // new row. 0.55 sits mid-valley between the measured distinct-fact ceiling
@@ -245,8 +248,21 @@ func bodySnippet(body string) string {
 // committed row inside its own immediate transaction and reinforces instead of
 // inserting a duplicate — the §7.9 convergence guarantee.
 func (e *Engine) Record(ctx context.Context, nm NewMemory) (id string, reinforced bool, conflicts []ConflictCandidate, err error) {
+	id, reinforced, _, conflicts, err = e.record(ctx, nm, false)
+	return id, reinforced, conflicts, err
+}
+
+// RecordReplacing is Record for a memory that replaces nm.SupersedesID in this
+// store. When the store does not hold that memory as the write commits, nothing
+// is written and the error is ErrNotHeld. replaced reports whether this call
+// turned that memory from active to superseded.
+func (e *Engine) RecordReplacing(ctx context.Context, nm NewMemory) (id string, reinforced, replaced bool, conflicts []ConflictCandidate, err error) {
+	return e.record(ctx, nm, true)
+}
+
+func (e *Engine) record(ctx context.Context, nm NewMemory, mustHold bool) (id string, reinforced, replaced bool, conflicts []ConflictCandidate, err error) {
 	if !nm.Kind.Valid() {
-		return "", false, nil, errInvalidKind
+		return "", false, false, nil, errInvalidKind
 	}
 	if nm.Kind == KindDoNotRepeat {
 		nm.Pinned = true
@@ -258,6 +274,17 @@ func (e *Engine) Record(ctx context.Context, nm NewMemory) (id string, reinforce
 	now := e.clk.Now().UnixMilli()
 
 	if txErr := e.st.WriteTx(ctx, func(c store.Conn) error {
+		prior := ""
+		if nm.SupersedesID != "" {
+			err := c.QueryRowContext(ctx, `SELECT status FROM memories WHERE id=?`, nm.SupersedesID).Scan(&prior)
+			if err != nil && !errors.Is(err, sql.ErrNoRows) {
+				return err
+			}
+		}
+		if mustHold && prior == "" {
+			// Checked in the write transaction, so a memory forgotten meanwhile cannot let the write land beside nothing.
+			return ErrNotHeld
+		}
 		candID, found, mid, ferr := e.findNearDup(ctx, c, nm.Kind, bands, set)
 		if ferr != nil {
 			return ferr
@@ -273,13 +300,15 @@ func (e *Engine) Record(ctx context.Context, nm NewMemory) (id string, reinforce
 		if err := e.insert(ctx, c, id, nm, searchText, sim, bands, now); err != nil {
 			return err
 		}
+		replaced = prior == "active"
 		if err := e.markDirty(ctx, c, id, now); err != nil {
 			return err
 		}
-		if nm.SupersedesID != "" {
+		if replaced {
 			// insert() just flipped the superseded row to status='superseded' — an
 			// explicit, locally-authored state change (not compaction), so it must
 			// propagate like any other authored write.
+			// The write transaction holds the store's write lock from the status read through insert's update, so the row cannot change in between.
 			if err := e.markDirty(ctx, c, nm.SupersedesID, now); err != nil {
 				return err
 			}
@@ -308,7 +337,7 @@ func (e *Engine) Record(ctx context.Context, nm NewMemory) (id string, reinforce
 		}
 		return nil
 	}); txErr != nil {
-		return "", false, nil, txErr
+		return "", false, false, nil, txErr
 	}
 
 	// Best-effort counter bump. It MUST run outside the WriteTx above: the
@@ -316,7 +345,7 @@ func (e *Engine) Record(ctx context.Context, nm NewMemory) (id string, reinforce
 	// its own WriteTx) while holding it would deadlock. A failed stat must not
 	// fail an already-committed Record, so the error is intentionally ignored.
 	_ = e.led.Incr(ctx, "lifetime", "memories_recorded", 1)
-	return id, reinforced, conflicts, nil
+	return id, reinforced, replaced, conflicts, nil
 }
 
 // midCandidate is an internal pairing of a ConflictCandidate with its Jaccard

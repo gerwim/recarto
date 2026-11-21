@@ -44,6 +44,9 @@ type Config struct {
 	// their first write. One-shot commands and hooks leave it off and stay as
 	// cheap as before.
 	QuickCheck bool
+	// DecideCodeless asks Open to decide once whether a non-git session folder
+	// with served repos holds no indexable code. Only the MCP server sets it.
+	DecideCodeless bool
 	// SkipWorkspace leaves App.Workspace nil, so its store is never opened —
 	// for the per-tool hooks (post-read, post-edit, augment), which never touch
 	// it and run on nearly every tool call.
@@ -82,6 +85,10 @@ type App struct {
 	// repos they work with, e.g. a multi-repo verifier running from a
 	// scratch directory.
 	Repos []*RepoContext
+	// Codeless records whether this App, opened with Config.DecideCodeless, was
+	// outside git and held no file an index would take in, with at least one
+	// RECARTO_REPOS repo open. It is fixed for this App's lifetime.
+	Codeless bool
 	// Sync is the HTTP memory-sync client, or nil when unconfigured (no
 	// RECARTO_SYNC_URL/RECARTO_SYNC_KEY, or the repo has no resolvable
 	// cross-machine identity). Every caller must nil-check before use — sync is
@@ -208,6 +215,9 @@ func OpenContext(ctx context.Context, cfg Config) (*App, error) {
 	if err != nil {
 		return nil, err
 	}
+	extras := extraRepos(gc.RepoID)
+	// Judged before any store opens, so the folder counts as it was when the server started.
+	codeless := cfg.DecideCodeless && len(extras) > 0 && CodeLess(ctx, gc)
 	clk := cfg.Clock
 	if clk == nil {
 		clk = clock.Real{}
@@ -241,14 +251,26 @@ func OpenContext(ctx context.Context, cfg Config) (*App, error) {
 
 	a := &App{
 		Git: gc, Runner: runner, Dir: dir, Store: st, Ledger: led, Engine: eng, Graph: gr, Clock: clk,
-		Sync: syncer, Workspace: ws, Repos: openRepos(gc.RepoID, clk, storeOpts...), SyncTrigger: make(chan struct{}, 1),
+		Sync: syncer, Workspace: ws, Repos: openRepos(extras, clk, storeOpts...), SyncTrigger: make(chan struct{}, 1),
 		Features: features.Load(),
 	}
+	a.Codeless = codeless && len(a.Repos) > 0
 	if err := a.writeMeta(ctx); err != nil {
 		_ = a.Close()
 		return nil, err
 	}
 	return a, nil
+}
+
+// CodeLess reports whether gc is outside git and holds no file an index would
+// take in. A listing that fails or is cut short proves nothing, so it counts as
+// holding code.
+func CodeLess(ctx context.Context, gc gitctx.Context) bool {
+	if !gc.NonGit {
+		return false
+	}
+	code, err := graph.HasCode(ctx, gc.Worktree, true)
+	return err == nil && !code
 }
 
 // resolvePrimary resolves the identity of cfg's working directory, returning the
@@ -452,9 +474,9 @@ func extraRepos(primaryID string) []gitctx.Context {
 
 // openRepos opens the extra repos' stores (extraRepos) into served repo
 // contexts, skipping a repo whose store fails to open.
-func openRepos(primaryID string, clk clock.Clock, storeOpts ...store.Option) []*RepoContext {
+func openRepos(extras []gitctx.Context, clk clock.Clock, storeOpts ...store.Option) []*RepoContext {
 	var out []*RepoContext
-	for _, gc := range extraRepos(primaryID) {
+	for _, gc := range extras {
 		if rc, err := openRepo(gc, clk, storeOpts...); err == nil {
 			out = append(out, rc)
 		}

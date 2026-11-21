@@ -579,7 +579,8 @@ repo-less session reads and writes exactly the memories the cd'd sessions see:
   while at least one listed repo besides the cwd repo is served.
 - `recall_memory`/`search_bugs`/`list_memory` merge every served repo's memories
   (hits labeled `repo`); `record_memory`/`record_bug` take `repo` to write into a
-  specific repo's store; id lookups resolve across all of them.
+  specific repo's store (from a folder without code, see below); id lookups resolve
+  across all of them.
 - The read/edit hooks map each touched file to the repo that owns it, so a memory
   anchored to `a/b/c.go` in repo1 fires even when the session reads it as
   `/work/task/repo1/a/b/c.go` from outside that repo — and edits reindex the owning
@@ -590,6 +591,23 @@ repo-less session reads and writes exactly the memories the cd'd sessions see:
 Missing paths, non-git directories and duplicates are skipped silently — an
 incomplete list never fails the session. Pair with `RECARTO_WORKSPACE` (§ above)
 for the cross-repo store that belongs to no single repo.
+
+### Memory writes from a folder without code
+
+When `recarto serve` starts in a folder outside git that holds no file Recarto indexes, and `RECARTO_REPOS` serves at least one repo, `record_memory` and `record_bug` called without `repo` store into a served repo, not the folder's own store.
+
+- The server decides this once, when it starts. Files added to or removed from the folder later change nothing until the next start.
+- **One repo:** the memory goes to it.
+- **Several repos:** the anchors choose the repo.
+  - A file anchor is in the repos that own a real file at that path. An absolute path is taken as given; a relative one is tried under each repo's root. Symlinks are followed, and a file belongs to the innermost served repo that contains it.
+  - A symbol anchor is in the repos whose index has a symbol by that name. A repo whose first index has not finished may hold any name: it can keep another repo from being chosen, but a symbol never chooses it. A repo being refreshed is judged by its index as it stands. A repo with no indexable files holds no names.
+  - `supersedes_id` adds the repos whose stores hold that memory, so a replacement is stored beside the memory it replaces.
+  - The memory goes to the one repo in every anchor's set, anchored to its files' paths relative to that repo. Each file anchor must name one file there.
+- Otherwise nothing is stored. The reply says which anchors did not settle it and which values to pass as `repo`, and for `record_memory` with a workspace, `scope: "workspace"`.
+- A stored reply names the repo (`repo`) and the memory it replaced (`superseded_id`).
+- Replies, errors and labels leave the folder out of the served repos and name each repo by the value that reaches it as `repo`: its name, or its worktree path when another served repo or the folder has the same name.
+
+With no repo served, writes go to the folder's own store. An explicit `repo` and `scope: "workspace"` work as before.
 
 ### Session start in a folder without code
 

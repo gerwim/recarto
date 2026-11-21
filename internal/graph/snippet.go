@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/gerwim/recarto/internal/ledger"
+	"github.com/gerwim/recarto/internal/store"
 )
 
 // SnippetResult is the structured result of Snippet. A miss is Found=false (not
@@ -37,6 +38,20 @@ type SnippetCandidate struct {
 // blow the token budget; the count reported to the caller is the true total.
 const maxSnippetCandidates = 25
 
+// symbolMatch is the condition on nodes n that a symbol matches in any form the
+// tools accept: bare name, qualified name, or a dotted Type.Method suffix of the
+// qualified name. Its arguments are symbolArgs.
+const symbolMatch = `(n.name = ? OR n.qualified_name = ? OR n.qualified_name LIKE ?)`
+
+// symbolArgs returns symbolMatch's arguments for a canonical symbol.
+func symbolArgs(symbol string) []any {
+	suffix := "\x00"
+	if strings.Contains(symbol, ".") {
+		suffix = "%." + symbol
+	}
+	return []any{symbol, symbol, suffix}
+}
+
 // SnippetByName resolves a symbol when the file is unknown — the common case
 // right after a search returns a name. It matches name or qualified_name across
 // the worktree: exactly one definition returns its source (Found=true, no
@@ -52,16 +67,15 @@ func (e *Engine) SnippetByName(ctx context.Context, worktree, symbol string) (Sn
 	// instead of falsely missing and forcing a whole-file read. The suffix is only
 	// armed when the input contains a dot, so a bare name never triggers a broad
 	// LIKE; an exact qualified_name match is flagged and preferred over loose hits.
-	suffix := "\x00" // sentinel: never matches when input has no dot
-	if strings.Contains(symbol, ".") {
-		suffix = "%." + symbol
-	}
+	args := []any{symbol, worktree}
+	args = append(args, symbolArgs(symbol)...)
+	args = append(args, maxSnippetCandidates+1)
 	rows, err := e.st.DB.QueryContext(ctx, `
 SELECT f.path, n.start_line, n.kind, n.qualified_name, (n.qualified_name = ?) AS exact
   FROM nodes n JOIN files f ON f.id = n.file_id
- WHERE f.worktree = ? AND (n.name = ? OR n.qualified_name = ? OR n.qualified_name LIKE ?)
+ WHERE f.worktree = ? AND `+symbolMatch+`
  ORDER BY exact DESC, f.path, n.start_line
- LIMIT ?`, symbol, worktree, symbol, symbol, suffix, maxSnippetCandidates+1)
+ LIMIT ?`, args...)
 	if err != nil {
 		return SnippetResult{}, nil, err
 	}
@@ -106,6 +120,42 @@ SELECT f.path, n.start_line, n.kind, n.qualified_name, (n.qualified_name = ?) AS
 	default:
 		return SnippetResult{Found: false}, cands, nil
 	}
+}
+
+// IndexedSymbols reports whether an index of worktree has finished once
+// (built) and, when it has, whether the index as it stands holds a symbol by
+// each of symbols, in any form get_code_snippet accepts. A refresh rewrites
+// the index file by file, so while one runs, or after one was cut short, each
+// file counts in the version last indexed. has is nil when built is false.
+func (e *Engine) IndexedSymbols(ctx context.Context, worktree string, nonGit bool, symbols []string) (built bool, has []bool, err error) {
+	err = e.st.ReadTx(ctx, func(q store.Conn) error {
+		s, err := readIndexState(ctx, q, worktree)
+		if err != nil {
+			return err
+		}
+		done, err := codeMapDone(ctx, q, worktree, nonGit, s)
+		if err != nil {
+			return err
+		}
+		built = mapStatus(s, done).Built
+		if !built {
+			return nil
+		}
+		has = make([]bool, len(symbols))
+		for i, symbol := range symbols {
+			args := []any{worktree}
+			args = append(args, symbolArgs(canonicalSymbol(symbol))...)
+			var one int
+			err := q.QueryRowContext(ctx, `SELECT 1 FROM nodes n JOIN files f ON f.id = n.file_id WHERE f.worktree = ? AND `+symbolMatch+` LIMIT 1`, args...).Scan(&one)
+			if err == nil {
+				has[i] = true
+			} else if !errors.Is(err, sql.ErrNoRows) {
+				return err
+			}
+		}
+		return nil
+	})
+	return built, has, err
 }
 
 // isOverloadSet reports whether every candidate is the same logical symbol — one

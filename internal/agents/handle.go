@@ -110,31 +110,19 @@ func owningRepo(repos []*app.RepoContext, abs string) (rc *app.RepoContext, rel 
 	for i, cand := range repos {
 		wts[i] = cand.Git.Worktree
 	}
-	i := innermost(wts, abs)
+	i := app.Innermost(wts, abs)
 	if i < 0 {
 		return nil, "", false
 	}
-	rel, _ = within(wts[i], abs)
+	rel, _ = app.Within(wts[i], abs)
 	return repos[i], rel, true
-}
-
-// innermost returns the index of the worktree in wts that abs lies in, -1 when
-// none does. The longest wins: a nested checkout belongs to the inner repo.
-func innermost(wts []string, abs string) int {
-	best := -1
-	for i, wt := range wts {
-		if _, in := within(wt, abs); in && (best < 0 || len(wt) > len(wts[best])) {
-			best = i
-		}
-	}
-	return best
 }
 
 // Owned reports whether an absolute path lies in one of the worktrees — the
 // store-free form of owningRepo, against app.Worktrees.
 func Owned(worktrees []string, abs string) bool {
 	for _, wt := range worktrees {
-		if _, in := within(wt, abs); in {
+		if _, in := app.Within(wt, abs); in {
 			return true
 		}
 	}
@@ -149,8 +137,8 @@ func Owned(worktrees []string, abs string) bool {
 func Reaches(worktrees []string, abs string) bool {
 	for _, wt := range worktrees {
 		wt = realPath(wt)
-		_, in := within(wt, abs)
-		_, contains := within(abs, wt)
+		_, in := app.Within(wt, abs)
+		_, contains := app.Within(abs, wt)
 		if in || contains {
 			return true
 		}
@@ -196,19 +184,6 @@ func realPath(abs string) string {
 		return p
 	}
 	return resolve(abs)
-}
-
-// within returns abs relative to worktree wt (slash-separated), ok=false when
-// abs is not absolute or lies outside wt.
-func within(wt, abs string) (string, bool) {
-	if wt == "" || !filepath.IsAbs(abs) {
-		return "", false
-	}
-	r, err := filepath.Rel(wt, abs)
-	if err != nil || r == ".." || strings.HasPrefix(r, ".."+string(filepath.Separator)) {
-		return "", false
-	}
-	return filepath.ToSlash(r), true
 }
 
 // Metric prefixes of what a conversation has in its context. A compaction

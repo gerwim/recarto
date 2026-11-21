@@ -152,8 +152,8 @@ func searchRepos(a *app.App, paths []string) []*app.RepoContext {
 	var out []*app.RepoContext
 	for i, rc := range all {
 		if slices.ContainsFunc(paths, func(p string) bool {
-			_, contains := within(p, wts[i])
-			return innermost(wts, p) == i || contains
+			_, contains := app.Within(p, wts[i])
+			return app.Innermost(wts, p) == i || contains
 		}) {
 			out = append(out, rc)
 		}

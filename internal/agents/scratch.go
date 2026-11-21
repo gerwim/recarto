@@ -13,7 +13,6 @@ import (
 	"github.com/gerwim/recarto/internal/app"
 	"github.com/gerwim/recarto/internal/features"
 	"github.com/gerwim/recarto/internal/gitctx"
-	"github.com/gerwim/recarto/internal/graph"
 	"github.com/gerwim/recarto/internal/ledger"
 	"github.com/gerwim/recarto/internal/memory"
 	"github.com/gerwim/recarto/internal/store"
@@ -198,8 +197,7 @@ func codeless(a *app.App, wait *startWait) bool {
 	if !a.Git.NonGit || len(a.Repos) == 0 {
 		return false
 	}
-	code, err := graph.HasCode(wait.get(), a.Git.Worktree, true)
-	return err == nil && !code
+	return app.CodeLess(wait.get(), a.Git)
 }
 
 // repoWorktrees returns the repos' worktrees, in order.
@@ -221,9 +219,10 @@ type coveredRepo struct {
 
 // Marks of a covered repo the repo argument cannot reach.
 const (
-	markUnserved     = "no longer served"
-	markUnselectable = "the repo argument cannot select it"
+	markUnserved = "no longer served"
 )
+
+const markUnselectable = app.Unselectable
 
 // label is how the block names the repo: its selector, or its path and mark.
 func (c coveredRepo) label() string {

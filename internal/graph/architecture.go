@@ -379,6 +379,10 @@ type MapStatus struct {
 	Built bool
 }
 
+func mapStatus(s indexState, done bool) MapStatus {
+	return MapStatus{Done: done, Built: done || s.token != "" || s.built}
+}
+
 // CodeMap returns the code map of worktree's finished index, with its status.
 // While the index is unfinished it returns no map. The status and the map come
 // from one read snapshot, so a reconcile committing in another process
@@ -386,7 +390,7 @@ type MapStatus struct {
 func (e *Engine) CodeMap(ctx context.Context, worktree string, nonGit bool) (Architecture, MapStatus, error) {
 	var st MapStatus
 	arch, err := e.architecture(ctx, worktree, nonGit, true, func(s indexState, done bool) {
-		st = MapStatus{Done: done, Built: done || s.token != "" || s.built}
+		st = mapStatus(s, done)
 	})
 	return arch, st, err
 }
