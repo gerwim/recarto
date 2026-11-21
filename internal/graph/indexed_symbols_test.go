@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-func TestIndexedSymbolsMatchesSnippetNamesAndWorktree(t *testing.T) {
+func TestIndexedSymbolsNamesAndWorktree(t *testing.T) {
 	e := newTestEngine(t)
 	ctx := context.Background()
 	indexGo(t, e, "a.go", "package p\nfunc Warm() {}\ntype T struct{}\nfunc (T) Run() {}\n")
@@ -18,6 +18,20 @@ func TestIndexedSymbolsMatchesSnippetNamesAndWorktree(t *testing.T) {
 	}
 	if !built || len(has) != 4 || !has[0] || !has[1] || has[2] || has[3] {
 		t.Fatalf("IndexedSymbols = built %v, has %v; want true [true true false false]", built, has)
+	}
+}
+
+func TestIndexedSymbolsMatchesNamesLiterally(t *testing.T) {
+	e := newTestEngine(t)
+	ctx := context.Background()
+	// The namespace makes T.Method exercise the qualified-name suffix form.
+	src := []byte("namespace Ns { class T { void DoXRun() {} void run() {} } }")
+	if err := e.IndexFile(ctx, "/wt", "Methods.cs", src, 1, int64(len(src))); err != nil {
+		t.Fatal(err)
+	}
+	built, has, err := e.IndexedSymbols(ctx, "/wt", true, []string{"T.DoXRun", "T.Do_Run", "T.Run", "T.%"})
+	if err != nil || !built || len(has) != 4 || !has[0] || has[1] || has[2] || has[3] {
+		t.Fatalf("IndexedSymbols = built %v, has %v, err %v; want true [true false false false]", built, has, err)
 	}
 }
 

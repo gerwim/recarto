@@ -222,6 +222,31 @@ func TestRouteWriteTwoIndexedRepos(t *testing.T) {
 	}
 }
 
+func TestRouteWriteMatchesSymbolsLiterally(t *testing.T) {
+	folder, recarto, second := routeRepos(t)
+	commitRouteFile(t, second, "Methods.cs", "namespace Ns { class T { void DoXRun() {} void run() {} } }")
+	a := codelessApp(t, folder, recarto, second)
+	indexRepo(t, a.Repos[0])
+	indexRepo(t, a.Repos[1])
+
+	out, err := recordRouted(t, a, 580, nil, []string{"T.run"})
+	if err != nil || out.Repo != repoLabel(a, a.Repos[1]) {
+		t.Fatalf("symbol T.run = %+v, %v; want second", out, err)
+	}
+	if rec := assertOnlyStored(t, a, out.ID, a.Repos[1]); rec == nil {
+		t.Fatal("T.run memory was not stored in second")
+	}
+
+	before := totalMemoryRows(t, a)
+	_, err = recordRouted(t, a, 581, nil, []string{"T.Run"})
+	if err == nil || !strings.Contains(err.Error(), "- T.Run: no served repo") {
+		t.Fatalf("symbol T.Run refusal = %v, want no served repo", err)
+	}
+	if got := totalMemoryRows(t, a); got != before {
+		t.Fatalf("memory rows = %d, want unchanged %d", got, before)
+	}
+}
+
 func TestRouteWriteSymlinksAndAliases(t *testing.T) {
 	folder, recarto, second := routeRepos(t)
 	a := codelessApp(t, folder, recarto, second)

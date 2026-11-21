@@ -44,19 +44,18 @@ func TestOwnedFilesAcrossRepos(t *testing.T) {
 func TestOwnedFilesFollowsSymlinksAndDeduplicates(t *testing.T) {
 	a, b := t.TempDir(), t.TempDir()
 	target := writeOwned(t, b, "store/lock.go", "package b")
-	link := filepath.Join(a, "lock.go")
-	if err := os.Symlink(target, link); err != nil {
+	if err := os.Symlink(target, filepath.Join(a, "lock.go")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if err := os.Symlink(target, filepath.Join(b, "lock.go")); err != nil {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
 	repos := []*RepoContext{ownedRepo(a), ownedRepo(b)}
 
 	got := OwnedFiles(repos, "lock.go")
-	if len(got) != 1 || got[0].Repo != repos[1] || got[0].Rel != "store/lock.go" {
+	want := []OwnedFile{{Repo: repos[1], Rel: "store/lock.go"}}
+	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("OwnedFiles(link) = %+v", got)
-	}
-	got = OwnedFiles(repos, filepath.Join(b, "store/lock.go"))
-	if len(got) != 1 || got[0].Repo != repos[1] || got[0].Rel != "store/lock.go" {
-		t.Fatalf("OwnedFiles(target) = %+v", got)
 	}
 }
 

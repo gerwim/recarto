@@ -597,10 +597,10 @@ for the cross-repo store that belongs to no single repo.
 When `recarto serve` starts in a folder outside git that holds no file Recarto indexes, and `RECARTO_REPOS` serves at least one repo, `record_memory` and `record_bug` called without `repo` store into a served repo, not the folder's own store.
 
 - The server decides this once, when it starts. Files added to or removed from the folder later change nothing until the next start.
-- **One repo:** the memory goes to it.
+- **One repo:** the memory goes to it. With `supersedes_id`, that repo's store must hold the memory it replaces; otherwise nothing is stored.
 - **Several repos:** the anchors choose the repo.
   - A file anchor is in the repos that own a real file at that path. An absolute path is taken as given; a relative one is tried under each repo's root. Symlinks are followed, and a file belongs to the innermost served repo that contains it.
-  - A symbol anchor is in the repos whose index has a symbol by that name. A repo whose first index has not finished may hold any name: it can keep another repo from being chosen, but a symbol never chooses it. A repo being refreshed is judged by its index as it stands. A repo with no indexable files holds no names.
+  - A symbol anchor is in the repos whose index has a symbol by exactly that name, case included: bare, qualified, or the `Type.Method` end of a qualified name. A repo whose first index has not finished may hold any name: it can keep another repo from being chosen, but a symbol never chooses it. A repo being refreshed is judged by its index as it stands. A repo with no indexable files holds no names.
   - `supersedes_id` adds the repos whose stores hold that memory, so a replacement is stored beside the memory it replaces.
   - The memory goes to the one repo in every anchor's set, anchored to its files' paths relative to that repo. Each file anchor must name one file there.
 - Otherwise nothing is stored. The reply says which anchors did not settle it and which values to pass as `repo`, and for `record_memory` with a workspace, `scope: "workspace"`.
