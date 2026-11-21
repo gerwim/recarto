@@ -2,7 +2,6 @@ package graph
 
 import (
 	"context"
-	"strings"
 )
 
 // TypeRelation is one type related to a query type through an `extends` edge —
@@ -31,9 +30,9 @@ type TypeRelation struct {
 // lookup miss is an empty slice, not an error.
 func (e *Engine) Implementations(ctx context.Context, worktree, symbol, direction string, limit int) ([]TypeRelation, error) {
 	if limit <= 0 {
-		limit = 50
+		limit = DefaultListLimit
 	}
-	symbol = canonicalSymbol(strings.TrimSpace(symbol))
+	symbol = ReferenceName(symbol)
 	if symbol == "" {
 		return nil, nil
 	}

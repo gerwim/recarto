@@ -225,6 +225,23 @@ func TestGrepPathScopesTheHint(t *testing.T) {
 	}
 }
 
+// A Grep path counts where its symlinks lead.
+func TestGrepPathThroughSymlinkScopesTheHint(t *testing.T) {
+	a, p, e, outside := servedPair(t)
+	toP, toE, toOutside := symlinkTo(t, p), symlinkTo(t, e), symlinkTo(t, outside)
+	for _, tc := range []struct{ name, path, cwd, want string }{
+		{"link into a repo", toE, p, "e"},
+		{"missing path under a link", filepath.Join(toE, "missing"), p, "e"},
+		{"relative to a linked cwd", ".", toP, "p"},
+		{"link outside", toOutside, p, ""},
+	} {
+		hint := grepAt(t, a, "s-"+tc.name, "Serve", tc.path, tc.cwd)
+		if got := servedRepoHint(t, hint); got != tc.want {
+			t.Errorf("%s: hint covers %q, want %q:\n%s", tc.name, got, tc.want, hint)
+		}
+	}
+}
+
 // A search outside the served repos, or in one of them, leaves the same
 // pattern's first hint in another repo intact.
 func TestScopedSearchLeavesOtherHints(t *testing.T) {

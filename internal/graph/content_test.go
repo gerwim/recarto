@@ -2,9 +2,24 @@ package graph
 
 import (
 	"context"
+	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestListErrorAndCanList(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "missing")
+	e := newTestEngine(t)
+	_, _, searchErr := e.SearchContentWithMeta(context.Background(), missing, "needle", ContentSearchOpts{})
+	var listErr *ListError
+	if !errors.As(searchErr, &listErr) || searchErr.Error() != listErr.Err.Error() {
+		t.Fatalf("search error = %v, want a message-preserving ListError", searchErr)
+	}
+	if err := CanList(missing); !errors.As(err, &listErr) {
+		t.Fatalf("CanList error = %v, want ListError", err)
+	}
+}
 
 func TestGlobMatch(t *testing.T) {
 	cases := []struct {

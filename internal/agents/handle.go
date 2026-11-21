@@ -2,12 +2,14 @@ package agents
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gerwim/recarto/internal/app"
@@ -23,11 +25,24 @@ import (
 // neutral result. It is exit-0 advisory: callers treat any returned error as
 // non-blocking. RunHook always encodes the (possibly partial) Result first.
 func Handle(ctx context.Context, a *app.App, ev Event) (Result, error) {
+	if ev.SessionID != "" {
+		ca, done, err := conversationApp(ctx, a, ev.SessionID)
+		if err != nil {
+			return Result{}, err
+		}
+		defer done()
+		a = ca
+	}
 	// Every hook that reaches the store counts as use of its worktree; NoteUsed
 	// writes only an hour-old mark, so a hook that otherwise reads takes no write
 	// lock. A lost mark only lets the sweep drop this graph sooner; the next use
-	// re-indexes it.
-	_ = a.Graph.NoteUsed(ctx, a.Git.Worktree)
+	// re-indexes it. So a session start does not wait for it behind another
+	// process's writer, such as an index finishing.
+	usedCtx := ctx
+	if ev.Kind == KindSessionStart {
+		usedCtx = store.WithWriteDeadline(ctx, time.Now().Add(writeGrace))
+	}
+	_ = a.Graph.NoteUsed(usedCtx, a.Git.Worktree)
 	switch ev.Kind {
 	case KindSessionStart:
 		return handleSessionStart(ctx, a, ev)
@@ -91,34 +106,39 @@ func agentOrDefault(s string) string {
 // belongs to the inner repo). ok=false when no served worktree contains the
 // file, or the path is not absolute.
 func owningRepo(repos []*app.RepoContext, abs string) (rc *app.RepoContext, rel string, ok bool) {
-	bestLen := -1
-	for _, cand := range repos {
-		wt := cand.Git.Worktree
-		if r, in := within(wt, abs); in && len(wt) > bestLen {
-			rc, rel, ok, bestLen = cand, r, true, len(wt)
-		}
+	wts := make([]string, len(repos))
+	for i, cand := range repos {
+		wts[i] = cand.Git.Worktree
 	}
-	return
+	i := app.Innermost(wts, abs)
+	if i < 0 {
+		return nil, "", false
+	}
+	rel, _ = app.Within(wts[i], abs)
+	return repos[i], rel, true
 }
 
 // Owned reports whether an absolute path lies in one of the worktrees — the
 // store-free form of owningRepo, against app.Worktrees.
 func Owned(worktrees []string, abs string) bool {
 	for _, wt := range worktrees {
-		if _, in := within(wt, abs); in {
+		if _, in := app.Within(wt, abs); in {
 			return true
 		}
 	}
 	return false
 }
 
-// Reaches reports whether a search over the absolute path abs reaches one of
-// the worktrees: abs lies in one or contains one. It is the store-free form of
-// searchRepos, against app.Worktrees: true exactly when searchRepos finds a repo.
+// Reaches reports whether a search over abs reaches one of the worktrees: abs
+// lies in one or contains one. abs is where the search leads, as
+// Event.SearchPaths holds it; the worktrees are resolved here. It is the
+// store-free form of searchRepos, against app.Worktrees: true exactly when
+// searchRepos finds a repo.
 func Reaches(worktrees []string, abs string) bool {
 	for _, wt := range worktrees {
-		_, in := within(wt, abs)
-		_, contains := within(abs, wt)
+		wt = realPath(wt)
+		_, in := app.Within(wt, abs)
+		_, contains := app.Within(abs, wt)
 		if in || contains {
 			return true
 		}
@@ -126,17 +146,44 @@ func Reaches(worktrees []string, abs string) bool {
 	return false
 }
 
-// within returns abs relative to worktree wt (slash-separated), ok=false when
-// abs is not absolute or lies outside wt.
-func within(wt, abs string) (string, bool) {
-	if wt == "" || !filepath.IsAbs(abs) {
-		return "", false
+// maxLinks bounds the dangling links realPath follows, so a link loop ends. It
+// matches Linux's limit on the links one lookup follows.
+const maxLinks = 40
+
+// realPath returns where a search over abs leads: abs with its symlinks
+// resolved in path order, so "link/.." is the parent of the link's target.
+// Search scope compares paths and worktrees in this form, because git names a
+// worktree by its real path while the host names searched paths, and a non-git
+// worktree, as it reached them. Past the last part that exists the path stays
+// as named, except that a dangling link there still leads to its target.
+func realPath(abs string) string {
+	links := maxLinks
+	var resolve func(string) string
+	resolve = func(abs string) string {
+		if r, err := filepath.EvalSymlinks(abs); err == nil {
+			return r
+		}
+		// The parent is resolved on its own, so the parts that exist still count
+		// where they lead.
+		root := len(filepath.VolumeName(abs)) + 1
+		i := strings.LastIndexAny(abs, "/"+string(filepath.Separator))
+		if len(abs) <= root || i < 0 {
+			return abs
+		}
+		dir := resolve(abs[:max(i, root)])
+		p := filepath.Join(dir, abs[i+1:])
+		// A dangling link still leads to its target; anything else that does not
+		// resolve (missing, unreadable, a loop past maxLinks) stays as named.
+		if t, err := os.Readlink(p); err == nil && links > 0 {
+			links--
+			if !filepath.IsAbs(t) {
+				t = dir + string(filepath.Separator) + t
+			}
+			return resolve(t)
+		}
+		return p
 	}
-	r, err := filepath.Rel(wt, abs)
-	if err != nil || r == ".." || strings.HasPrefix(r, ".."+string(filepath.Separator)) {
-		return "", false
-	}
-	return filepath.ToSlash(r), true
+	return resolve(abs)
 }
 
 // Metric prefixes of what a conversation has in its context. A compaction
@@ -158,12 +205,17 @@ func toolFeatures(a *app.App) features.Set {
 	if app.ServerRunning(a.Git.RepoID) {
 		return a.Features
 	}
-	f := features.Set{}
-	maps.Copy(f, a.Features)
-	f[features.MemoryTools] = false
-	f[features.GraphTools] = false
-	f[features.IssueReports] = false
-	return f
+	return withoutTools(a.Features)
+}
+
+// withoutTools returns f with the features that point at MCP tools off.
+func withoutTools(f features.Set) features.Set {
+	out := features.Set{}
+	maps.Copy(out, f)
+	out[features.MemoryTools] = false
+	out[features.GraphTools] = false
+	out[features.IssueReports] = false
+	return out
 }
 
 // conversation returns the ledger scope of what ev's conversation was shown:
@@ -182,21 +234,25 @@ func conversation(ev Event) string {
 // recalls a token-budgeted slice for this branch, and returns it as injectable
 // context plus a record nudge. A resume of a conversation that
 // already got the block returns only the memories it has not been shown yet.
+// A full block waits up to firstIndexWait for the worktree's first index, and
+// ranks its memories against the graph as it stands when the wait ends.
+//
+// Writes that can be skipped (statistics, sync, snapshot import, compaction,
+// recall stamps, the map cache) run under skip: while another process holds
+// the store's writer, such as an index finishing, they wait at most writeGrace
+// and are skipped, to be redone by the next session start or Stop. Conversation
+// state (a new conversation's row, a clear or compact reset, the block and
+// shown marks) waits for the writer.
 func handleSessionStart(ctx context.Context, a *app.App, ev Event) (Result, error) {
 	now := a.Clock.Now().UnixMilli()
-	if ev.SessionID != "" {
-		if err := a.Store.WriteTx(ctx, func(c store.Conn) error {
-			_, err := c.ExecContext(ctx,
-				`INSERT INTO sessions(id, agent, branch, worktree, started_at)
-				 VALUES (?, ?, ?, ?, ?)
-				 ON CONFLICT(id) DO NOTHING`,
-				ev.SessionID, agentOrDefault(ev.Agent), nullable(a.Git.Branch), a.Git.Worktree, now)
-			return err
-		}); err != nil {
-			return Result{}, err
-		}
+	skip := store.WithWriteDeadline(ctx, time.Now().Add(writeGrace))
+	wait := &startWait{parent: ctx}
+	defer wait.close()
+	conv, err := startConversation(ctx, a, ev, now, wait)
+	if err != nil {
+		return Result{}, err
 	}
-	_ = a.Ledger.Incr(ctx, "lifetime", "sessions", 1)
+	_ = a.Ledger.Incr(skip, "lifetime", "sessions", 1)
 	scope := conversation(ev)
 	// Forget before the upkeep, so a hook the host kills mid-upkeep still leaves a
 	// compacted conversation's record cleared.
@@ -204,7 +260,83 @@ func handleSessionStart(ctx context.Context, a *app.App, ev Event) (Result, erro
 	if err != nil {
 		return Result{}, err
 	}
-	sessionStartUpkeep(ctx, a)
+	if conv.roster == nil {
+		var names []string
+		for _, rc := range a.Repos {
+			names = append(names, rc.Git.RepoName)
+		}
+		return repoBlock(ctx, skip, a, now, scope, resumed, wait, subject{
+			rc: a.AllRepos()[0], served: true, tools: true, header: memoryHeader, reposLine: alsoServing(names)})
+	}
+	// A later start of a known conversation resumes it, whether or not its first
+	// block was delivered.
+	resumed = ev.Source == "resume" && !conv.first
+	if a.IndexIfCode != nil {
+		// The background index checks the folder as it then is, so no hook lists it.
+		a.IndexIfCode(a.Git.Worktree)
+	}
+	covered, gone, done := cover(a, conv.roster)
+	defer done()
+	// The block does not need the repos' session rows (it counts this session's
+	// changes as if they were written), so they are written beside the wait.
+	var bg sync.WaitGroup
+	var rowErr error
+	if ev.SessionID != "" {
+		bg.Go(func() {
+			defer recoverHook()
+			rowErr = ensureRosterSessions(skip, covered, ev, conv)
+		})
+	}
+	var res Result
+	switch len(covered) {
+	case 0:
+		res, err = goneBlock(ctx, skip, a, scope, resumed, gone)
+	case 1:
+		res, err = repoBlock(ctx, skip, a, now, scope, resumed, wait, covered[0].subject(ev.SessionID, conv.startedAt))
+	default:
+		res, err = sharedBlock(ctx, skip, a, now, scope, resumed, wait, ev.SessionID, conv.startedAt, covered)
+	}
+	bg.Wait()
+	if err != nil {
+		return Result{}, errors.Join(err, rowErr)
+	}
+	// A session row that could not be written does not spoil the block: the
+	// block is delivered and the failure reported.
+	res.Failure = rowErr
+	return res, nil
+}
+
+// subject is the repo a one-repo block is about.
+type subject struct {
+	rc        *app.RepoContext
+	served    bool   // RECARTO_REPOS serves it: it gets the first-index wait
+	tools     bool   // the repo argument reaches it: the block points at tools
+	header    string // the memory tier's header
+	reposLine string // the line naming served repos, "" for none
+	session   string // the conversation's id, counted as a session in rc before its row is written; "" in a session's own worktree
+	since     int64  // that session's start
+}
+
+// repoBlock builds the session-start block of one repo, s: the block a session
+// started in that repo shows.
+func repoBlock(ctx, skip context.Context, a *app.App, now int64, scope string, resumed bool,
+	wait *startWait, s subject) (Result, error) {
+	rc := s.rc
+	var tier *mapTier
+	if !resumed && a.Features.On(features.CodeMap) {
+		w, start := wait, a.StartIndex
+		if !s.served {
+			w, start = nil, nil
+		}
+		tier = startMapTier(ctx, skip, w, rc, start)
+	}
+	// The first-index wait comes before upkeep, so a slow sync does not use up its budget.
+	tier.settle(ctx, skip)
+	// The wait used up the first bound; the writes after it get their own.
+	skip = store.WithWriteDeadline(ctx, time.Now().Add(writeGrace))
+	// Writes that miss skip's bound are skipped; the next session start or Stop
+	// redoes them.
+	sessionStartUpkeep(skip, a, []*app.RepoContext{rc})
 
 	budget := sessionBudget()
 	repoBudget := budget
@@ -215,16 +347,16 @@ func handleSessionStart(ctx context.Context, a *app.App, ev Event) (Result, erro
 		if a.Workspace != nil {
 			wsBudget := budget / 3
 			repoBudget = budget - wsBudget
-			if wsSet, err := a.Workspace.Engine.Recall(ctx, memory.RecallQuery{
+			if wsSet, err := a.Workspace.Engine.Recall(skip, memory.RecallQuery{
 				Baseline:    true,
 				TokenBudget: wsBudget,
 			}); err == nil {
 				wsResults = wsSet.Results
 			}
 		}
-		set, err := a.Engine.Recall(ctx, memory.RecallQuery{
-			Branch:      a.Git.Branch,
-			Worktree:    a.Git.Worktree,
+		set, err := rc.Engine.Recall(skip, memory.RecallQuery{
+			Branch:      rc.Git.Branch,
+			Worktree:    rc.Git.Worktree,
 			Baseline:    true,
 			TokenBudget: repoBudget,
 		})
@@ -237,58 +369,27 @@ func handleSessionStart(ctx context.Context, a *app.App, ev Event) (Result, erro
 		isTodo := func(r memory.RecallResult) bool { return r.Record.Kind == memory.KindTodo }
 		results, wsResults = slices.DeleteFunc(results, isTodo), slices.DeleteFunc(wsResults, isTodo)
 	}
-	// "What changed since you were last here": baseline = the last session that
-	// journaled deltas, so /clear and open-and-close sessions are transparent
-	// (the same delta keeps showing until a context has lived alongside it).
-	var deltas []graph.Delta
-	var deltaTotal int
-	var deltaBaseline int64
-	if at, ok, err := a.Graph.DeltaBaseline(ctx, a.Git.Worktree, now); err == nil && ok {
-		deltaBaseline = at
-		if a.Features.On(features.RecentChanges) {
-			deltas, deltaTotal, _ = a.Graph.DeltasSince(ctx, a.Git.Worktree, at, 200)
-		}
-	}
-	// Retention: drop journal rows no baseline walk can reach (best-effort).
-	// The walk is unbounded — it skips no-op sessions all the way back to the
-	// last delta-bearing one — so the cutoff must never pass the current
-	// baseline: any run of consecutive /clear or read-only sessions, however
-	// long, must not erase the deltas the tier is still reporting. Past that,
-	// rows older than the 10th-most-recent session are unreachable.
-	if cutoff, err := tenthSessionStart(ctx, a); err == nil && cutoff > 0 {
-		if deltaBaseline > 0 && deltaBaseline < cutoff {
-			cutoff = deltaBaseline
-		}
-		_ = a.Graph.PruneDeltas(ctx, a.Git.Worktree, cutoff)
-	}
+	deltas, deltaTotal, deltaBaseline := recentChanges(ctx, skip, a, rc, s.session, s.since, now)
 
 	wsName := ""
 	if a.Workspace != nil {
 		wsName = a.Workspace.Name
 	}
 	if resumed {
-		return resumeContext(ctx, a, scope, results, wsName, wsResults, repoBudget)
+		return resumeContext(ctx, a, scope, results, s.header, wsName, wsResults, repoBudget)
 	}
 	// Orientation map + recent bugs are best-effort tiers; failure omits the tier.
-	// A map of an unfinished index leaves modules out without saying so, so
-	// while the index is unfinished the block says that instead.
-	var arch graph.Architecture
-	indexing := false
-	if a.Features.On(features.CodeMap) {
-		if m, done, err := a.Graph.CodeMap(ctx, a.Git.Worktree, a.Git.NonGit); err == nil {
-			arch, indexing = m, !done
-		}
-	}
 	var bugs []*memory.Record
 	if a.Features.On(features.RecentBugs) {
-		bugs, _ = a.Engine.RecentBugs(ctx, a.Git.Branch, recentBugLimit)
+		bugs, _ = rc.Engine.RecentBugs(ctx, rc.Git.Branch, recentBugLimit)
 	}
 
-	var extraRepos []string
-	for _, rc := range a.Repos {
-		extraRepos = append(extraRepos, rc.Git.RepoName)
+	f := toolFeatures(a)
+	if !s.tools {
+		f = withoutTools(f)
 	}
-	out, emitted := formatSessionContext(results, wsName, wsResults, extraRepos, arch, indexing, bugs, deltas, deltaTotal, deltaBaseline, repoBudget, toolFeatures(a))
+	arch, line := tier.result()
+	out, emitted := formatSessionContext(s.header, s.reposLine, results, wsName, wsResults, arch, line, bugs, deltas, deltaTotal, deltaBaseline, repoBudget, f)
 	// Mark every memory rendered into this block as surfaced for the conversation, so the
 	// just-in-time read/edit hooks won't re-inject a guardrail/bug/todo the agent can
 	// already see here. Memories dropped under budget stay unmarked and still surface
@@ -298,7 +399,45 @@ func handleSessionStart(ctx context.Context, a *app.App, ev Event) (Result, erro
 		// A lost mark only costs the next resume a full block, as before.
 		_ = a.Ledger.Incr(ctx, scope, blockMetric, 1)
 	}
+	// An index can finish while the marks wait for its writer, and the block must
+	// not then say the graph is still being indexed. The tier takes no part of
+	// the memory budget, so the marks just written match the block rendered again.
+	if tier.recheck(ctx, skip) {
+		arch, line = tier.result()
+		out, _ = formatSessionContext(s.header, s.reposLine, results, wsName, wsResults, arch, line, bugs, deltas, deltaTotal, deltaBaseline, repoBudget, f)
+	}
 	return Result{Context: out}, nil
+}
+
+// recentChanges returns rc's changes since its baseline, counting session id,
+// started at since, as written in rc, and prunes rc's journal past what any
+// baseline walk can reach.
+func recentChanges(ctx, skip context.Context, a *app.App, rc *app.RepoContext, id string, since, now int64) ([]graph.Delta, int, int64) {
+	// "What changed since you were last here": baseline = the last session that
+	// journaled deltas, so /clear and open-and-close sessions are transparent
+	// (the same delta keeps showing until a context has lived alongside it).
+	var deltas []graph.Delta
+	var deltaTotal int
+	var deltaBaseline int64
+	if at, ok, err := rc.Graph.DeltaBaselineWith(ctx, rc.Git.Worktree, id, since, now); err == nil && ok {
+		deltaBaseline = at
+		if a.Features.On(features.RecentChanges) {
+			deltas, deltaTotal, _ = rc.Graph.DeltasSince(ctx, rc.Git.Worktree, at, 200)
+		}
+	}
+	// Retention: drop journal rows no baseline walk can reach (best-effort).
+	// The walk is unbounded — it skips no-op sessions all the way back to the
+	// last delta-bearing one — so the cutoff must never pass the current
+	// baseline: any run of consecutive /clear or read-only sessions, however
+	// long, must not erase the deltas the tier is still reporting. Past that,
+	// rows older than the 10th-most-recent session are unreachable.
+	if cutoff, err := tenthSessionStart(ctx, rc); err == nil && cutoff > 0 {
+		if deltaBaseline > 0 && deltaBaseline < cutoff {
+			cutoff = deltaBaseline
+		}
+		_ = rc.Graph.PruneDeltas(skip, rc.Git.Worktree, cutoff)
+	}
+	return deltas, deltaTotal, deltaBaseline
 }
 
 // applySource applies a session start's source to the record of what scope's
@@ -318,9 +457,10 @@ func applySource(ctx context.Context, a *app.App, scope, source string) (resumed
 	return false, nil
 }
 
-// sessionStartUpkeep syncs memories, imports the team snapshot and runs gated
-// memory compaction. Every session start runs it, whatever its source.
-func sessionStartUpkeep(ctx context.Context, a *app.App) {
+// sessionStartUpkeep syncs memories, imports the team snapshot of each of repos
+// and runs their gated memory compaction. Every session start runs it, whatever
+// its source.
+func sessionStartUpkeep(ctx context.Context, a *app.App, repos []*app.RepoContext) {
 	// Pull remote memory changes before recall, so this session's injected
 	// context reflects other machines' work (best-effort, bounded — a wedged or
 	// unreachable sync server must never delay the agent). This runs BEFORE the
@@ -341,7 +481,9 @@ func sessionStartUpkeep(ctx context.Context, a *app.App) {
 
 	// Absorb a teammate's committed memory snapshot when it changed (best-effort).
 	if a.Features.On(features.TeamSnapshot) {
-		_, _ = snapshot.SyncOnSessionStart(ctx, a.Engine, a.Store, a.Git.Worktree)
+		for _, rc := range repos {
+			_, _ = snapshot.SyncOnSessionStart(ctx, rc.Engine, rc.Store, rc.Git.Worktree)
+		}
 	}
 
 	// Push anything now sitting in the local outbox/tombstone queue — a prior
@@ -366,7 +508,9 @@ func sessionStartUpkeep(ctx context.Context, a *app.App) {
 	// single-flight across worktrees). Runs before recall so this session's
 	// recalls stamp the freshly-advanced epoch. Never blocks the agent.
 	if a.Features.On(features.AutoCompact) {
-		_, _ = a.Engine.Compact(ctx, memory.CompactOptions{})
+		for _, rc := range repos {
+			_, _ = rc.Engine.Compact(ctx, memory.CompactOptions{})
+		}
 	}
 }
 
@@ -374,7 +518,7 @@ func sessionStartUpkeep(ctx context.Context, a *app.App) {
 // full block would show now that scope's conversation has not been shown, and
 // marks them shown. No context when there are none.
 func resumeContext(ctx context.Context, a *app.App, scope string, results []memory.RecallResult,
-	wsName string, wsResults []memory.RecallResult, budget int) (Result, error) {
+	header, wsName string, wsResults []memory.RecallResult, budget int) (Result, error) {
 	// A memory the block drops for its budget stays out on a resume too, as it
 	// did at startup; otherwise every resume would inject it.
 	_, inBlock := formatMemories(results, budget)
@@ -387,7 +531,7 @@ func resumeContext(ctx context.Context, a *app.App, scope string, results []memo
 	if err != nil {
 		return Result{}, err
 	}
-	out, emitted := formatResumeContext(results, wsName, wsResults, budget)
+	out, emitted := formatResumeContext(header, results, wsName, wsResults, budget)
 	markSurfaced(ctx, a, scope, emitted)
 	return Result{Context: out}, nil
 }
@@ -652,11 +796,11 @@ func handleShell(ctx context.Context, a *app.App, ev Event) (Result, error) {
 // session, or 0 when fewer exist. It is the retention horizon for graph_deltas
 // rows — but only after the caller clamps it to the current delta baseline,
 // which an unbounded run of no-op sessions can push past this horizon.
-func tenthSessionStart(ctx context.Context, a *app.App) (int64, error) {
+func tenthSessionStart(ctx context.Context, rc *app.RepoContext) (int64, error) {
 	var at int64
-	err := a.Store.DB.QueryRowContext(ctx,
+	err := rc.Store.DB.QueryRowContext(ctx,
 		`SELECT started_at FROM sessions WHERE worktree = ?
-		  ORDER BY started_at DESC LIMIT 1 OFFSET 9`, a.Git.Worktree).Scan(&at)
+		  ORDER BY started_at DESC LIMIT 1 OFFSET 9`, rc.Git.Worktree).Scan(&at)
 	if err != nil {
 		return 0, nil // fewer than 10 sessions: nothing to prune (sql.ErrNoRows folds here)
 	}
@@ -684,7 +828,7 @@ const stopIssueReminder = " And if Recarto itself errored, ranked the wrong resu
 // Code re-invokes Stop after our block, always pass through. Every fault in the
 // nudge decision degrades to the static reminder — never to silence, and never
 // to a false block.
-func handleStop(ctx context.Context, a *app.App, ev Event) (Result, error) {
+func handleStop(ctx context.Context, a *app.App, ev Event) (res Result, err error) {
 	if ev.SessionID == "" {
 		return Result{}, nil
 	}
@@ -697,6 +841,10 @@ func handleStop(ctx context.Context, a *app.App, ev Event) (Result, error) {
 	}); err != nil {
 		return Result{}, err
 	}
+	rosterErr := endRosterSessions(ctx, a, ev, now)
+	// A roster repo whose session cannot be ended does not hold up the sync push
+	// or the nudge; the hook reports it.
+	defer func() { res.Failure = rosterErr }()
 	// Turn boundary: the agent is idle, so a TRUNCATE checkpoint can actually
 	// win the WAL (mid-session it silently yields to concurrent readers).
 	_ = a.Store.Checkpoint(ctx)

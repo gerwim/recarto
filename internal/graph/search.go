@@ -71,7 +71,7 @@ func (e *Engine) Search(ctx context.Context, worktree, query, kind, lang string,
 // with them. With no candidates the behaviour is identical to the previous Search.
 func (e *Engine) SearchGuided(ctx context.Context, worktree, query string, candidateSymbols []string, kind, lang string, limit int) ([]SearchResult, error) {
 	if limit <= 0 {
-		limit = 20
+		limit = DefaultSearchLimit
 	}
 	lex, err := e.lexicalSearch(ctx, worktree, query, kind, lang, limit)
 	if err != nil {

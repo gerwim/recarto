@@ -619,7 +619,7 @@ func Migrate(db *sql.DB) error {
 	// attempt a cheap no-op apart from its lock acquisition.
 	for attempt := 0; ; attempt++ {
 		err := migrateOnce(ctx, db)
-		if err == nil || !isBusy(err) || attempt >= maxWriteRetries {
+		if err == nil || !IsBusy(err) || attempt >= maxWriteRetries {
 			return err
 		}
 		time.Sleep(busyBackoff(attempt))

@@ -66,6 +66,29 @@ func TestReferencesTextFallbackAndDedup(t *testing.T) {
 	}
 }
 
+func TestTextReferencesAreTextOnlyWithoutGraphSymbols(t *testing.T) {
+	e := newTestEngine(t)
+	ctx := context.Background()
+	wt := t.TempDir()
+	indexInto(t, e, wt, "a.go", "package p\nfunc Target() { /* Target */ }\n")
+	writeFile(t, wt, "README.md", "Target is documented.\n")
+	refs, meta, err := e.TextReferences(ctx, wt, " Target ", 10, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if meta.Resolved || len(refs) == 0 {
+		t.Fatalf("text refs meta/results = %+v, %+v", meta, refs)
+	}
+	for _, ref := range refs {
+		if ref.Kind != "text" || ref.From != "" {
+			t.Errorf("text-only reference carries graph data: %+v", ref)
+		}
+	}
+	if got := ReferenceName("  Body::Run  "); got != "Body.Run" {
+		t.Errorf("ReferenceName = %q, want Body.Run", got)
+	}
+}
+
 func TestReferencesFlagsTestFiles(t *testing.T) {
 	e := newTestEngine(t)
 	ctx := context.Background()

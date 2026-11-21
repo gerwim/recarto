@@ -20,24 +20,9 @@ import (
 
 	"github.com/gerwim/recarto/internal/app"
 	"github.com/gerwim/recarto/internal/clock"
+	"github.com/gerwim/recarto/internal/gitwrap"
 	"github.com/gerwim/recarto/internal/graph"
 )
-
-// gitScript writes a git into a new directory, which it returns for the front
-// of PATH. That git runs the shell snippet hook, then the real git.
-func gitScript(t *testing.T, hook string) string {
-	t.Helper()
-	realGit, err := exec.LookPath("git")
-	if err != nil {
-		t.Fatal(err)
-	}
-	dir := t.TempDir()
-	script := "#!/bin/sh\n" + hook + "\nexec '" + realGit + "' \"$@\"\n"
-	if err := os.WriteFile(filepath.Join(dir, "git"), []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	return dir
-}
 
 // TestWarmLimitHelper is the `recarto warm` process TestWarmStopsAtItsLimit
 // runs. Its limit fires when SIGUSR1 arrives, unless Run stopped it first.
@@ -75,7 +60,7 @@ func TestWarmStopsAtItsLimit(t *testing.T) {
 	t.Setenv("RECARTO_CONFIG", filepath.Join(t.TempDir(), "config.toml"))
 
 	// The fake git fires the limit once the run is inside the index, then hangs.
-	fakeDir := gitScript(t, `for a in "$@"; do if [ "$a" = ls-files ]; then kill -USR1 $PPID; exec sleep 3600; fi; done`)
+	fakeDir := gitwrap.Script(t, `for a in "$@"; do if [ "$a" = ls-files ]; then kill -USR1 $PPID; exec sleep 3600; fi; done`)
 
 	cmd := exec.Command(os.Args[0], "-test.run=^TestWarmLimitHelper$")
 	cmd.Dir = repo
@@ -105,14 +90,14 @@ func TestWarmStopsAtItsLimit(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = a.Close() })
 	ctx := context.Background()
-	if err := Warm(ctx, a); err != nil {
+	if err := Warm(ctx, a, nil); err != nil {
 		t.Fatal(err)
 	}
-	_, finished, err := a.Graph.CodeMap(ctx, a.Git.Worktree, false)
+	_, st, err := a.Graph.CodeMap(ctx, a.Git.Worktree, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !finished {
+	if !st.Done {
 		t.Error("index unfinished after the next warm")
 	}
 	if got := filesIn(t, a, a.Git.Worktree); got != 1 {
@@ -163,7 +148,7 @@ func TestWarmLeavesAWorktreeAnotherProcessIndexes(t *testing.T) {
 	// lock would run this git status; the shim records that instead of hanging.
 	eager := filepath.Join(t.TempDir(), "eager-status")
 	hook := `if [ "$1" = -C ] && [ "$2" = '` + wt + `' ] && [ "$3" = status ]; then : > '` + eager + `'; exit 1; fi`
-	t.Setenv("PATH", gitScript(t, hook)+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("PATH", gitwrap.Script(t, hook)+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	held := heldSource{Source: graph.NewSource(wt), listing: make(chan struct{}), gate: make(chan struct{})}
 	indexed := make(chan error, 1)
@@ -187,7 +172,7 @@ func TestWarmLeavesAWorktreeAnotherProcessIndexes(t *testing.T) {
 	if _, err := bconn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
 		t.Fatalf("blocker BEGIN IMMEDIATE: %v", err)
 	}
-	awaitNil(t, "warm with the worktree busy", func() error { return Warm(ctx, a) })
+	awaitNil(t, "warm with the worktree busy", func() error { return Warm(ctx, a, nil) })
 	repos := a.AllRepos()
 	if len(repos) != 2 {
 		t.Fatalf("served repos = %d, want 2", len(repos))
@@ -209,7 +194,7 @@ func TestWarmLeavesAWorktreeAnotherProcessIndexes(t *testing.T) {
 	if err := a.Graph.Reconcile(ctx, "/definitely/gone-wt", graph.FSSource{Root: primary}); err != nil {
 		t.Fatal(err)
 	}
-	awaitNil(t, "warm after the store lock is free", func() error { return Warm(ctx, a) })
+	awaitNil(t, "warm after the store lock is free", func() error { return Warm(ctx, a, nil) })
 	if got := filesIn(t, a, "/definitely/gone-wt"); got != 0 {
 		t.Errorf("dead worktree files = %d, want 0: warm's sweep must run", got)
 	}

@@ -201,8 +201,8 @@ func (e *Engine) pruneStep(ctx context.Context, worktree string, usedBefore time
 				return errWorktreeUsed
 			}
 		}
-		if _, err := c.ExecContext(ctx, `DELETE FROM meta WHERE key IN (?, ?)`,
-			graphTokenKey+worktree, archCacheKey+worktree); err != nil {
+		if _, err := c.ExecContext(ctx, `DELETE FROM meta WHERE key IN (?, ?, ?)`,
+			graphTokenKey+worktree, archCacheKey+worktree, builtKey(worktree)); err != nil {
 			return err
 		}
 		if _, err := c.ExecContext(ctx, `DELETE FROM graph_deltas WHERE worktree=?`, worktree); err != nil {

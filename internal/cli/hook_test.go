@@ -4,11 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/gerwim/recarto/internal/app"
 )
 
 func TestHookSessionStartDispatch(t *testing.T) {
@@ -156,6 +159,55 @@ func TestRunHookOutsideServedReposOpensNoStore(t *testing.T) {
 	}
 }
 
+// A search counts where its path leads, and the worktree where it leads: a
+// non-git cwd entered through a link is served under the link's name.
+func TestRunHookSearchThroughSymlink(t *testing.T) {
+	repo, outside, links := t.TempDir(), t.TempDir(), t.TempDir()
+	cwd, out := filepath.Join(links, "cwd"), filepath.Join(links, "out")
+	if err := os.Symlink(repo, cwd); err != nil {
+		t.Skipf("no symlinks here: %v", err)
+	}
+	if err := os.Symlink(outside, out); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(cwd)
+	for _, k := range []string{"RECARTO_WORKSPACE", "RECARTO_REPOS", "RECARTO_SYNC_URL", "RECARTO_SYNC_KEY"} {
+		t.Setenv(k, "")
+	}
+	payload := func(input map[string]string) string {
+		b, err := json.Marshal(map[string]any{"session_id": "s", "cwd": cwd, "tool_input": input})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+	for _, tc := range []struct {
+		name, event, payload string
+		opens                bool
+	}{
+		{"grep at the real path", "augment", payload(map[string]string{"pattern": "Foo", "path": repo}), true},
+		{"shell search through the cwd link", "shell", payload(map[string]string{"command": "rg Foo " + filepath.ToSlash(cwd)}), true},
+		{"shell search through a link outside", "shell", payload(map[string]string{"command": "rg Foo " + filepath.ToSlash(out)}), false},
+	} {
+		cache := t.TempDir()
+		t.Setenv("RECARTO_CACHE_DIR", cache)
+		t.Setenv("RECARTO_CONFIG", filepath.Join(t.TempDir(), "config.toml"))
+		var buf bytes.Buffer
+		runHook(context.Background(), strings.NewReader(tc.payload), &buf, []string{tc.event})
+		if !tc.opens && buf.Len() != 0 {
+			t.Errorf("%s: output %q", tc.name, buf.String())
+		}
+		entries, err := os.ReadDir(cache)
+		if err != nil {
+			t.Fatal(err)
+		}
+		opened := slices.ContainsFunc(entries, func(e os.DirEntry) bool { return e.Name() != "gitctx" })
+		if opened != tc.opens {
+			t.Errorf("%s: opened a store = %v, want %v", tc.name, opened, tc.opens)
+		}
+	}
+}
+
 // A shell call that neither searches nor prints a served repo's file — or
 // whose search another per-command hook answers — opens no store.
 func TestRunHookShellWithNothingToDoOpensNoStore(t *testing.T) {
@@ -208,5 +260,97 @@ func TestHookShellOwnerAnswers(t *testing.T) {
 		if got := strings.Contains(out.String(), "search_content"); got != want {
 			t.Errorf("--cmd %s answered = %v, want %v: %q", cmd, got, want, out.String())
 		}
+	}
+}
+
+// A session start makes one index attempt per worktree: the background warm
+// leaves out the worktree whose first index the hook started.
+func TestRunHookSessionStartAttemptsOnce(t *testing.T) {
+	repo := t.TempDir()
+	initGitRepo(t, repo, map[string]string{"a.go": "package p\n\nfunc A() {}\n"})
+	t.Chdir(repo)
+	for _, k := range []string{"RECARTO_WORKSPACE", "RECARTO_REPOS", "RECARTO_SYNC_URL", "RECARTO_SYNC_KEY"} {
+		t.Setenv(k, "")
+	}
+	t.Setenv("RECARTO_CACHE_DIR", t.TempDir())
+	t.Setenv("RECARTO_CONFIG", filepath.Join(t.TempDir(), "config.toml"))
+	var started, skipped []string
+	prevIndex, prevWarm := startIndex, startWarm
+	t.Cleanup(func() { startIndex, startWarm = prevIndex, prevWarm })
+	startIndex = func(wt string) (<-chan error, error) {
+		started = append(started, wt)
+		done := make(chan error, 1)
+		done <- errors.New("git ls-files: exit status 1")
+		return done, nil
+	}
+	startWarm = func(w warmRun) error {
+		skipped = w.skip
+		return nil
+	}
+	sessionStart := func(id string) string {
+		t.Helper()
+		var out bytes.Buffer
+		runHook(context.Background(), strings.NewReader(`{"session_id":"`+id+`","source":"startup"}`), &out, []string{"session-start"})
+		return out.String()
+	}
+
+	got := sessionStart("s1")
+	wt := realDir(t, repo)
+	if !slices.Equal(started, []string{wt}) || !slices.Equal(skipped, []string{wt}) {
+		t.Fatalf("started %v, warm skipped %v; want one start of %s, left out of warm", started, skipped, wt)
+	}
+	if !strings.Contains(got, "not built yet") {
+		t.Errorf("failed first index: want the not-built line:\n%s", got)
+	}
+
+	a, err := app.Open(app.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Warm(context.Background(), a, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Close(); err != nil {
+		t.Fatal(err)
+	}
+	started, skipped = nil, []string{"unset"}
+	sessionStart("s2")
+	if len(started) != 0 || skipped != nil {
+		t.Errorf("indexed worktree: started %v, warm skipped %v; want neither", started, skipped)
+	}
+}
+
+// realDir is dir with its symlinks resolved, as git names a worktree.
+func realDir(t *testing.T, dir string) string {
+	t.Helper()
+	r, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
+// From a folder without code serving a repo, session start hands the folder to
+// the background warm to check for code, with the conversation's id.
+func TestRunHookSessionStartFromAFolderWithoutCode(t *testing.T) {
+	a, folder, repo := scratchServing(t)
+	if err := Warm(context.Background(), a, nil); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(folder)
+	prev := startWarm
+	t.Cleanup(func() { startWarm = prev })
+	var got warmRun
+	startWarm = func(w warmRun) error {
+		got = w
+		return nil
+	}
+	var out bytes.Buffer
+	runHook(context.Background(), strings.NewReader(`{"session_id":"s1","source":"startup"}`), &out, []string{"session-start"})
+	if !slices.Equal(got.ifCode, []string{folder}) || got.session != "s1" || slices.Contains(got.skip, repo) {
+		t.Fatalf("warm run %+v", got)
+	}
+	if !strings.Contains(out.String(), "lib") {
+		t.Errorf("block lacks the repo: %s", out.String())
 	}
 }

@@ -13,7 +13,8 @@ func (e *Engine) BugsForCode(ctx context.Context, branch string, files, symbols 
 }
 
 // RecentBugs returns up to limit active, branch-visible bug memories, most recent
-// first — the ambient "bugs we've bitten on" tier for session start.
+// first — the ambient "bugs we've bitten on" tier for session start. A negative
+// limit returns every match.
 func (e *Engine) RecentBugs(ctx context.Context, branch string, limit int) ([]*Record, error) {
 	rows, err := e.st.DB.QueryContext(ctx,
 		selectMemoriesSQL+`

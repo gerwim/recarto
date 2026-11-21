@@ -18,6 +18,11 @@ import (
 // testutil package yet).
 func initGitRepo(t *testing.T, dir, funcName string) {
 	t.Helper()
+	gitRepoWith(t, dir, map[string]string{"main.go": "package main\n\nfunc " + funcName + "() {}\n"})
+}
+
+func gitRepoWith(t *testing.T, dir string, files map[string]string) {
+	t.Helper()
 	run := func(args ...string) {
 		t.Helper()
 		cmd := exec.Command("git", args...)
@@ -28,9 +33,14 @@ func initGitRepo(t *testing.T, dir, funcName string) {
 			t.Fatalf("git %v: %v\n%s", args, err, out)
 		}
 	}
-	src := "package main\n\nfunc " + funcName + "() {}\n"
-	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte(src), 0o644); err != nil {
-		t.Fatal(err)
+	for name, body := range files {
+		p := filepath.Join(dir, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
 	run("init", "-q")
 	run("add", "-A")

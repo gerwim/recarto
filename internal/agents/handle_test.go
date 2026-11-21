@@ -528,7 +528,7 @@ func TestFormatSessionContextDegradesToTitles(t *testing.T) {
 		{Record: &memory.Record{Kind: memory.KindLearning, Title: "AAA", Body: "short body"}},
 		{Record: &memory.Record{Kind: memory.KindLearning, Title: "BBB", Body: strings.Repeat("x", 2000)}},
 	}
-	s, _ := formatSessionContext(results, "", nil, nil, graph.Architecture{}, false, nil, nil, 0, 0, 60, nil)
+	s, _ := formatSessionContext(memoryHeader, "", results, "", nil, graph.Architecture{}, "", nil, nil, 0, 0, 60, nil)
 	if !strings.Contains(s, "AAA") || !strings.Contains(s, "short body") {
 		t.Errorf("first entry should render with its body:\n%s", s)
 	}
@@ -674,7 +674,7 @@ func TestFormatSessionContextDropsEntryUnderTinyBudget(t *testing.T) {
 	results := []memory.RecallResult{
 		{Record: &memory.Record{Kind: memory.KindLearning, Title: "WontFitAtAll", Body: "body"}},
 	}
-	s, _ := formatSessionContext(results, "", nil, nil, graph.Architecture{}, false, nil, nil, 0, 0, 2, nil)
+	s, _ := formatSessionContext(memoryHeader, "", results, "", nil, graph.Architecture{}, "", nil, nil, 0, 0, 2, nil)
 	if strings.Contains(s, "WontFitAtAll") {
 		t.Errorf("entry should be dropped entirely when even its title exceeds the budget:\n%s", s)
 	}
@@ -910,31 +910,6 @@ func TestDeltaTierSurvivesManyNoOpSessions(t *testing.T) {
 	}
 	if !strings.Contains(res.Context, "Changed since your last working session") {
 		t.Errorf("delta tier must survive any number of no-op sessions (prune must not pass the baseline):\n%s", res.Context)
-	}
-}
-
-func TestSessionStartUnfinishedIndexShowsIndexingLine(t *testing.T) {
-	a := newTestApp(t, "main")
-	const codeMap = "Code map (modules)"
-	a.Features = off(features.CodeMap)
-	got := start(t, a, "s0", "startup")
-	if strings.Contains(got, codeMap) || strings.Contains(got, indexingLine) {
-		t.Errorf("code-map off: want neither the map nor the indexing line:\n%s", got)
-	}
-	a.Features = nil
-	got = start(t, a, "s1", "startup")
-	if !strings.Contains(got, indexingLine) || strings.Contains(got, codeMap) {
-		t.Fatalf("never-indexed worktree: want the indexing line and no map:\n%s", got)
-	}
-
-	root := t.TempDir()
-	if err := os.WriteFile(filepath.Join(root, "a.go"), []byte("package p\n\nfunc A() {}\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	finishIndex(t, a, root)
-	got = start(t, a, "s2", "startup")
-	if !strings.Contains(got, codeMap) || strings.Contains(got, indexingLine) {
-		t.Fatalf("finished index: want the map and no indexing line:\n%s", got)
 	}
 }
 

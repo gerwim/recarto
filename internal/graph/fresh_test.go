@@ -247,6 +247,31 @@ func TestEnsureFreshFailureCooldown(t *testing.T) {
 	}
 }
 
+func TestEnsureFreshByPastDeadlineReportsCompletedFailure(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "store.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	e, err := New(st, ledger.New(st), clock.NewFake(time.UnixMilli(1_700_000_000_000)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(e.Close)
+	src := &errSource{}
+	first := e.EnsureFresh(context.Background(), "/wt", src, "tok", 5*time.Second)
+	if first.State != FirstIndex {
+		t.Fatalf("first state = %v, want FirstIndex", first.State)
+	}
+	fresh := e.EnsureFreshBy(context.Background(), "/wt", src, "tok", time.Now().Add(-time.Second))
+	if fresh.State != FirstIndex || !strings.Contains(fresh.Detail, "graph refresh failed: boom") {
+		t.Fatalf("past-deadline freshness = %+v, want completed failure", fresh)
+	}
+	if got := src.lists.Load(); got != 1 {
+		t.Fatalf("List calls = %d, want one failed attempt", got)
+	}
+}
+
 func TestEnsureFreshNotesUseHourly(t *testing.T) {
 	e := newTestEngine(t)
 	ctx := context.Background()

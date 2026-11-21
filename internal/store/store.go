@@ -377,22 +377,50 @@ func (s *Store) Checkpoint(ctx context.Context) error {
 	}
 	// Close only hands the connection back to the pool; there is nothing to undo.
 	defer func() { _ = conn.Close() }()
-	var prior int
-	if err := conn.QueryRowContext(ctx, `PRAGMA busy_timeout`).Scan(&prior); err != nil {
+	restore, err := setBusyTimeout(ctx, conn, 0)
+	if err != nil {
 		return err
 	}
-	defer func() {
-		if _, err := conn.ExecContext(context.WithoutCancel(ctx), fmt.Sprintf(`PRAGMA busy_timeout=%d`, prior)); err != nil {
-			// A connection left without a busy timeout would fail every later
-			// writer at once instead of waiting; drop it from the pool.
-			_ = conn.Raw(func(any) error { return driver.ErrBadConn })
-		}
-	}()
-	if _, err := conn.ExecContext(ctx, `PRAGMA busy_timeout=0`); err != nil {
-		return err
-	}
+	defer restore()
 	var busy, logFrames, checkpointed int
 	return conn.QueryRowContext(ctx, `PRAGMA wal_checkpoint(TRUNCATE)`).Scan(&busy, &logFrames, &checkpointed)
+}
+
+// setBusyTimeout sets conn's busy timeout to ms and returns the function that
+// restores the prior one.
+func setBusyTimeout(ctx context.Context, conn *sql.Conn, ms int64) (restore func(), err error) {
+	var prior int
+	if err := conn.QueryRowContext(ctx, `PRAGMA busy_timeout`).Scan(&prior); err != nil {
+		return nil, err
+	}
+	restore = func() {
+		if _, err := conn.ExecContext(context.WithoutCancel(ctx), fmt.Sprintf(`PRAGMA busy_timeout=%d`, prior)); err != nil {
+			// A connection left with another busy timeout would fail later writers
+			// at once or make them wait too long; drop it from the pool.
+			_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+		}
+	}
+	if _, err := conn.ExecContext(ctx, fmt.Sprintf(`PRAGMA busy_timeout=%d`, ms)); err != nil {
+		restore()
+		return nil, err
+	}
+	return restore, nil
+}
+
+// writeDeadlineKey is the context key of WithWriteDeadline's deadline.
+type writeDeadlineKey struct{}
+
+// WithWriteDeadline returns ctx whose writes (WriteTx, WriteTxBulk) wait for another writer's
+// lock only until t, then fail with the busy error; reads are unaffected. It lets a caller skip
+// best-effort writes while another process holds the writer.
+func WithWriteDeadline(ctx context.Context, t time.Time) context.Context {
+	return context.WithValue(ctx, writeDeadlineKey{}, t)
+}
+
+// writeDeadline returns ctx's WithWriteDeadline deadline, if any.
+func writeDeadline(ctx context.Context) (time.Time, bool) {
+	t, ok := ctx.Value(writeDeadlineKey{}).(time.Time)
+	return t, ok
 }
 
 // maxWriteRetries bounds how many extra times WriteTx restarts a transaction
@@ -472,15 +500,23 @@ func (s *Store) writeTx(ctx context.Context, fn func(c Conn) error, bulk bool) e
 		if IsCorrupt(err) {
 			return corruptGuidance(err)
 		}
-		if err == nil || !isBusy(err) || attempt >= maxWriteRetries {
+		if err == nil || !IsBusy(err) || attempt >= maxWriteRetries {
 			return err
+		}
+		wait := busyBackoff(attempt)
+		if t, ok := writeDeadline(ctx); ok {
+			left := time.Until(t)
+			if left <= 0 {
+				return err
+			}
+			wait = min(wait, left)
 		}
 		// The lock is held by another writer; back off (releasing wmu so other
 		// in-process work can proceed) and retry.
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(busyBackoff(attempt)):
+		case <-time.After(wait):
 		}
 	}
 }
@@ -599,6 +635,14 @@ func (s *Store) writeTxOnce(ctx context.Context, fn func(c Conn) error, bulk boo
 		// failed BEGIN, callback error, failed COMMIT, or success.
 		defer restore()
 	}
+	if t, ok := writeDeadline(ctx); ok {
+		// SQLite's lock wait is wall time, so the deadline is too.
+		restore, err := setBusyTimeout(ctx, conn, max(0, time.Until(t).Milliseconds()))
+		if err != nil {
+			return err
+		}
+		defer restore()
+	}
 
 	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
 		return err // no transaction open yet; nothing to roll back
@@ -640,9 +684,9 @@ func corruptGuidance(err error) error {
 		"a new session repairs it automatically on open", err)
 }
 
-// isBusy reports whether err is a transient SQLite lock contention error, the
+// IsBusy reports whether err is a transient SQLite lock contention error, the
 // only class of WriteTx failure that is safe to retry.
-func isBusy(err error) bool {
+func IsBusy(err error) bool {
 	if err == nil {
 		return false
 	}

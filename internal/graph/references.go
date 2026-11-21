@@ -28,6 +28,9 @@ type ReferencesMeta struct {
 	Truncated bool
 }
 
+// ReferenceName is the form find_references and find_implementations look a symbol up by.
+func ReferenceName(symbol string) string { return canonicalSymbol(strings.TrimSpace(symbol)) }
+
 // References answers "where is X used" in one call. Graph edges come first —
 // matched by resolved dst node or by recorded dst_name, mirroring
 // Implementations, so unresolved edges are still found — then a word-boundary
@@ -42,9 +45,9 @@ type ReferencesMeta struct {
 func (e *Engine) References(ctx context.Context, worktree, symbol string, limit int) ([]Reference, ReferencesMeta, error) {
 	var meta ReferencesMeta
 	if limit <= 0 {
-		limit = 50
+		limit = DefaultListLimit
 	}
-	symbol = canonicalSymbol(strings.TrimSpace(symbol))
+	symbol = ReferenceName(symbol)
 	if symbol == "" {
 		return nil, meta, nil
 	}
@@ -60,15 +63,12 @@ func (e *Engine) References(ctx context.Context, worktree, symbol string, limit 
 			recv = prefix
 		}
 	}
-	suffix := "\x00" // sentinel: never matches when input has no dot (see SnippetByName)
-	if strings.Contains(symbol, ".") {
-		suffix = "%." + symbol
-	}
+	suffix := nameSuffix(symbol)
 
 	var nodeCount int
 	if err := e.st.DB.QueryRowContext(ctx, `
 SELECT COUNT(*) FROM nodes n JOIN files f ON f.id = n.file_id
- WHERE f.worktree = ? AND (n.name = ? OR n.qualified_name = ? OR n.qualified_name LIKE ?)`,
+ WHERE f.worktree = ? AND `+nameMatchCond+``,
 		worktree, symbol, symbol, suffix).Scan(&nodeCount); err != nil {
 		return nil, meta, err
 	}
@@ -101,7 +101,7 @@ SELECT f.path AS path, e2.line AS line, e2.kind AS kind, COALESCE(sn.qualified_n
 UNION` + edgeSelect + `
  WHERE f.worktree = ? AND e2.dst_node_id IN (
        SELECT n.id FROM nodes n JOIN files f2 ON f2.id = n.file_id
-        WHERE f2.worktree = ? AND (n.name = ? OR n.qualified_name = ? OR n.qualified_name LIKE ?))
+        WHERE f2.worktree = ? AND ` + nameMatchCond + `)
 ) ORDER BY path, line LIMIT ?`
 		args = []any{worktree, leaf, recv, worktree, worktree, symbol, symbol, suffix, limit + 1}
 	} else {
@@ -111,7 +111,7 @@ UNION` + edgeSelect + `
 UNION` + edgeSelect + `
  WHERE f.worktree = ? AND e2.dst_node_id IN (
        SELECT n.id FROM nodes n JOIN files f2 ON f2.id = n.file_id
-        WHERE f2.worktree = ? AND (n.name = ? OR n.qualified_name = ? OR n.qualified_name LIKE ?))
+        WHERE f2.worktree = ? AND ` + nameMatchCond + `)
 ) ORDER BY path, line LIMIT ?`
 		args = []any{worktree, leaf, worktree, worktree, symbol, symbol, suffix, limit + 1}
 	}
@@ -144,29 +144,63 @@ UNION` + edgeSelect + `
 	} else {
 		// Always run the text sweep — even when edge hits == limit — so that
 		// unseen text refs are discovered and Truncated is set honestly.
-		pattern := `\b` + regexp.QuoteMeta(leaf) + `\b`
-		matches, _, err := e.SearchContentWithMeta(ctx, worktree, pattern, ContentSearchOpts{
-			Regex: true, Limit: limit + len(seen), MaxPerFile: 10,
-		})
+		refs, meta.Truncated, err = e.textSweep(ctx, worktree, leaf, limit+len(seen), limit, refs, seen, false)
 		if err != nil {
 			return nil, meta, err
-		}
-		for _, m := range matches {
-			if seen[fmt.Sprintf("%s:%d", m.Path, m.Line)] {
-				continue
-			}
-			if len(refs) < limit {
-				refs = append(refs, Reference{
-					Path: m.Path, Line: m.Line, Kind: "text",
-					From: m.Symbol, Text: m.Text, IsTest: isTestPath(m.Path),
-				})
-				seen[fmt.Sprintf("%s:%d", m.Path, m.Line)] = true
-			} else {
-				meta.Truncated = true
-				break
-			}
 		}
 	}
 	_ = e.led.Incr(ctx, "lifetime", "graph_queries", 1)
 	return refs, meta, nil
+}
+
+func (e *Engine) textSweep(ctx context.Context, worktree, leaf string, fetch, limit int, refs []Reference, seen map[string]bool, noSymbols bool) ([]Reference, bool, error) {
+	pattern := `\b` + regexp.QuoteMeta(leaf) + `\b`
+	matches, _, err := e.SearchContentWithMeta(ctx, worktree, pattern, ContentSearchOpts{
+		Regex: true, Limit: fetch, MaxPerFile: 10, NoSymbols: noSymbols,
+	})
+	if err != nil {
+		return nil, false, err
+	}
+	truncated := false
+	for _, m := range matches {
+		key := fmt.Sprintf("%s:%d", m.Path, m.Line)
+		if seen[key] {
+			continue
+		}
+		if len(refs) >= limit {
+			truncated = true
+			break
+		}
+		refs = append(refs, Reference{
+			Path: m.Path, Line: m.Line, Kind: "text", From: m.Symbol, Text: m.Text, IsTest: isTestPath(m.Path),
+		})
+		seen[key] = true
+	}
+	return refs, truncated, nil
+}
+
+// TextReferences is References' word-boundary text sweep alone: every hit is
+// kind "text". noSymbols leaves hits without their enclosing symbol, for a
+// worktree whose graph is set aside. Resolved is false. Truncated is set when
+// more hits than limit exist; matches withheld by the per-file cap of 10 are
+// not counted, as in References.
+func (e *Engine) TextReferences(ctx context.Context, worktree, symbol string, limit int, noSymbols bool) ([]Reference, ReferencesMeta, error) {
+	if limit <= 0 {
+		limit = DefaultListLimit
+	}
+	symbol = ReferenceName(symbol)
+	if symbol == "" {
+		return []Reference{}, ReferencesMeta{}, nil
+	}
+	leaf := symbol
+	if i := lastDot(symbol); i >= 0 {
+		leaf = symbol[i+1:]
+	}
+	// One hit past the limit shows whether the sweep omitted a match.
+	refs, truncated, err := e.textSweep(ctx, worktree, leaf, limit+1, limit, nil, map[string]bool{}, noSymbols)
+	if err != nil {
+		return nil, ReferencesMeta{}, err
+	}
+	_ = e.led.Incr(ctx, "lifetime", "graph_queries", 1)
+	return refs, ReferencesMeta{Truncated: truncated}, nil
 }

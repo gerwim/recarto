@@ -6,6 +6,7 @@ package agents
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"path/filepath"
@@ -55,9 +56,10 @@ type Event struct {
 	// and the absolute paths of the files it prints (Shell).
 	Patterns []string
 	Files    []string
-	// SearchPaths are the absolute paths the searches name, as RunHook read them
-	// from Path (Augment) or Command (Shell). nil when a search names none, or one
-	// RunHook cannot resolve: the hint then covers every served repo.
+	// SearchPaths are where the searches lead: the absolute paths RunHook read
+	// from Path (Augment) or Command (Shell), with their symlinks resolved
+	// (realPath). nil when a search names none, or one RunHook cannot resolve:
+	// the hint then covers every served repo.
 	SearchPaths []string
 	// ReadRanged reports that the agent asked a read for a line range.
 	// ReadFirst..ReadLast are the 1-based lines the read returned; both are 0
@@ -76,6 +78,9 @@ type Result struct {
 	SystemMessage string
 	Block         bool
 	Reason        string
+	// Failure is a failure that leaves the result usable: RunHook delivers the
+	// result, then reports the failure on the hook's error channel.
+	Failure error
 }
 
 // Adapter converts a host's hook payloads to and from the neutral types.
@@ -141,7 +146,7 @@ func RunHook(ctx context.Context, open func(Event) (*app.App, error), ad Adapter
 	if err != nil {
 		return err
 	}
-	return ad.Encode(kind, out, res)
+	return errors.Join(ad.Encode(kind, out, res), res.Failure)
 }
 
 // Opened adapts an already-open App to RunHook's opener.

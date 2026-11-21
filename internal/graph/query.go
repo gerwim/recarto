@@ -2,9 +2,11 @@ package graph
 
 import (
 	"context"
-	"fmt"
+	"errors"
 	"strings"
 )
+
+var ErrEmptyQuery = errors.New("query needs at least one filter (name, kind, language, path, or edge); listing the whole graph is never the answer — use search for concepts, or query with a filter")
 
 // EdgeFilter restricts the result to nodes participating in an edge of Kind in
 // Direction ("out" = node is the edge source, "in" = node is the edge target).
@@ -48,11 +50,11 @@ type QueryNode struct {
 // Query runs a constrained structured query over the worktree's graph.
 func (e *Engine) Query(ctx context.Context, worktree string, spec QuerySpec) ([]QueryNode, error) {
 	if spec.IsEmpty() {
-		return nil, fmt.Errorf("query needs at least one filter (name, kind, language, path, or edge); listing the whole graph is never the answer — use search for concepts, or query with a filter")
+		return nil, ErrEmptyQuery
 	}
 	limit := spec.Limit
 	if limit <= 0 {
-		limit = 50
+		limit = DefaultListLimit
 	}
 	var b strings.Builder
 	b.WriteString(`

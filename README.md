@@ -306,7 +306,14 @@ What session start adds, by its `source`:
 | `compact` | The full block, after forgetting the conversation's reads, notes and searches. Its memories count as shown again. |
 | `resume` | Only the memories the block would show that the conversation has not been shown yet, such as ones recorded or synced since, in the block's format and budget. Nothing when there are none. A session Recarto has no record of gets the full block. |
 
-Every session start syncs memories, imports the team snapshot and compacts memories, whatever the source. It then starts `recarto warm` in the background, which brings the code graph of this worktree and the `RECARTO_REPOS` repos up to date and drops the graph of dead and unused worktrees. The hook does not wait for it. While the worktree's index is unfinished, the block has one line saying so instead of the code map. Changes made outside a session (a pull, a branch switch) show under recent changes from the next session start. OpenCode's plugin runs session start once per session.
+Every session start syncs memories, imports the team snapshot and compacts memories, whatever the source. A full block then shows the code map, or one line in its place:
+- A worktree with no files Recarto indexes shows neither. When the last indexed file stays on disk but git stops listing it (untracked and ignored), the old map still shows until the background index after that session start drops the file.
+- A worktree with code whose index has never finished gets its first index: session start starts it, or joins the process already indexing it, and waits up to 2 seconds. If the index finishes, the block shows the map. If it is still running, the block says the code graph is still being indexed, and the index goes on in the background. If it failed or could not start, the block says the code graph is not built yet; the next session start tries again.
+- A worktree whose index finished once never waits. It shows the last finished map, even when it is out of date, or says the graph is still being indexed while a new index of it runs.
+
+The block's memories are ranked against the graph as it stands when the wait ends. After writing its block, session start starts `recarto warm` in the background. It brings the code graph of this worktree and the `RECARTO_REPOS` repos up to date and drops the graph of dead and unused worktrees. It leaves out a worktree the session start already made its attempt at, so a session start makes one index attempt per worktree. The hook does not wait for it. While another process writes to the store, session start does not wait to sync, import the snapshot, compact or update statistics; the next session start does. A `resume` of a conversation Recarto knows never waits. Changes made outside a session (a pull, a branch switch) show under recent changes from the next session start. OpenCode's plugin runs session start once per session.
+
+In a folder outside git that holds no code, while `RECARTO_REPOS` serves repos, the block shows those repos instead of the folder; see [Session start in a folder without code](#session-start-in-a-folder-without-code). There the first-index wait is one shared 2-second wait for all served repos, and a repo whose index is still running or failed gets its line, naming it.
 
 ## Tool pointers
 
@@ -326,7 +333,7 @@ After a Grep or Glob call, or a shell search, Recarto lists the symbols the sear
   - it is anchored to a listed symbol or to the file that defines one;
   - Recarto's branch check does not flag it as referencing code missing from this worktree;
   - this conversation has not been shown it.
-- **Scope.** A search that names paths lists symbols and bugs only from the served repos (this worktree and the `RECARTO_REPOS` repos) its paths lie in or contain. If all its paths lie outside them, it adds nothing and does not count as a repeat. A search with no path covers every served repo.
+- **Scope.** A search that names paths lists symbols and bugs only from the served repos (this worktree and the `RECARTO_REPOS` repos) its paths lie in or contain. A path counts where its symlinks lead: through a link into a served repo it is inside that repo, and through a link that leads outside them it is outside. If all its paths lie outside them, it adds nothing and does not count as a repeat. A search with no path covers every served repo.
 - **Size.** A search that names no symbol adds nothing. One tool call adds at most 800 characters of hint, however many searches it runs.
 - **Repeats.** A pattern that already got a hint in this conversation, from the shell or Grep/Glob, adds nothing. `recarto status` counts these under `repeated_augments_blocked`.
 
@@ -432,7 +439,7 @@ the lifetime ledger counters:
 
 **Is it fast?** Recarto has no built-in timing, so measure the two heavy operations —
 the graph index and recall — directly. Hooks are exit-0 CLI calls, so their latency is
-essentially these two (post-edit reconcile + session-start injection; session start indexes in the background):
+essentially these two (post-edit reconcile + session-start injection; session start waits at most 2 s for a first index and otherwise indexes in the background):
 
 **Linux / macOS**
 
@@ -460,7 +467,8 @@ Measure-Command { recarto recall "auth flow" }
   query, and incrementally on each edit. One process at a time indexes a worktree.
   `recarto index`, `recarto graph` and the MCP server wait for it; `recarto warm`
   leaves the worktree to it. A `recarto warm` run stops after 30 minutes, and the
-  next session start continues its work.
+  next session start continues its work. A session start in a worktree whose index
+  never finished waits up to 2 s for it.
 - **Hooks start fast.** A hook decodes its payload first and opens only what that
   event needs; one with nothing to act on exits at about the cost of a bare process
   start. The git identity is remembered in `<cache>/gitctx/` and re-resolved when the
@@ -567,11 +575,13 @@ repo-less session reads and writes exactly the memories the cd'd sessions see:
 
 - Graph and file tools (`search_graph`, `get_code_snippet`, `get_file_outline`, …)
   take an optional `repo` (name or path) to target a served repo; omitted = the cwd
-  repo, and an unknown name errors with the served list. Tools offer `repo` only
-  while at least one listed repo besides the cwd repo is served.
+  repo (from a folder without code, see below), and an unknown name errors with the
+  served list. Tools offer `repo` only while at least one listed repo besides the
+  cwd repo is served.
 - `recall_memory`/`search_bugs`/`list_memory` merge every served repo's memories
   (hits labeled `repo`); `record_memory`/`record_bug` take `repo` to write into a
-  specific repo's store; id lookups resolve across all of them.
+  specific repo's store (from a folder without code, see below); id lookups resolve
+  across all of them.
 - The read/edit hooks map each touched file to the repo that owns it, so a memory
   anchored to `a/b/c.go` in repo1 fires even when the session reads it as
   `/work/task/repo1/a/b/c.go` from outside that repo — and edits reindex the owning
@@ -582,6 +592,71 @@ repo-less session reads and writes exactly the memories the cd'd sessions see:
 Missing paths, non-git directories and duplicates are skipped silently — an
 incomplete list never fails the session. Pair with `RECARTO_WORKSPACE` (§ above)
 for the cross-repo store that belongs to no single repo.
+
+### Memory writes from a folder without code
+
+When `recarto serve` starts in a folder outside git that holds no file Recarto indexes, and `RECARTO_REPOS` serves at least one repo, `record_memory` and `record_bug` called without `repo` store into a served repo, not the folder's own store.
+
+- The server decides this once, when it starts. Files added to or removed from the folder later change nothing until the next start.
+- **One repo:** the memory goes to it. With `supersedes_id`, that repo's store must hold the memory it replaces; otherwise nothing is stored.
+- **Several repos:** the anchors choose the repo.
+  - A file anchor is in the repos that own a real file at that path. An absolute path is taken as given; a relative one is tried under each repo's root. Symlinks are followed, and a file belongs to the innermost served repo that contains it.
+  - A symbol anchor is in the repos whose index has a symbol by exactly that name, case included: bare, qualified, or the `Type.Method` end of a qualified name. A repo whose first index has not finished may hold any name: it can keep another repo from being chosen, but a symbol never chooses it. A repo being refreshed is judged by its index as it stands. A repo with no indexable files holds no names.
+  - `supersedes_id` adds the repos whose stores hold that memory, so a replacement is stored beside the memory it replaces.
+  - The memory goes to the one repo in every anchor's set, anchored to its files' paths relative to that repo. Each file anchor must name one file there.
+- Otherwise nothing is stored. The reply says which anchors did not settle it and which values to pass as `repo`, and for `record_memory` with a workspace, `scope: "workspace"`.
+- A stored reply names the repo (`repo`) and the memory it replaced (`superseded_id`).
+- Replies, errors and labels leave the folder out of the served repos and name each repo by the value that reaches it as `repo`: its name, or its worktree path when another served repo or the folder has the same name.
+
+With no repo served, writes go to the folder's own store. An explicit `repo` and `scope: "workspace"` work as before.
+
+### Graph and file tools from a folder without code
+
+When `recarto serve` starts outside git in a folder with no file Recarto indexes,
+the decision is fixed for that server. With no repo served, graph tools say no code
+is indexed and `search_content` searches the folder.
+
+- **One served repo:** graph tools answer exactly as they do with `repo` naming it,
+  with every argument passed on as given.
+- **Several served repos:** each call first refreshes every repo with code, side by
+  side, within one wait of about 3 seconds. A repo with no indexable files is not
+  waited for and gives no graph results, but can still contribute text matches.
+  - `search_graph`, `query_graph` without `path`, `find_implementations`,
+    `find_annotated`, `get_architecture` and `get_graph_delta` cover every repo,
+    label entries, and split result limits evenly. A hint names `repo` to narrow a
+    capped result; architecture and delta replies have one section per repo.
+  - `find_references`, `trace_call_path` and `get_code_snippet` answer from the one
+    repo with the symbol, or list the repos to pick if several have it. If none
+    do, `find_references` returns text hits from every repo, `trace_call_path`
+    gathers suggestions from every repo, and `get_code_snippet` reports not found.
+  - `get_file_outline`'s `file`, `get_code_snippet`'s `file` and `query_graph`'s
+    `path` follow the ownership rule above. One real file routes the call to its
+    repo. Several: `get_file_outline` lists them with repo and relative path,
+    `get_code_snippet` answers from the one holding the symbol or lists those that
+    do, and `query_graph` returns each file's nodes, labelled. None: the reply says
+    no served repo has the file.
+- `search_content`, with one served repo or several, lists the folder's matches
+  first, then each repo's, every match labelled with its repo or the folder.
+  `offset` and `limit` page that joined list. With `language`, the folder is not
+  searched. A part that cannot be read or listed is left out and named in the reply.
+- An unfinished or refreshing repo is reported once, through the answering repo's
+  own hint or in `notes`.
+
+### Session start in a folder without code
+
+When a conversation starts in a folder outside git that holds no file Recarto indexes, and `RECARTO_REPOS` serves at least one repo, its session-start block shows the served repos:
+
+- The choice is made at the conversation's first session start and kept, with the repos then served in their order, for the whole conversation. A new conversation decides again.
+- **One repo:** the block a session started in that repo shows, plus the line naming it.
+- **Several repos:** a line per repo with its name and file and symbol counts, or its still-being-indexed or not-built-yet line; then each repo's code map, recent bugs, recent changes and memories, labelled with the repo.
+  - Each repo's and the workspace's top pinned do-not-repeat, and the per-repo lines, always show.
+  - The workspace takes at most a third of `RECARTO_SESSION_BUDGET`. The rest, including what the workspace leaves unused, is split equally between the repos. What all repos leave unused goes into one pool, which is offered once to each repo in turn, starting with the first; a repo can use it for items its own share could not hold. Tokens no repo can use stay unused. The block's header and closing lines use what is left.
+  - A memory held by several served stores shows once.
+- **`resume`** shows only memories the conversation has not been shown, labelled with their repo, and never waits.
+- **Names:** a repo is named by its name, or by its worktree path when another served repo or the folder has the same name. That value works as `repo`, and the block lists these values. When two served repos' paths differ only in letter case, the later one has no such value, and its label says the repo argument cannot select it.
+- A repo `RECARTO_REPOS` no longer serves still shows in that conversation, named by its path and marked as no longer served; it is not indexed. A checkout that cannot be opened is left out; when none can be, the block says so and shows the workspace tier.
+- The conversation counts as a session in each of its repos, so their recent changes, in the block, in a session started in the repo and in `get_graph_delta`, include changes made from the folder.
+- The folder's own memories are not shown; `recall_memory` and `list_memory` still find them. The folder is not indexed while it holds no code.
 
 ## Sharing memory across machines (HTTP sync)
 

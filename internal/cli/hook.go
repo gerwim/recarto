@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"slices"
+	"sync"
 
 	"github.com/gerwim/recarto/internal/agents"
 	"github.com/gerwim/recarto/internal/agents/claudecode"
@@ -40,6 +41,8 @@ func runHook(ctx context.Context, in io.Reader, out io.Writer, args []string) {
 		}
 	}()
 	var warm bool
+	var mu sync.Mutex // the session start's tiers add to the lists side by side
+	var run warmRun
 	open := func(ev agents.Event) (*app.App, error) {
 		cfg := app.Config{SkipWorkspace: ev.Kind != agents.KindSessionStart && ev.Kind != agents.KindStop}
 		var files, searched []string // the event acts only on these
@@ -61,16 +64,32 @@ func runHook(ctx context.Context, in io.Reader, out io.Writer, args []string) {
 		var err error
 		a, err = app.Open(cfg)
 		warm = err == nil && ev.Kind == agents.KindSessionStart
+		if warm {
+			run.session = ev.SessionID
+			a.StartIndex = func(wt string) (<-chan error, error) {
+				mu.Lock()
+				run.skip = append(run.skip, wt)
+				mu.Unlock()
+				return startIndex(wt)
+			}
+			a.IndexIfCode = func(wt string) {
+				mu.Lock()
+				run.ifCode = append(run.ifCode, wt)
+				mu.Unlock()
+			}
+		}
 		return a, err
 	}
 	if err := hook(ctx, open, in, out, args); err != nil {
 		fmt.Fprintln(os.Stderr, "recarto hook:", err)
 	}
-	// Session start hands the graph work to its own process, so the hook never
-	// waits for an index. It starts after the block is written, so it cannot
-	// race the block's reads of the graph.
+	// Session start hands the graph work to its own process; the hook waits only
+	// for a worktree's first index, and up to a bound. The rest starts after the
+	// block is written, so it cannot race the block's reads of the graph. A
+	// worktree the session start already made its attempt at is left out: one
+	// attempt per worktree per session start.
 	if warm {
-		if err := startWarm(); err != nil {
+		if err := startWarm(run); err != nil {
 			fmt.Fprintln(os.Stderr, "recarto hook: start the background index:", err)
 		}
 	}

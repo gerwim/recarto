@@ -92,6 +92,70 @@ func TestOpenReposDropsPrimaryDuplicate(t *testing.T) {
 	assertDescribeMatches(t, Config{CWD: repo}, a)
 }
 
+func TestOpenDecidesCodelessOnlyWhenRequested(t *testing.T) {
+	t.Setenv("RECARTO_CACHE_DIR", t.TempDir())
+	t.Setenv("RECARTO_WORKSPACE", "")
+	t.Setenv("RECARTO_SYNC_URL", "")
+	t.Setenv("RECARTO_SYNC_KEY", "")
+	repo := t.TempDir()
+	initGitRepo(t, repo)
+
+	open := func(folder string, decide bool, served bool) *App {
+		t.Helper()
+		if served {
+			t.Setenv("RECARTO_REPOS", repo)
+		} else {
+			t.Setenv("RECARTO_REPOS", "")
+		}
+		a, err := Open(Config{CWD: folder, DecideCodeless: decide})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return a
+	}
+
+	empty := t.TempDir()
+	a := open(empty, true, true)
+	if !a.Codeless {
+		t.Fatal("empty non-git folder serving a repo was not marked code-less")
+	}
+	if err := a.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	withCode := t.TempDir()
+	if err := os.WriteFile(filepath.Join(withCode, "x.go"), []byte("package p\nfunc X() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	a = open(withCode, true, true)
+	if a.Codeless {
+		t.Fatal("folder with indexable code was marked code-less")
+	}
+	_ = a.Close()
+
+	a = open(t.TempDir(), true, false)
+	if !a.Codeless || a.CodelessWithRepos() {
+		t.Fatal("empty folder decision should be code-less but not code-less with served repos")
+	}
+	_ = a.Close()
+
+	a = open(t.TempDir(), false, true)
+	if a.Codeless {
+		t.Fatal("code-less decision ran with DecideCodeless disabled")
+	}
+	_ = a.Close()
+
+	codeless := false
+	a, err := Open(Config{CWD: t.TempDir(), DecideCodeless: true, Codeless: &codeless})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.Codeless {
+		t.Fatal("explicit false code-less decision was ignored")
+	}
+	_ = a.Close()
+}
+
 // assertDescribeMatches checks that Describe(cfg) offers what the App opened
 // with cfg serves.
 func assertDescribeMatches(t *testing.T, cfg Config, a *App) {

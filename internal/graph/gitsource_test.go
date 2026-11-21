@@ -49,7 +49,7 @@ func TestGitSourceHonorsGitignore(t *testing.T) {
 }
 
 func TestWorktreeTokenEmptyForNonGit(t *testing.T) {
-	if WorktreeToken(t.TempDir()) != "" {
+	if WorktreeToken(t.TempDir(), "") != "" {
 		t.Error("non-git worktree should yield an empty token")
 	}
 }
@@ -64,14 +64,14 @@ func TestWorktreeTokenChangesWithCommit(t *testing.T) {
 	if out, err := exec.Command("git", "-C", dir, "commit", "-m", "init").CombinedOutput(); err != nil {
 		t.Fatalf("git commit: %v\n%s", err, out)
 	}
-	tok1 := WorktreeToken(dir)
+	tok1 := WorktreeToken(dir, "")
 	if tok1 == "" {
 		t.Fatal("token must not be empty for a git repo")
 	}
 
 	// Dirty the worktree.
 	writeFile(t, dir, "b.go", "package p\nfunc B(){}")
-	tok2 := WorktreeToken(dir)
+	tok2 := WorktreeToken(dir, "")
 	if tok1 == tok2 {
 		t.Error("token must change when working tree is dirtied")
 	}
@@ -94,7 +94,7 @@ func TestWorktreeTokenChangesOnReeditOfAlreadyDirtyFile(t *testing.T) {
 	if err := os.Chtimes(p, old, old); err != nil {
 		t.Fatal(err)
 	}
-	tok1 := WorktreeToken(dir)
+	tok1 := WorktreeToken(dir, "")
 
 	// Re-edit the ALREADY-dirty file with same-length content (B -> C) but a later
 	// mtime, exactly as a real second edit would. The porcelain line stays
@@ -105,7 +105,7 @@ func TestWorktreeTokenChangesOnReeditOfAlreadyDirtyFile(t *testing.T) {
 	if err := os.Chtimes(p, newer, newer); err != nil {
 		t.Fatal(err)
 	}
-	tok2 := WorktreeToken(dir)
+	tok2 := WorktreeToken(dir, "")
 
 	if tok1 == tok2 {
 		t.Error("token must change when an already-dirty file is re-edited (mtime moved)")
