@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/gerwim/recarto/internal/ledger"
+	"github.com/gerwim/recarto/internal/store"
 )
 
 // SnippetResult is the structured result of Snippet. A miss is Found=false (not
@@ -106,6 +107,59 @@ SELECT f.path, n.start_line, n.kind, n.qualified_name, (n.qualified_name = ?) AS
 	default:
 		return SnippetResult{Found: false}, cands, nil
 	}
+}
+
+// literalSymbol returns the condition on nodes n that n is symbol as written,
+// and its arguments: n's bare name, its qualified name, or, when symbol has a
+// dot, the end of its qualified name after a dot (Type.Method). Names compare
+// byte for byte, so case counts and _ and % are plain characters, unlike
+// get_code_snippet's LIKE: a write routed on a looser match would land in a
+// repo whose symbol anchors never match it back.
+func literalSymbol(symbol string) (cond string, args []any) {
+	if strings.Contains(symbol, ".") {
+		suffix := "." + symbol
+		return `(n.name = ? OR n.qualified_name = ? OR substr(n.qualified_name, -length(?)) = ?)`, []any{symbol, symbol, suffix, suffix}
+	}
+	// SQLite's length() stops at a NUL, so a "\x00" sentinel would not stay inert.
+	return `(n.name = ? OR n.qualified_name = ?)`, []any{symbol, symbol}
+}
+
+// IndexedSymbols reports whether an index of worktree has finished once
+// (built) and, when it has, whether the index as it stands holds a symbol
+// spelled exactly as each of symbols, case included: its bare name, its
+// qualified name, or the Type.Method end of its qualified name (literalSymbol).
+// A refresh rewrites the index file by file, so while one runs, or after one
+// was cut short, each file counts in the version last indexed. has is nil when
+// built is false.
+func (e *Engine) IndexedSymbols(ctx context.Context, worktree string, nonGit bool, symbols []string) (built bool, has []bool, err error) {
+	err = e.st.ReadTx(ctx, func(q store.Conn) error {
+		s, err := readIndexState(ctx, q, worktree)
+		if err != nil {
+			return err
+		}
+		done, err := codeMapDone(ctx, q, worktree, nonGit, s)
+		if err != nil {
+			return err
+		}
+		built = mapStatus(s, done).Built
+		if !built {
+			return nil
+		}
+		has = make([]bool, len(symbols))
+		for i, symbol := range symbols {
+			cond, args := literalSymbol(canonicalSymbol(symbol))
+			args = append([]any{worktree}, args...)
+			var one int
+			err := q.QueryRowContext(ctx, `SELECT 1 FROM nodes n JOIN files f ON f.id = n.file_id WHERE f.worktree = ? AND `+cond+` LIMIT 1`, args...).Scan(&one)
+			if err == nil {
+				has[i] = true
+			} else if !errors.Is(err, sql.ErrNoRows) {
+				return err
+			}
+		}
+		return nil
+	})
+	return built, has, err
 }
 
 // isOverloadSet reports whether every candidate is the same logical symbol — one

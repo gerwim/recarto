@@ -104,9 +104,10 @@ func Run(args []string, out io.Writer) (rerr error) {
 	// (rate-limited to once a day by the store's stamp file): it opens once and
 	// serves for hours, so it must not discover damage on its first write. Hooks
 	// and one-shot commands stay as cheap as before. It answers the MCP handshake
-	// before it opens its stores, so it opens the App itself.
+	// before it opens its stores, so it opens the App itself; only the server
+	// decides once whether its folder holds code.
 	if cmd == "serve" {
-		return Serve(context.Background(), app.Config{QuickCheck: true})
+		return Serve(context.Background(), app.Config{QuickCheck: true, DecideCodeless: true})
 	}
 
 	run, ok := appCommands[cmd]

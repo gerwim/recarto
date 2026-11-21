@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -161,6 +163,56 @@ func TestServeAnswersHandshakeBeforeTheStoreOpens(t *testing.T) {
 	r = callTool(t, cs, "recall_memory", map[string]any{"task_hint": "background open"})
 	if r.IsError || !strings.Contains(resultText(r), "served after a background open") {
 		t.Errorf("recall_memory after the open = %s, want the recorded memory", resultText(r))
+	}
+	wantServeClosed(t, wait())
+}
+
+func TestServeKeepsCodelessDecisionFromOpen(t *testing.T) {
+	clearRecartoEnv(t)
+	base := t.TempDir()
+	repo := filepath.Join(base, "served")
+	gitRepoWith(t, repo, map[string]string{"main.go": "package main\nfunc Main() {}\n"})
+	t.Setenv("RECARTO_REPOS", repo)
+	t.Setenv("RECARTO_WORKSPACE", "")
+
+	codeLessFolder := filepath.Join(base, "empty")
+	if err := os.MkdirAll(codeLessFolder, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := app.Config{CWD: codeLessFolder, DecideCodeless: true}
+	t.Setenv("RECARTO_CACHE_DIR", t.TempDir())
+	cs, wait := startServe(t, cfg, realOpen(cfg))
+	if r := callTool(t, cs, "list_memory", map[string]any{}); r.IsError {
+		t.Fatalf("list_memory: %s", resultText(r))
+	}
+	if err := os.WriteFile(filepath.Join(codeLessFolder, "x.go"), []byte("package p\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r := callTool(t, cs, "record_memory", map[string]any{"kind": "learning", "body": "write after code appeared in started folder"})
+	if r.IsError || !strings.Contains(resultText(r), `"repo":"served"`) {
+		t.Fatalf("write after code appeared = %s, want the served repo label", resultText(r))
+	}
+	wantServeClosed(t, wait())
+
+	withCode := filepath.Join(base, "with-code")
+	if err := os.MkdirAll(withCode, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(withCode, "x.go"), []byte("package p\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("RECARTO_CACHE_DIR", t.TempDir())
+	cfg = app.Config{CWD: withCode, DecideCodeless: true}
+	cs, wait = startServe(t, cfg, realOpen(cfg))
+	if r := callTool(t, cs, "list_memory", map[string]any{}); r.IsError {
+		t.Fatalf("list_memory: %s", resultText(r))
+	}
+	if err := os.Remove(filepath.Join(withCode, "x.go")); err != nil {
+		t.Fatal(err)
+	}
+	r = callTool(t, cs, "record_memory", map[string]any{"kind": "learning", "body": "write after code disappeared from started folder"})
+	if r.IsError || strings.Contains(resultText(r), `"repo"`) {
+		t.Fatalf("write after code disappeared = %s, want a folder-local reply", resultText(r))
 	}
 	wantServeClosed(t, wait())
 }

@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
+
+	"github.com/gerwim/recarto/internal/app"
 )
 
 // shellTree makes dir/{f.go, g.go, internal/x.go} and returns dir.
@@ -215,7 +217,7 @@ func TestRealPathEndsOnALinkLoop(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := realPath(filepath.Join(l1, "x"))
-	if _, in := within(base, got); !in {
+	if _, in := app.Within(base, got); !in {
 		t.Errorf("realPath = %q, want a path in %s", got, base)
 	}
 }
