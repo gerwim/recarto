@@ -89,6 +89,22 @@ func TestShareCap(t *testing.T) {
 	}
 }
 
+func TestTakeInTurn(t *testing.T) {
+	parts := [][]GraphSymbol{
+		{{QualifiedName: "a1"}, {QualifiedName: "a2"}, {QualifiedName: "a3"}},
+		nil,
+		{{QualifiedName: "c1"}, {QualifiedName: "c2"}},
+	}
+	got := searchGraphQualifiedNames(takeInTurn(parts))
+	want := []string{"a1", "c1", "a2", "c2", "a3"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("takeInTurn names = %v, want %v", got, want)
+	}
+	if got := takeInTurn(nil); len(got) != 0 {
+		t.Fatalf("takeInTurn(nil) = %v, want no entries", got)
+	}
+}
+
 func servedGraphFixture(t *testing.T, several bool) (folder, recarto, second string, a *app.App) {
 	t.Helper()
 	folder, recarto, second = routeRepos(t)
@@ -110,6 +126,227 @@ func servedGraphFixture(t *testing.T, several bool) (folder, recarto, second str
 		indexRepo(t, rc)
 	}
 	return folder, recarto, second, a
+}
+
+func searchOrderRepos(t *testing.T) (folder, alpha, beta string) {
+	t.Helper()
+	base := t.TempDir()
+	folder = filepath.Join(base, "_scratch")
+	alpha = filepath.Join(base, "alpha")
+	beta = filepath.Join(base, "beta")
+	gitRepoWith(t, alpha, map[string]string{
+		"run/helper.go":      "package run\nfunc Helper() {}\nfunc HelperPool() {}\n",
+		"run/helper_test.go": "package run\nfunc TestHelper() {}\n",
+	})
+	gitRepoWith(t, beta, map[string]string{
+		"jobs/pool.go": "package jobs\ntype Pool struct{}\nfunc (Pool) Drain() {}\nfunc TestHelper() {}\nfunc helperQueue() {}\n",
+	})
+	return folder, alpha, beta
+}
+
+func searchGraphQualifiedNames(results []GraphSymbol) []string {
+	names := make([]string, len(results))
+	for i, result := range results {
+		names[i] = result.QualifiedName
+	}
+	return names
+}
+
+func searchGraphLabeledNames(results []GraphSymbol) []string {
+	names := make([]string, len(results))
+	for i, result := range results {
+		names[i] = result.Repo + ":" + result.QualifiedName
+	}
+	return names
+}
+
+func assertJoinedSearchMatchesRepos(t *testing.T, joined SearchGraphOutput, repos map[string]SearchGraphOutput) {
+	t.Helper()
+	expected := make(map[string]GraphSymbol)
+	expectedCount := 0
+	for repo, out := range repos {
+		expectedCount += out.Count
+		for _, result := range out.Results {
+			result.Repo = repo
+			key := result.Repo + "\x00" + result.QualifiedName + "\x00" + result.Path
+			if _, exists := expected[key]; exists {
+				t.Fatalf("repo result key %q is not unique", key)
+			}
+			expected[key] = result
+		}
+	}
+	if joined.Count != expectedCount || len(joined.Results) != expectedCount {
+		t.Fatalf("joined count/results = %d/%d, repo counts sum to %d", joined.Count, len(joined.Results), expectedCount)
+	}
+	seen := make(map[string]int, len(expected))
+	for _, result := range joined.Results {
+		key := result.Repo + "\x00" + result.QualifiedName + "\x00" + result.Path
+		want, ok := expected[key]
+		if !ok {
+			t.Fatalf("joined result has no matching repo result: %+v", result)
+		}
+		if !reflect.DeepEqual(result, want) {
+			t.Errorf("joined result = %+v, repo result = %+v", result, want)
+		}
+		seen[key]++
+	}
+	for key := range expected {
+		if seen[key] != 1 {
+			t.Errorf("repo result %q occurs %d times in joined results, want once", key, seen[key])
+		}
+	}
+}
+
+func TestServedSearchGraphListsExactMatchesFirst(t *testing.T) {
+	folder, alpha, beta := searchOrderRepos(t)
+	a := codelessApp(t, folder, alpha, beta)
+	for _, rc := range a.Repos {
+		indexRepo(t, rc)
+	}
+
+	tests := []struct {
+		name        string
+		input       SearchGraphInput
+		alphaNames  []string
+		betaNames   []string
+		joinedNames []string
+	}{
+		{
+			name:       "query exact names",
+			input:      SearchGraphInput{Query: "TestHelper", Limit: 20},
+			alphaNames: []string{"Helper", "HelperPool", "TestHelper"},
+			betaNames:  []string{"TestHelper", "helperQueue"},
+			joinedNames: []string{
+				"alpha:TestHelper", "beta:TestHelper", "alpha:Helper", "beta:helperQueue", "alpha:HelperPool",
+			},
+		},
+		{
+			name:       "qualified candidate and case-sensitive bare candidate",
+			input:      SearchGraphInput{Query: "drain the pool", CandidateSymbols: []string{"Pool.Drain", "helper"}, Limit: 20},
+			alphaNames: []string{"Helper", "HelperPool", "TestHelper"},
+			betaNames:  []string{"Pool.Drain", "Pool", "TestHelper", "helperQueue"},
+			joinedNames: []string{
+				"beta:Pool.Drain", "alpha:Helper", "beta:Pool", "alpha:HelperPool", "beta:TestHelper", "alpha:TestHelper", "beta:helperQueue",
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			repoOutputs := make(map[string]SearchGraphOutput, 2)
+			for _, repo := range []struct {
+				label string
+				want  []string
+			}{
+				{label: "alpha", want: tc.alphaNames},
+				{label: "beta", want: tc.betaNames},
+			} {
+				input := tc.input
+				input.Repo = repo.label
+				got, err := searchGraph(context.Background(), a, input)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !reflect.DeepEqual(searchGraphQualifiedNames(got.Results), repo.want) {
+					t.Errorf("repo %s search names = %v, want %v", repo.label, searchGraphQualifiedNames(got.Results), repo.want)
+				}
+				repoOutputs[repo.label] = got
+			}
+
+			joined, err := searchGraph(context.Background(), a, tc.input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(searchGraphLabeledNames(joined.Results), tc.joinedNames) {
+				t.Errorf("joined search names = %v, want %v", searchGraphLabeledNames(joined.Results), tc.joinedNames)
+			}
+			assertJoinedSearchMatchesRepos(t, joined, repoOutputs)
+		})
+	}
+
+	cInput := SearchGraphInput{
+		Query: "drain the pool", CandidateSymbols: []string{"Helper", "HelperPool", "Drain", "Pool"}, Limit: 20,
+	}
+	repoOutputs := make(map[string]SearchGraphOutput, 2)
+	repoExactNames := make(map[string][]string, 2)
+	for _, repo := range []struct {
+		label      string
+		exactNames []string
+	}{
+		{label: "alpha", exactNames: []string{"Helper", "HelperPool"}},
+		{label: "beta", exactNames: []string{"Pool.Drain", "Pool"}},
+	} {
+		input := cInput
+		input.Repo = repo.label
+		got, err := searchGraph(context.Background(), a, input)
+		if err != nil {
+			t.Fatal(err)
+		}
+		exactSet := make(map[string]bool, len(repo.exactNames))
+		for _, name := range repo.exactNames {
+			exactSet[name] = true
+		}
+		var gotExact []string
+		for _, result := range got.Results {
+			if exactSet[result.QualifiedName] {
+				gotExact = append(gotExact, result.QualifiedName)
+			}
+		}
+		if len(gotExact) != len(repo.exactNames) {
+			t.Fatalf("repo %s exact names = %v, want %v", repo.label, gotExact, repo.exactNames)
+		}
+		for _, name := range gotExact {
+			if !exactSet[name] {
+				t.Fatalf("repo %s exact names = %v, want %v", repo.label, gotExact, repo.exactNames)
+			}
+			exactSet[name] = false
+		}
+		for name, present := range exactSet {
+			if present {
+				t.Fatalf("repo %s exact names = %v, missing %s", repo.label, gotExact, name)
+			}
+		}
+		repoExactNames[repo.label] = gotExact
+		repoOutputs[repo.label] = got
+	}
+	joined, err := searchGraph(context.Background(), a, cInput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantPrefix := []string{
+		"alpha:" + repoExactNames["alpha"][0], "beta:" + repoExactNames["beta"][0],
+		"alpha:" + repoExactNames["alpha"][1], "beta:" + repoExactNames["beta"][1],
+	}
+	joinedNames := searchGraphLabeledNames(joined.Results)
+	if len(joinedNames) < len(wantPrefix) || !reflect.DeepEqual(joinedNames[:len(wantPrefix)], wantPrefix) {
+		t.Errorf("joined exact prefix = %v, want %v", joinedNames, wantPrefix)
+	}
+	assertJoinedSearchMatchesRepos(t, joined, repoOutputs)
+}
+
+func TestOneServedRepoSearchKeepsRepoOrder(t *testing.T) {
+	folder, alpha, _ := searchOrderRepos(t)
+	a := codelessApp(t, folder, alpha)
+	for _, rc := range a.Repos {
+		indexRepo(t, rc)
+	}
+
+	input := SearchGraphInput{Query: "TestHelper"}
+	implicit, err := searchGraph(context.Background(), a, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input.Repo = "alpha"
+	explicit, err := searchGraph(context.Background(), a, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(implicit, explicit) {
+		t.Fatalf("implicit result = %+v, explicit = %+v", implicit, explicit)
+	}
+	want := []string{"Helper", "HelperPool", "TestHelper"}
+	if got := searchGraphQualifiedNames(implicit.Results); !reflect.DeepEqual(got, want) {
+		t.Fatalf("one-repo search names = %v, want %v", got, want)
+	}
 }
 
 func TestServedGraphRouting(t *testing.T) {

@@ -26,12 +26,33 @@ func searchGraphServed(ctx context.Context, a *app.App, in SearchGraphInput) (Se
 		return SearchGraphOutput{}, err
 	}
 	out := SearchGraphOutput{Results: []GraphSymbol{}, Notes: replyNotes(rs, nil, nil)}
+	exactNames := make(map[string]struct{}, len(in.CandidateSymbols)+1)
+	if in.Query != "" {
+		exactNames[in.Query] = struct{}{}
+	}
+	for _, name := range in.CandidateSymbols {
+		if name != "" {
+			exactNames[name] = struct{}{}
+		}
+	}
+	exact := make([][]GraphSymbol, len(parts))
+	other := make([][]GraphSymbol, len(parts))
 	for i, part := range parts {
 		for _, r := range part {
 			name, qual := canonicalIdentifier(r.Name, r.QualifiedName)
-			out.Results = append(out.Results, GraphSymbol{Repo: rs[i].label, Name: name, QualifiedName: qual, Kind: r.Kind, Path: r.Path, Signature: r.Signature, Line: r.Line, Score: roundScore(r.Score)})
+			result := GraphSymbol{Repo: rs[i].label, Name: name, QualifiedName: qual, Kind: r.Kind, Path: r.Path, Signature: r.Signature, Line: r.Line, Score: roundScore(r.Score)}
+			_, nameMatches := exactNames[r.Name]
+			_, qualifiedNameMatches := exactNames[r.QualifiedName]
+			if nameMatches || qualifiedNameMatches {
+				exact[i] = append(exact[i], result)
+			} else {
+				other[i] = append(other[i], result)
+			}
 		}
 	}
+	// Scores from different repos use different scales, so merge by each repo's rank.
+	out.Results = append(out.Results, takeInTurn(exact)...)
+	out.Results = append(out.Results, takeInTurn(other)...)
 	out.Count = len(out.Results)
 	if out.Count == 0 && len(in.CandidateSymbols) == 0 {
 		out.Hint = weakResultHint
@@ -39,6 +60,22 @@ func searchGraphServed(ctx context.Context, a *app.App, in SearchGraphInput) (Se
 		out.Hint = sharedCapHint(a) + " Narrow with candidate_symbols, a kind, a language, or more specific query terms."
 	}
 	return out, nil
+}
+
+func takeInTurn(parts [][]GraphSymbol) []GraphSymbol {
+	var out []GraphSymbol
+	for round := 0; ; round++ {
+		added := false
+		for _, part := range parts {
+			if round < len(part) {
+				out = append(out, part[round])
+				added = true
+			}
+		}
+		if !added {
+			return out
+		}
+	}
 }
 
 func queryGraphServed(ctx context.Context, a *app.App, in QueryGraphInput, spec graph.QuerySpec) (QueryGraphOutput, error) {
