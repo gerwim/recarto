@@ -12,8 +12,8 @@ import (
 const (
 	// firstIndexWait bounds how long a session start looks for code and waits
 	// for the worktree's first index, together, so a small repo's first session
-	// gets its code map.
-	firstIndexWait = 2 * time.Second
+	// gets its code map. Its look for code has the server's limit.
+	firstIndexWait = app.CodeCheckWait
 	// indexPollInterval is how often a session start waiting for another
 	// process's index checks whether it still runs.
 	indexPollInterval = 50 * time.Millisecond
