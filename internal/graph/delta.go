@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"path/filepath"
 	"sort"
 
 	"github.com/gerwim/recarto/internal/ids"
@@ -309,13 +308,6 @@ func tenthSessionStart(ctx context.Context, c store.Conn, worktree string) (int6
 	return at, err
 }
 
-// PendingEndsLockPath is the file whose lock orders a prune of st's journal
-// with a session end time being chosen for st's repo: pruning holds it through
-// its DELETE, and a writer holds it until the time is published.
-func PendingEndsLockPath(st *store.Store) string {
-	return filepath.Join(filepath.Dir(st.Path()), "pending-ends.lock")
-}
-
 // PruneUnreachableDeltas drops worktree's journal rows no baseline walk can
 // reach: those older than the 10th-most-recent session's start, never past the
 // current baseline (session id, started at startedAt, counted while its row is
@@ -323,8 +315,6 @@ func PendingEndsLockPath(st *store.Store) string {
 // delete nothing. Like PruneDeltas before it, it takes the write lock only when
 // the reads find ten sessions and no hold; it then decides again inside that
 // transaction, so an end written since the reads counts.
-// The store's pending-end lock also serializes this delete with Stops publishing
-// pending end records; if another writer holds it, this best-effort prune skips.
 func (e *Engine) PruneUnreachableDeltas(ctx context.Context, worktree, id string, startedAt, nowMs int64, hold func(c store.Conn) (bool, error)) error {
 	tenth, err := tenthSessionStart(ctx, e.st.DB, worktree)
 	if err != nil || tenth == 0 {
@@ -334,11 +324,6 @@ func (e *Engine) PruneUnreachableDeltas(ctx context.Context, worktree, id string
 	if err != nil || pending {
 		return err
 	}
-	release, locked, err := store.TryLockFile(PendingEndsLockPath(e.st))
-	if err != nil || !locked {
-		return err
-	}
-	defer release()
 	return e.st.WriteTx(ctx, func(c store.Conn) error {
 		pending, err := hold(c)
 		if err != nil || pending {

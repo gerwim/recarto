@@ -100,7 +100,7 @@ func runWarm(ctx context.Context, a *app.App, _ io.Writer, args []string) error 
 		if combined {
 			return errors.New("warm: --end-session cannot be combined with --only, --skip, --if-code or --session")
 		}
-		ctx, cancel := context.WithTimeout(ctx, warmLimit+endRunGrace)
+		ctx, cancel := context.WithTimeout(ctx, agents.WarmLimit+agents.EndRunGrace)
 		defer cancel()
 		return agents.EndRosterSessions(ctx, a, *end)
 	}
@@ -133,14 +133,11 @@ func runWarm(ctx context.Context, a *app.App, _ io.Writer, args []string) error 
 	return errors.Join(err, sessionErr)
 }
 
-// warmLimit bounds one `recarto warm` run.
-const warmLimit = 30 * time.Minute
-
 // armWarmLimit calls f once d has passed, unless the returned stop runs
 // first. A var so a test can fire the limit at a moment it picks.
 var armWarmLimit = func(d time.Duration, f func()) (stop func() bool) { return time.AfterFunc(d, f).Stop }
 
-// endWarm ends a warm run that reached warmLimit. A git call or file read that
+// endWarm ends a warm run that reached its limit. A git call or file read that
 // hangs ignores any context, so only ending the process bounds the run. The
 // store and the index lock survive this the same way they survive a crash: what
 // is committed stays, and the next run continues from it.
@@ -175,16 +172,13 @@ func warmArgs(w warmRun) []string {
 	return args
 }
 
-// endRunGrace lets an end run retry a writer released just before warmLimit.
-const endRunGrace = 5 * time.Second
-
 func warmRunLimit(args []string) time.Duration {
 	for _, arg := range args {
 		if arg == "--end-session" || strings.HasPrefix(arg, "--end-session=") {
-			return warmLimit + 2*endRunGrace
+			return agents.EndRunLimit
 		}
 	}
-	return warmLimit
+	return agents.WarmLimit
 }
 
 // startWarm starts `recarto warm` for w in a detached process. A var so tests

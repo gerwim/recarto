@@ -22,31 +22,80 @@ import (
 // covers, valued by its 1-based position.
 const rosterMetric = "roster:"
 
+const (
+	rosterRepoMetric = "roster-repo:" // per conversation: "roster-repo:<id>:<root>:<wt>" = position
+	folderReposScope = "roster-repos" // per folder store: one metric per repository id any conversation of the folder had
+)
+
+// rosterRepo is one repo of a conversation's roster: its checkout path, its
+// repository's cache id and a root commit of it ("" when unknown).
+type rosterRepo struct{ wt, id, root string }
+
+// sameRepository reports whether the checkout rc is the repository with root
+// commit root: root unknown, or a commit rc's repository holds now. It asks git
+// (gitctx.HasCommit), because the identity cache's RootCommit can predate a
+// checkout replaced in place.
+func sameRepository(rc *app.RepoContext, root string) bool {
+	return root == "" || gitctx.HasCommit(gitctx.Real{Dir: rc.Git.Worktree}, root)
+}
+
+// rosterOf returns the roster entries of repos, in order, each with a root commit
+// its checkout holds now.
+func rosterOf(repos []*app.RepoContext) []rosterRepo {
+	out := make([]rosterRepo, len(repos))
+	var wg sync.WaitGroup
+	for i, rc := range repos {
+		wg.Go(func() {
+			r := gitctx.Real{Dir: rc.Git.Worktree}
+			root := rc.Git.RootCommit
+			if !gitctx.HasCommit(r, root) {
+				// The cached identity predates a checkout replaced in place.
+				root = gitctx.RootCommit(r)
+			}
+			out[i] = rosterRepo{rc.Git.Worktree, rc.Git.RepoID, root}
+		})
+	}
+	wg.Wait()
+	return out
+}
+
 // rosterScope is the ledger scope a conversation's roster lives in: its main
 // agent's, whose roster entries a compact or clear does not forget.
 func rosterScope(sessionID string) string { return "session:" + sessionID }
 
-// writeRoster records wts as sessionID's roster, in order.
-func writeRoster(ctx context.Context, c store.Conn, sessionID string, wts []string) error {
-	for i, wt := range wts {
-		if _, err := c.ExecContext(ctx,
+// writeRoster records roster as sessionID's roster, in order, and each of its
+// repositories as one the folder's conversations had.
+func writeRoster(ctx context.Context, c store.Conn, sessionID string, roster []rosterRepo) error {
+	put := func(scope, metric string, value int) error {
+		_, err := c.ExecContext(ctx,
 			`INSERT INTO counters(scope, metric, value) VALUES (?, ?, ?)
-			 ON CONFLICT(scope, metric) DO NOTHING`,
-			rosterScope(sessionID), rosterMetric+wt, i+1); err != nil {
+			 ON CONFLICT(scope, metric) DO NOTHING`, scope, metric, value)
+		return err
+	}
+	for i, r := range roster {
+		if err := errors.Join(
+			put(rosterScope(sessionID), rosterMetric+r.wt, i+1),
+			put(rosterScope(sessionID), rosterRepoMetric+r.id+":"+r.root+":"+r.wt, i+1),
+			put(folderReposScope, r.id, 1)); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// readRoster returns sessionID's roster in order, nil when it has none.
-func readRoster(ctx context.Context, l *ledger.Ledger, sessionID string) ([]string, error) {
+// readRoster returns sessionID's roster in order, nil when it has none. An entry
+// recorded without its repository has an empty id and root.
+func readRoster(ctx context.Context, l *ledger.Ledger, sessionID string) ([]rosterRepo, error) {
 	metrics, err := l.Metrics(ctx, rosterScope(sessionID), rosterMetric)
 	if err != nil {
 		return nil, err
 	}
+	repos, err := l.Metrics(ctx, rosterScope(sessionID), rosterRepoMetric)
+	if err != nil {
+		return nil, err
+	}
 	type entry struct {
-		wt  string
+		rosterRepo
 		pos int64
 	}
 	entries := make([]entry, 0, len(metrics))
@@ -55,14 +104,28 @@ func readRoster(ctx context.Context, l *ledger.Ledger, sessionID string) ([]stri
 		if err != nil {
 			return nil, err
 		}
-		entries = append(entries, entry{strings.TrimPrefix(m, rosterMetric), pos})
+		e := entry{rosterRepo{wt: strings.TrimPrefix(m, rosterMetric)}, pos}
+		for _, r := range repos {
+			// The worktree comes last, so a ':' in its path stays in it.
+			if f := strings.SplitN(strings.TrimPrefix(r, rosterRepoMetric), ":", 3); len(f) == 3 && f[2] == e.wt {
+				e.id, e.root = f[0], f[1]
+				break
+			}
+		}
+		entries = append(entries, e)
 	}
 	slices.SortFunc(entries, func(x, y entry) int { return int(x.pos - y.pos) })
-	var out []string
+	var out []rosterRepo
 	for _, e := range entries {
-		out = append(out, e.wt)
+		out = append(out, e.rosterRepo)
 	}
 	return out, nil
+}
+
+// folderRepoIDs returns the ids of the repositories any conversation of the
+// folder whose ledger l is had.
+func folderRepoIDs(ctx context.Context, l *ledger.Ledger) ([]string, error) {
+	return l.Metrics(ctx, folderReposScope, "")
 }
 
 // insertSession records session id in worktree g, reporting whether this call
@@ -123,7 +186,7 @@ func conversationApp(ctx context.Context, a *app.App, sessionID string) (*app.Ap
 	}
 	led := ledger.New(st)
 	found, err := hasSession(ctx, st, sessionID)
-	var roster []string
+	var roster []rosterRepo
 	if err == nil && found {
 		roster, err = readRoster(ctx, led, sessionID)
 	}
@@ -138,10 +201,10 @@ func conversationApp(ctx context.Context, a *app.App, sessionID string) (*app.Ap
 
 // conversationStart is what a session start knows of its conversation.
 type conversationStart struct {
-	roster    []string // the repos it covers, in order; nil: the block of the session's own worktree
-	first     bool     // this start is the first Recarto sees of the conversation
-	startedAt int64    // the folder session's start
-	agent     string   // the folder session's agent, for its roster repo sessions
+	roster    []rosterRepo // the repos it covers, in order; nil: the block of the session's own worktree
+	first     bool         // this start is the first Recarto sees of the conversation
+	startedAt int64        // the folder session's start
+	agent     string       // the folder session's agent, for its roster repo sessions
 }
 
 // startConversation records ev's conversation at its first session start and
@@ -152,7 +215,7 @@ func startConversation(ctx context.Context, a *app.App, ev Event, now int64, wai
 	if ev.SessionID == "" {
 		conv := conversationStart{first: true, startedAt: now, agent: agentOrDefault(ev.Agent)}
 		if codeless(a, wait) {
-			conv.roster = repoWorktrees(a.Repos)
+			conv.roster = rosterOf(a.Repos)
 		}
 		return conv, nil
 	}
@@ -173,9 +236,9 @@ func startConversation(ctx context.Context, a *app.App, ev Event, now int64, wai
 	if found {
 		return known()
 	}
-	var roster []string
+	var roster []rosterRepo
 	if codeless(a, wait) {
-		roster = repoWorktrees(a.Repos)
+		roster = rosterOf(a.Repos)
 	}
 	agent := agentOrDefault(ev.Agent)
 	var inserted bool
@@ -206,22 +269,19 @@ func codeless(a *app.App, wait *startWait) bool {
 	return app.CodeLess(wait.get(), a.Git)
 }
 
-// repoWorktrees returns the repos' worktrees, in order.
-func repoWorktrees(repos []*app.RepoContext) []string {
-	out := make([]string, 0, len(repos))
-	for _, rc := range repos {
-		out = append(out, rc.Git.Worktree)
-	}
-	return out
-}
-
 // coveredRepo is a roster repo a block covers.
 type coveredRepo struct {
 	*app.RepoContext
 	served bool   // RECARTO_REPOS serves it now: it gets the first-index wait
 	sel    string // its selector; "" when the repo argument cannot reach it
 	mark   string // "" with a selector, else why it has none
+	root   string // the roster's root commit for it
+	roster func() bool
 }
+
+// isRoster reports whether the open checkout is still the roster's repository.
+// It asks git once, and only where a write depends on it.
+func (c coveredRepo) isRoster() bool { return c.roster() }
 
 // Marks of a covered repo the repo argument cannot reach.
 const (
@@ -253,26 +313,33 @@ func (c coveredRepo) subject(session string, since int64) subject {
 
 // cover returns the roster repos a block covers, in roster order, and the
 // worktrees of those that cannot be opened; done closes what cover opened.
-func cover(a *app.App, roster []string) (covered []coveredRepo, gone []string, done func()) {
+func cover(a *app.App, roster []rosterRepo) (covered []coveredRepo, gone []string, done func()) {
 	var opened []*app.RepoContext
-	for _, wt := range roster {
-		if i := slices.IndexFunc(a.Repos, func(rc *app.RepoContext) bool { return rc.Git.Worktree == wt }); i >= 0 {
+	for _, e := range roster {
+		c := coveredRepo{root: e.root}
+		if i := slices.IndexFunc(a.Repos, func(rc *app.RepoContext) bool { return rc.Git.Worktree == e.wt }); i >= 0 {
 			rc := a.Repos[i]
+			c.RepoContext, c.served = rc, true
 			if sel, ok := a.Selector(rc); ok {
-				covered = append(covered, coveredRepo{rc, true, sel, ""})
+				c.sel = sel
 			} else {
-				covered = append(covered, coveredRepo{rc, true, "", markUnselectable})
+				c.mark = markUnselectable
 			}
-			continue
+		} else {
+			rc, err := app.OpenRepo(e.wt, a.Clock)
+			if err != nil {
+				// A checkout that cannot be opened is left out; it is covered again once it can be.
+				gone = append(gone, e.wt)
+				continue
+			}
+			opened = append(opened, rc)
+			c.RepoContext, c.mark = rc, markUnserved
 		}
-		rc, err := app.OpenRepo(wt, a.Clock)
-		if err != nil {
-			// A checkout that cannot be opened is left out; it is covered again once it can be.
-			gone = append(gone, wt)
-			continue
-		}
-		opened = append(opened, rc)
-		covered = append(covered, coveredRepo{rc, false, "", markUnserved})
+		rc := c.RepoContext
+		c.roster = sync.OnceValue(func() bool {
+			return e.id == "" || (e.id == rc.Git.RepoID && sameRepository(rc, e.root))
+		})
+		covered = append(covered, c)
 	}
 	return covered, gone, func() {
 		for _, rc := range opened {
@@ -281,10 +348,11 @@ func cover(a *app.App, roster []string) (covered []coveredRepo, gone []string, d
 	}
 }
 
-// recordRosterSession records conversation id as a session in rc when rc has
-// none yet, started at startedAt, with no end.
-func recordRosterSession(ctx context.Context, rc *app.RepoContext, id, agent string, startedAt int64) error {
-	if ok, err := hasSession(ctx, rc.Store, id); err != nil || ok {
+// recordRosterSession records conversation id as a session in c when c has
+// none yet and is still the roster's repository, started at startedAt, with no end.
+func recordRosterSession(ctx context.Context, c coveredRepo, id, agent string, startedAt int64) error {
+	rc := c.RepoContext
+	if ok, err := hasSession(ctx, rc.Store, id); err != nil || ok || !c.isRoster() {
 		return err
 	}
 	return rc.Store.WriteTx(ctx, func(c store.Conn) error {
@@ -304,7 +372,7 @@ func ensureRosterSessions(ctx context.Context, covered []coveredRepo, ev Event, 
 	for i, c := range covered {
 		wg.Go(func() {
 			defer recoverHook()
-			err := recordRosterSession(ctx, c.RepoContext, ev.SessionID, conv.agent, conv.startedAt)
+			err := recordRosterSession(ctx, c, ev.SessionID, conv.agent, conv.startedAt)
 			// A busy writer is not a failure: the folder row and roster already
 			// record the session, and the background warm retries until the row is written.
 			if err != nil && !store.IsBusy(err) {
@@ -354,10 +422,9 @@ func RecordRosterSessions(ctx context.Context, a *app.App, sessionID string) err
 	errs := make([]error, len(covered))
 	var wg sync.WaitGroup
 	for i, c := range covered {
-		rc := c.RepoContext
 		wg.Go(func() {
 			for {
-				err := recordRosterSession(store.WithWriteDeadline(ctx, time.Now().Add(writeGrace)), rc, sessionID, row.agent, row.startedAt)
+				err := recordRosterSession(store.WithWriteDeadline(ctx, time.Now().Add(writeGrace)), c, sessionID, row.agent, row.startedAt)
 				if !store.IsBusy(err) {
 					errs[i] = err
 					return

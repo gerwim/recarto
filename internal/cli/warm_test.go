@@ -243,13 +243,13 @@ func TestWarmRunLimit(t *testing.T) {
 	if got := warmArgs(warmRun{end: "s"}); len(got) != 2 || got[0] != "warm" || got[1] != "--end-session=s" {
 		t.Fatalf("end args = %v", got)
 	}
-	if got := warmRunLimit([]string{"--end-session=s"}); got != warmLimit+2*endRunGrace {
+	if got := warmRunLimit([]string{"--end-session=s"}); got != agents.EndRunLimit {
 		t.Errorf("end run limit = %v", got)
 	}
-	if got := warmRunLimit([]string{"--end-session", "s"}); got != warmLimit+2*endRunGrace {
+	if got := warmRunLimit([]string{"--end-session", "s"}); got != agents.EndRunLimit {
 		t.Errorf("separate-argument end run limit = %v", got)
 	}
-	if got := warmRunLimit([]string{"--skip=x"}); got != warmLimit {
+	if got := warmRunLimit([]string{"--skip=x"}); got != agents.WarmLimit {
 		t.Errorf("index run limit = %v", got)
 	}
 }
