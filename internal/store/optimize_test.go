@@ -51,6 +51,40 @@ func TestIsFTS5DDL(t *testing.T) {
 	}
 }
 
+func TestFTSTablesReadsTheModuleName(t *testing.T) {
+	st := openTestStore(t)
+	ctx := context.Background()
+	for _, ddl := range []string{
+		"CREATE VIRTUAL TABLE future_search\nUSING fts5(body)",
+		`CREATE VIRTUAL TABLE "vocab using fts5 (words)" USING fts5vocab(future_search, row)`,
+		`CREATE VIRTUAL TABLE [odd name] /* note */ USING "fts5"(body)`,
+		"CREATE VIRTUAL TABLE `tick``s` -- note\n USING 'FTS5' (body)",
+		`CREATE VIRTUAL TABLE "q"USING fts5(body)`,
+		"CREATE VIRTUAL TABLE bom_search USING \t\uFEFFfts5(body)",
+	} {
+		if _, err := st.DB.ExecContext(ctx, ddl); err != nil {
+			t.Fatalf("create virtual table: %v\nDDL: %s", err, ddl)
+		}
+	}
+	want := []string{
+		"bom_search", "future_search", "memories_fts", "nodes_fts", "nodes_fts_stem", "nodes_fts_tri", "odd name", "q", "tick`s",
+	}
+	got, err := st.FTSTables(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("FTSTables() = %v, want %v", got, want)
+	}
+	got, err = st.OptimizeFTS(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("OptimizeFTS() = %v, want %v", got, want)
+	}
+}
+
 // TestOptimizeFTSCompactsFragmentedIndex: many small committed writes plus
 // deletes leave an FTS5 index split across segments with tombstones; optimize
 // must merge it into fewer %_data rows while keeping search results intact.

@@ -31,19 +31,101 @@ func (s *Store) FTSTables(ctx context.Context) ([]string, error) {
 	return out, rows.Err()
 }
 
-// isFTS5DDL reports whether a CREATE VIRTUAL TABLE statement uses the fts5 module
-// itself (not fts5vocab or another module whose name merely starts with "fts5").
+// isFTS5DDL reads the module from the leading DDL tokens because SQLite keeps
+// line breaks, comments and quoted names in stored schema statements.
 func isFTS5DDL(ddl string) bool {
-	lower := strings.ToLower(ddl)
-	i := strings.Index(lower, " using ")
-	if i < 0 {
+	for _, want := range []string{"CREATE", "VIRTUAL", "TABLE"} {
+		word, rest, ok := sqlWord(ddl)
+		if !ok || !strings.EqualFold(word, want) {
+			return false
+		}
+		ddl = rest
+	}
+	_, ddl, ok := sqlWord(ddl)
+	if !ok {
 		return false
 	}
-	module := strings.TrimSpace(lower[i+len(" using "):])
-	if j := strings.IndexAny(module, "( \t\r\n"); j >= 0 {
-		module = module[:j]
+	word, ddl, ok := sqlWord(ddl)
+	if !ok || !strings.EqualFold(word, "USING") {
+		return false
 	}
-	return module == "fts5"
+	module, _, ok := sqlWord(ddl)
+	return ok && strings.EqualFold(module, "fts5")
+}
+
+func sqlWord(s string) (word, rest string, ok bool) {
+	for {
+		if len(s) == 0 {
+			return "", s, false
+		}
+		switch {
+		case isSQLSpace(s[0]):
+			s = s[1:]
+		case strings.HasPrefix(s, "\uFEFF"):
+			s = s[len("\uFEFF"):]
+		case strings.HasPrefix(s, "--"):
+			if end := strings.IndexByte(s[2:], '\n'); end >= 0 {
+				s = s[end+3:]
+			} else {
+				return "", "", false
+			}
+		case strings.HasPrefix(s, "/*"):
+			end := strings.Index(s[2:], "*/")
+			if end < 0 {
+				return "", "", false
+			}
+			s = s[end+4:]
+		default:
+			goto readWord
+		}
+	}
+
+readWord:
+	if len(s) == 0 {
+		return "", s, false
+	}
+	if s[0] == '"' || s[0] == '`' || s[0] == '\'' {
+		quote := s[0]
+		var unquoted strings.Builder
+		for i := 1; i < len(s); {
+			if s[i] == quote {
+				if i+1 < len(s) && s[i+1] == quote {
+					unquoted.WriteByte(quote)
+					i += 2
+					continue
+				}
+				return unquoted.String(), s[i+1:], true
+			}
+			unquoted.WriteByte(s[i])
+			i++
+		}
+		return "", "", false
+	}
+	if s[0] == '[' {
+		end := strings.IndexByte(s[1:], ']')
+		if end < 0 {
+			return "", "", false
+		}
+		return s[1 : end+1], s[end+2:], true
+	}
+
+	i := 0
+	for i < len(s) && isSQLWordByte(s[i]) {
+		i++
+	}
+	if i == 0 {
+		return "", s, false
+	}
+	return s[:i], s[i:], true
+}
+
+func isSQLSpace(b byte) bool {
+	return b == ' ' || b == '\t' || b == '\n' || b == '\v' || b == '\f' || b == '\r'
+}
+
+func isSQLWordByte(b byte) bool {
+	return b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' ||
+		b >= '0' && b <= '9' || b == '_' || b == '$' || b >= 0x80
 }
 
 // OptimizeFTS runs FTS5's 'optimize' command on every FTS5 table, merging each
@@ -70,6 +152,7 @@ func (s *Store) OptimizeFTS(ctx context.Context) ([]string, error) {
 		}); err != nil {
 			return nil, fmt.Errorf("optimize %s: %w", t, err)
 		}
+		// Optimization is committed; a later checkpoint can handle remaining WAL frames.
 		_ = s.Checkpoint(ctx)
 	}
 	return tables, nil
