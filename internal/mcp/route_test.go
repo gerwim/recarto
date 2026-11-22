@@ -859,8 +859,14 @@ func testOneRepoBadAnchorRefusals(t *testing.T, a *app.App, second, pathLine str
 		{name: "outside-repo", form: filepath.Join(second, "store", "filelock.go")},
 	}
 	for i, tc := range refused {
-		assertOneRepoBadMemory(t, a, tc.form, pathLine, i)
-		assertOneRepoBadBug(t, a, tc.form, pathLine, i)
+		t.Run(tc.name, func(t *testing.T) {
+			t.Run("record_memory", func(t *testing.T) {
+				assertOneRepoBadMemory(t, a, tc.form, pathLine, i)
+			})
+			t.Run("record_bug", func(t *testing.T) {
+				assertOneRepoBadBug(t, a, tc.form, pathLine, i)
+			})
+		})
 	}
 }
 
