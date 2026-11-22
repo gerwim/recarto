@@ -228,10 +228,29 @@ func TestWarmFlags(t *testing.T) {
 		{"--only=" + own, "--skip=" + own},
 		{"--only=" + own, "--if-code=" + own},
 		{"--only=" + own, "--session=s"},
+		{"--end-session=s", "--only=" + own},
+		{"--end-session=s", "--skip=" + own},
+		{"--end-session=s", "--if-code=" + own},
+		{"--end-session=s", "--session=s"},
 	} {
 		if err := runWarm(ctx, a, io.Discard, args); err == nil {
 			t.Errorf("warm %v: want an error", args)
 		}
+	}
+}
+
+func TestWarmRunLimit(t *testing.T) {
+	if got := warmArgs(warmRun{end: "s"}); len(got) != 2 || got[0] != "warm" || got[1] != "--end-session=s" {
+		t.Fatalf("end args = %v", got)
+	}
+	if got := warmRunLimit([]string{"--end-session=s"}); got != warmLimit+2*endRunGrace {
+		t.Errorf("end run limit = %v", got)
+	}
+	if got := warmRunLimit([]string{"--end-session", "s"}); got != warmLimit+2*endRunGrace {
+		t.Errorf("separate-argument end run limit = %v", got)
+	}
+	if got := warmRunLimit([]string{"--skip=x"}); got != warmLimit {
+		t.Errorf("index run limit = %v", got)
 	}
 }
 
@@ -298,5 +317,50 @@ func TestWarmSessionWritesMissingRosterRows(t *testing.T) {
 	var started int64
 	if err := lib.Store.DB.QueryRow(`SELECT started_at FROM sessions WHERE id='s' AND ended_at IS NULL`).Scan(&started); err != nil || started != 1_700_000_000_000 {
 		t.Fatalf("the repo's row: started %d, %v", started, err)
+	}
+}
+
+func TestRunHookStopLeavesAnEndRun(t *testing.T) {
+	a, folder, repo := scratchServing(t)
+	t.Chdir(folder)
+	prevClock, prevWarm := hookClock, startWarm
+	hookClock = a.Clock
+	t.Cleanup(func() { hookClock, startWarm = prevClock, prevWarm })
+	if _, err := agents.Handle(context.Background(), a, agents.Event{Kind: agents.KindSessionStart, SessionID: "s1", Source: "startup"}); err != nil {
+		t.Fatal(err)
+	}
+	var got warmRun
+	startWarm = func(w warmRun) error { got = w; return nil }
+	release := holdWriter(t, a.Repos[0].Store)
+	runHook(context.Background(), strings.NewReader(`{"session_id":"s1"}`), io.Discard, []string{"stop"})
+	if got.end != "s1" || got.session != "" || len(got.skip) != 0 || len(got.ifCode) != 0 {
+		t.Fatalf("end run = %+v", got)
+	}
+	var endedAt int64
+	if err := a.Store.DB.QueryRow(`SELECT ended_at FROM sessions WHERE id='s1'`).Scan(&endedAt); err != nil {
+		t.Fatal(err)
+	}
+	release()
+	if err := runWarm(context.Background(), a, io.Discard, warmArgs(got)[1:]); err != nil {
+		t.Fatal(err)
+	}
+	var repoEnded int64
+	if err := a.Repos[0].Store.DB.QueryRow(`SELECT ended_at FROM sessions WHERE id='s1'`).Scan(&repoEnded); err != nil || repoEnded != endedAt {
+		t.Fatalf("repo end = %d, folder end = %d, err %v", repoEnded, endedAt, err)
+	}
+	var n int
+	if err := a.Repos[0].Store.DB.QueryRow(`SELECT COUNT(*) FROM files WHERE worktree=?`, repo).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("end run indexed %d files", n)
+	}
+	got = warmRun{}
+	if _, err := agents.Handle(context.Background(), a, agents.Event{Kind: agents.KindSessionStart, SessionID: "s2", Source: "startup"}); err != nil {
+		t.Fatal(err)
+	}
+	runHook(context.Background(), strings.NewReader(`{"session_id":"s2"}`), io.Discard, []string{"stop"})
+	if got.end != "" {
+		t.Fatalf("completed Stop started an end run: %+v", got)
 	}
 }

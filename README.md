@@ -663,6 +663,12 @@ When a conversation starts in a folder outside git that holds no file Recarto in
 - The conversation counts as a session in each of its repos, so their recent changes, in the block, in a session started in the repo and in `get_graph_delta`, include changes made from the folder.
 - The folder's own memories are not shown; `recall_memory` and `list_memory` still find them. The folder is not indexed while it holds no code.
 
+### Stop in a folder without code
+
+In a conversation started in such a folder, a Stop ends the conversation's session in each of its repos. It waits at most 0.5 s in total, over all repos, for a store another process is writing to, for example during an index. The memory sync push is outside that limit and keeps its own 5-second limit per store.
+
+A session end that does not fit is written later by whichever first finds the repo's store free: a background `recarto warm` the Stop starts (it stops after 30 minutes), the conversation's next Stop, or the next session start in the folder. Its recorded time follows any retention pass already in progress, so reports keep the deltas that end makes reachable. Until then, that repo's recent changes count the conversation as still open.
+
 ## Sharing memory across machines (HTTP sync)
 
 Recarto's store is per-machine: working the same repo from a laptop, a desktop, and an

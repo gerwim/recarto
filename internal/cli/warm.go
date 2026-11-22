@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -76,6 +77,7 @@ func runWarm(ctx context.Context, a *app.App, _ io.Writer, args []string) error 
 	fs := flag.NewFlagSet("warm", flag.ContinueOnError)
 	only := fs.String("only", "", "index only this served worktree, without the sweep")
 	session := fs.String("session", "", "record this conversation's missing sessions in the repos it serves")
+	end := fs.String("end-session", "", "write the session ends a Stop of this conversation left pending, and nothing else")
 	var skip, ifCode []string
 	fs.Func("skip", "leave this worktree out (repeatable)", func(s string) error {
 		skip = append(skip, s)
@@ -87,6 +89,20 @@ func runWarm(ctx context.Context, a *app.App, _ io.Writer, args []string) error 
 	})
 	if helped, err := parseFlags(fs, args); helped || err != nil {
 		return err
+	}
+	if *end != "" {
+		combined := false
+		fs.Visit(func(f *flag.Flag) {
+			if f.Name == "only" || f.Name == "skip" || f.Name == "if-code" || f.Name == "session" {
+				combined = true
+			}
+		})
+		if combined {
+			return errors.New("warm: --end-session cannot be combined with --only, --skip, --if-code or --session")
+		}
+		ctx, cancel := context.WithTimeout(ctx, warmLimit+endRunGrace)
+		defer cancel()
+		return agents.EndRosterSessions(ctx, a, *end)
 	}
 	if *only != "" && (len(skip) > 0 || len(ifCode) > 0 || *session != "") {
 		return errors.New("warm: --only cannot be combined with --skip, --if-code or --session")
@@ -120,16 +136,16 @@ func runWarm(ctx context.Context, a *app.App, _ io.Writer, args []string) error 
 // warmLimit bounds one `recarto warm` run.
 const warmLimit = 30 * time.Minute
 
-// armWarmLimit calls f once warmLimit has passed, unless the returned stop runs
+// armWarmLimit calls f once d has passed, unless the returned stop runs
 // first. A var so a test can fire the limit at a moment it picks.
-var armWarmLimit = func(f func()) (stop func() bool) { return time.AfterFunc(warmLimit, f).Stop }
+var armWarmLimit = func(d time.Duration, f func()) (stop func() bool) { return time.AfterFunc(d, f).Stop }
 
 // endWarm ends a warm run that reached warmLimit. A git call or file read that
 // hangs ignores any context, so only ending the process bounds the run. The
 // store and the index lock survive this the same way they survive a crash: what
 // is committed stays, and the next run continues from it.
-func endWarm() {
-	fmt.Fprintf(os.Stderr, "recarto warm: stopped after %v; the next session start continues the index\n", warmLimit)
+func endWarm(d time.Duration) {
+	fmt.Fprintf(os.Stderr, "recarto warm: stopped after %v; the next session start continues its work\n", d)
 	os.Exit(1)
 }
 
@@ -139,11 +155,13 @@ func endWarm() {
 type warmRun struct {
 	skip, ifCode []string
 	session      string
+	end          string
 }
 
-// startWarm starts `recarto warm` for w in a detached process. A var so tests
-// can keep a hook from starting the test binary.
-var startWarm = func(w warmRun) error {
+func warmArgs(w warmRun) []string {
+	if w.end != "" {
+		return []string{"warm", "--end-session=" + w.end}
+	}
 	args := []string{"warm"}
 	for _, wt := range w.skip {
 		args = append(args, "--skip="+wt)
@@ -154,7 +172,25 @@ var startWarm = func(w warmRun) error {
 	if w.session != "" {
 		args = append(args, "--session="+w.session)
 	}
-	return detach.Start(binaryPath(), args...)
+	return args
+}
+
+// endRunGrace lets an end run retry a writer released just before warmLimit.
+const endRunGrace = 5 * time.Second
+
+func warmRunLimit(args []string) time.Duration {
+	for _, arg := range args {
+		if arg == "--end-session" || strings.HasPrefix(arg, "--end-session=") {
+			return warmLimit + 2*endRunGrace
+		}
+	}
+	return warmLimit
+}
+
+// startWarm starts `recarto warm` for w in a detached process. A var so tests
+// can keep a hook from starting the test binary.
+var startWarm = func(w warmRun) error {
+	return detach.Start(binaryPath(), warmArgs(w)...)
 }
 
 // startIndex starts `recarto warm --only=<worktree>` in a detached process and

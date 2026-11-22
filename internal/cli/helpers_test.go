@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"context"
+	"database/sql"
 	"fmt"
 	"path/filepath"
 	"testing"
@@ -8,6 +10,7 @@ import (
 
 	"github.com/gerwim/recarto/internal/app"
 	"github.com/gerwim/recarto/internal/clock"
+	"github.com/gerwim/recarto/internal/store"
 )
 
 // fakeGit is a gitctx.Runner returning a fixed repo identity (no real git, no fs).
@@ -57,6 +60,29 @@ func newTestApp(t *testing.T, branch string) *app.App {
 	}
 	t.Cleanup(release)
 	return a
+}
+
+func holdWriter(t *testing.T, st *store.Store) (release func()) {
+	t.Helper()
+	ctx := context.Background()
+	db, err := sql.Open("sqlite", "file:"+st.Path()+"?_pragma=busy_timeout(1)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		t.Fatal(err)
+	}
+	release = func() {
+		_, _ = conn.ExecContext(ctx, "ROLLBACK")
+		_ = conn.Close()
+		_ = db.Close()
+	}
+	t.Cleanup(release)
+	return release
 }
 
 func TestSplitCSV(t *testing.T) {

@@ -120,6 +120,10 @@ type App struct {
 	// index takes in only while it holds files an index would take in: a folder
 	// that served repos to a conversation started there without code.
 	IndexIfCode func(worktree string)
+	// EndLater, when set, starts a background run that writes the session ends a
+	// Stop of conversation sessionID left pending. nil: they wait for the
+	// conversation's next Stop or a session start in its folder.
+	EndLater func(sessionID string)
 }
 
 // AnswersTo reports whether the repo argument v names rc: its name or its
