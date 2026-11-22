@@ -46,10 +46,11 @@ func Handle(ctx context.Context, a *app.App, ev Event) (Result, error) {
 	case KindSessionStart:
 		usedCtx = store.WithWriteDeadline(ctx, time.Now().Add(writeGrace))
 	case KindStop:
+		deadline := a.Clock.Now().Add(stopLockBudget)
 		var cancel context.CancelFunc
-		stopLockCtx, cancel = context.WithTimeout(ctx, stopLockBudget)
+		stopLockCtx, cancel = context.WithDeadline(ctx, deadline)
 		defer cancel()
-		usedCtx, roster, rosterErr = stopWrites(ctx, a, ev)
+		usedCtx, roster, rosterErr = stopWrites(ctx, a, ev, deadline)
 	}
 	_ = a.Graph.NoteUsed(usedCtx, a.Git.Worktree)
 	switch ev.Kind {
@@ -84,14 +85,13 @@ var syncPushBudget = 5 * time.Second
 const stopLockBudget = 500 * time.Millisecond
 
 // stopWrites reads the roster of ev's conversation and returns the context of
-// its Stop's writes. With a roster, every write but the sync pushes shares one
-// deadline, stopLockBudget from now on a's clock, across all stores. Without
-// one, or when the roster cannot be read, writes wait as every write does.
-func stopWrites(ctx context.Context, a *app.App, ev Event) (writes context.Context, roster []string, err error) {
+// its Stop's writes. With a roster, the write deadline and coordination-lock
+// wait use the same instant across all stores. Without one, or when the roster
+// cannot be read, writes wait as every write does.
+func stopWrites(ctx context.Context, a *app.App, ev Event, deadline time.Time) (writes context.Context, roster []string, err error) {
 	if ev.SessionID == "" {
 		return ctx, nil, nil
 	}
-	deadline := a.Clock.Now().Add(stopLockBudget)
 	roster, err = readRoster(ctx, a.Ledger, ev.SessionID)
 	if err != nil || len(roster) == 0 {
 		return ctx, nil, err
@@ -855,7 +855,7 @@ func endStopSession(ctx, writes, lockCtx context.Context, a *app.App, ev Event, 
 	}
 	covered, _, done := cover(a, roster)
 	defer done()
-	return endConversation(writes, lockCtx, a, ev.SessionID, covered, now, false)
+	return endConversation(writes, lockCtx, a, ev.SessionID, covered, true, false)
 }
 
 func pushStopSync(ctx context.Context, a *app.App) {

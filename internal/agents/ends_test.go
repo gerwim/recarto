@@ -2,6 +2,7 @@ package agents
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gerwim/recarto/internal/app"
+	"github.com/gerwim/recarto/internal/graph"
 	"github.com/gerwim/recarto/internal/store"
 )
 
@@ -217,6 +219,89 @@ func TestScratchStopCoordinationTimeoutDefersUntilSessionStart(t *testing.T) {
 	}
 }
 
+func TestScratchLaterStopStartsNoSecondRun(t *testing.T) {
+	s := newScratch(t)
+	r := s.goRepo("repo")
+	a := s.open(s.folder, r)
+	start(t, a, "s", "startup")
+	previousAcquire := acquireEndLock
+	t.Cleanup(func() { acquireEndLock = previousAcquire })
+	acquireEndLock = func(context.Context, []coveredRepo, bool) (func(), bool, error) {
+		return nil, false, context.DeadlineExceeded
+	}
+	var launches int
+	a.EndLater = func(string) { launches++ }
+	first, _ := stopScratch(t, s, a, "s")
+	if !errors.Is(first.Failure, context.DeadlineExceeded) || launches != 1 {
+		t.Fatalf("first Stop = %+v; warm launches = %d, want timeout and one launch", first, launches)
+	}
+	acquireEndLock = previousAcquire
+	release := holdWriter(t, rc(t, a, r).Store)
+	defer release()
+	second, t2 := stopScratch(t, s, a, "s")
+	if second.Failure != nil || launches != 1 {
+		t.Fatalf("second Stop = %+v; warm launches = %d, want no failure and one launch", second, launches)
+	}
+	if rows := sessionRows(t, a.AllRepos()[0], "s"); len(rows) != 1 || !rows[0].end.Valid || rows[0].end.Int64 != t2 {
+		t.Fatalf("folder row = %+v, want end %d", rows, t2)
+	}
+	if rows := sessionRows(t, rc(t, a, r), "s"); len(rows) != 1 || rows[0].end.Valid {
+		t.Fatalf("held repo row = %+v, want open", rows)
+	}
+	release()
+	third, _ := stopScratch(t, s, a, "s")
+	if third.Failure != nil || launches != 1 {
+		t.Fatalf("third Stop = %+v; warm launches = %d, want no failure and one launch", third, launches)
+	}
+	if rows := sessionRows(t, rc(t, a, r), "s"); len(rows) != 1 || !rows[0].end.Valid || rows[0].end.Int64 != t2 {
+		t.Fatalf("repo row = %+v, want end %d", rows, t2)
+	}
+}
+
+func TestScratchNextHookEndsAFreeRepo(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		stop bool
+	}{{name: "next Stop", stop: true}, {name: "session start"}} {
+		t.Run(tc.name, func(t *testing.T) { testScratchNextHookEndsAFreeRepo(t, tc.stop) })
+	}
+}
+
+func testScratchNextHookEndsAFreeRepo(t *testing.T, stop bool) {
+	t.Helper()
+	s := newScratch(t)
+	aPath, bPath := s.goRepo("repo-a"), s.goRepo("repo-b")
+	a := s.open(s.folder, aPath, bPath)
+	start(t, a, "s", "startup")
+	unstick := holdWriter(t, rc(t, a, aPath).Store)
+	_, first := stopScratch(t, s, a, "s")
+	if row := sessionRows(t, rc(t, a, bPath), "s")[0]; !row.end.Valid {
+		t.Fatal("fixture: repo B must already be closed")
+	}
+	unstick()
+	release, ok, err := store.TryLockFile(graph.PendingEndsLockPath(rc(t, a, bPath).Store))
+	if err != nil || !ok {
+		t.Fatalf("hold repo B's retention lock: %v, %v", ok, err)
+	}
+	defer release()
+	if stop {
+		if res, _ := stopScratch(t, s, a, "s"); res.Failure != nil {
+			t.Fatalf("next Stop failure = %v", res.Failure)
+		}
+	} else {
+		start(t, a, "new", "startup")
+	}
+	if got := sessionRows(t, rc(t, a, aPath), "s")[0].end; !got.Valid || got.Int64 != first {
+		t.Fatalf("free repo A end = %+v, want %d", got, first)
+	}
+	if entries, err := listEnds(folderEndsDir(a.Store)); err != nil || len(entries) != 0 {
+		t.Fatalf("folder ends = %+v, %v", entries, err)
+	}
+	if entries, err := listEnds(repoEndsDir(rc(t, a, aPath).Store)); err != nil || len(entries) != 0 {
+		t.Fatalf("repo A ends = %+v, %v", entries, err)
+	}
+}
+
 func TestScratchBackgroundRunWritesPendingEnds(t *testing.T) {
 	s := newScratch(t)
 	r := s.goRepo("repo")
@@ -281,32 +366,17 @@ func TestScratchBackgroundRetryCancelledDuringTry(t *testing.T) {
 	defer releaseWriter()
 
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	previousWait, previousAcquire := rosterRetryWait, acquireEndLock
-	var attempts int
-	inTry, continueTry := make(chan struct{}), make(chan struct{})
+	previousWait := rosterRetryWait
+	t.Cleanup(func() { rosterRetryWait = previousWait; cancel() })
+	called := false
 	rosterRetryWait = func(context.Context) error {
+		if !called {
+			called = true
+			cancel()
+		}
 		return nil
 	}
-	acquireEndLock = func(ctx context.Context, covered []coveredRepo, try bool) (func(), bool, error) {
-		release, ok, err := previousAcquire(ctx, covered, try)
-		if !try {
-			attempts++
-			if attempts == 2 && err == nil && ok {
-				close(inTry)
-				<-continueTry
-			}
-		}
-		return release, ok, err
-	}
-	t.Cleanup(func() { rosterRetryWait, acquireEndLock = previousWait, previousAcquire })
-
-	done := make(chan error, 1)
-	go func() { done <- EndRosterSessions(ctx, a, "s") }()
-	<-inTry
-	cancel()
-	close(continueTry)
-	err := <-done
+	err := EndRosterSessions(ctx, a, "s")
 	if err == nil || !strings.Contains(err.Error(), "refused") || !strings.Contains(err.Error(), context.Canceled.Error()) || strings.Contains(err.Error(), "no recorded end") {
 		t.Fatalf("retry error = %v, want refused and cancellation without no-recorded-end", err)
 	}
@@ -418,8 +488,8 @@ func TestScratchRepoBackAfterTheFirstStop(t *testing.T) {
 	if _, ok, err := readEnd(folderEndsDir(back.Store), folderEndName(folderID(back.Store), "s")); err != nil || ok {
 		t.Fatalf("F still exists after its listed repos ended: %v %v", ok, err)
 	}
-	if _, ok, err := readEnd(folderEndsDir(back.Store), entryName(folderID(back.Store), "s", r2)); err != nil || !ok {
-		t.Fatalf("D for repo two missing: %v %v", ok, err)
+	if d, ok, err := readEnd(folderEndsDir(back.Store), entryName(folderID(back.Store), "s", r2)); err != nil || !ok || d.EndedAt != t2 {
+		t.Fatalf("D for repo two = %+v, %v, %v; want end %d", d, ok, err, t2)
 	}
 	release2()
 	start(t, back, "m", "startup")
@@ -428,6 +498,43 @@ func TestScratchRepoBackAfterTheFirstStop(t *testing.T) {
 	}
 	if entries, err := listEnds(folderEndsDir(back.Store)); err != nil || len(entries) != 0 {
 		t.Fatalf("folder ends = %+v, %v", entries, err)
+	}
+}
+
+func TestScratchSessionStartEndsAnInterruptedPublication(t *testing.T) {
+	s := newScratch(t)
+	aPath, bPath := s.goRepo("repo-a"), s.goRepo("repo-b")
+	a := s.open(s.folder, aPath, bPath)
+	start(t, a, "s", "startup")
+	if err := os.Rename(bPath, bPath+"-moved"); err != nil {
+		t.Fatal(err)
+	}
+	stopScratch(t, s, s.open(s.folder, aPath, bPath), "s")
+	if err := os.Rename(bPath+"-moved", bPath); err != nil {
+		t.Fatal(err)
+	}
+	s.clk.Advance(time.Second)
+	when := s.clk.Now().UnixMilli()
+	fid := folderID(a.Store)
+	dir := folderEndsDir(a.Store)
+	if _, exists, err := readEnd(dir, folderEndName(fid, "s")); err != nil || exists {
+		t.Fatalf("fixture: F exists=%v, err=%v", exists, err)
+	}
+	if _, first, err := claimEnd(dir, entryName(fid, "s", bPath), endRecord{
+		Session: "s", Folder: fid, Worktree: bPath, EndedAt: when,
+	}); err != nil || !first {
+		t.Fatalf("publish D: first=%v, err=%v", first, err)
+	}
+	s.clk.Advance(time.Second)
+	start(t, a, "new", "startup")
+	if got := sessionRows(t, rc(t, a, bPath), "s")[0].end; !got.Valid || got.Int64 != when {
+		t.Fatalf("repo B end = %+v, want %d", got, when)
+	}
+	if entries, err := listEnds(dir); err != nil || len(entries) != 0 {
+		t.Fatalf("folder ends = %+v, %v", entries, err)
+	}
+	if entries, err := listEnds(repoEndsDir(rc(t, a, bPath).Store)); err != nil || len(entries) != 0 {
+		t.Fatalf("repo B ends = %+v, %v", entries, err)
 	}
 }
 
@@ -542,6 +649,7 @@ func TestScratchStopAndPruneSerializeEndTime(t *testing.T) {
 
 	pruneChecked := make(chan struct{})
 	continuePrune := make(chan struct{})
+	pruneFinished := make(chan struct{})
 	pruneDone := make(chan error, 1)
 	var holdCalls int
 	go func() {
@@ -563,6 +671,7 @@ func TestScratchStopAndPruneSerializeEndTime(t *testing.T) {
 	acquireEndLock = func(ctx context.Context, covered []coveredRepo, try bool) (func(), bool, error) {
 		if !try {
 			close(lockAttempted)
+			<-pruneFinished
 		}
 		release, ok, err := previousAcquire(ctx, covered, try)
 		if !try && err == nil && ok {
@@ -586,7 +695,7 @@ func TestScratchStopAndPruneSerializeEndTime(t *testing.T) {
 	if _, ok, err := readEnd(folderEndsDir(a.Store), folderEndName(folderID(a.Store), "s")); err != nil || ok {
 		t.Fatalf("Stop published its end before the prune released the lock: %v %v", ok, err)
 	}
-	if release, ok, err := store.TryLockFile(endLockPath(rc.Store)); err != nil || ok {
+	if release, ok, err := store.TryLockFile(graph.PendingEndsLockPath(rc.Store)); err != nil || ok {
 		if ok {
 			release()
 		}
@@ -596,6 +705,7 @@ func TestScratchStopAndPruneSerializeEndTime(t *testing.T) {
 	if err := <-pruneDone; err != nil {
 		t.Fatal(err)
 	}
+	close(pruneFinished)
 	<-lockAcquired
 	var older int
 	if err := rc.Store.DB.QueryRow(`SELECT COUNT(*) FROM graph_deltas WHERE id='delta-A'`).Scan(&older); err != nil || older != 0 {

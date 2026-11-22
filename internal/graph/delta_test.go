@@ -280,11 +280,19 @@ func TestPruneUnreachableDeltasDecidesInItsTransaction(t *testing.T) {
 	if err != nil || !ok || before != 20 {
 		t.Fatalf("open baseline = %d %v %v, want 20 true", before, ok, err)
 	}
-	if _, err := e.st.DB.Exec(`UPDATE sessions SET ended_at=25 WHERE id='B'`); err != nil {
+	var holdCalls int
+	if err := e.PruneUnreachableDeltas(ctx, wt, "current", 100, 110, func(c store.Conn) (bool, error) {
+		holdCalls++
+		if holdCalls == 2 {
+			_, err := c.ExecContext(ctx, `UPDATE sessions SET ended_at=25 WHERE id='B'`)
+			return false, err
+		}
+		return false, nil
+	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := e.PruneUnreachableDeltas(ctx, wt, "current", 100, 110, func(store.Conn) (bool, error) { return false, nil }); err != nil {
-		t.Fatal(err)
+	if holdCalls != 2 {
+		t.Fatalf("hold calls = %d, want preflight and transaction", holdCalls)
 	}
 	if got := deltaTimes(t, e, wt); len(got) != 2 || got[0] != 15 || got[1] != 27 {
 		t.Fatalf("pruned deltas = %v, want [15 27] (the earlier baseline must remain)", got)

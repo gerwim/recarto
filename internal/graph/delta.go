@@ -309,6 +309,13 @@ func tenthSessionStart(ctx context.Context, c store.Conn, worktree string) (int6
 	return at, err
 }
 
+// PendingEndsLockPath is the file whose lock orders a prune of st's journal
+// with a session end time being chosen for st's repo: pruning holds it through
+// its DELETE, and a writer holds it until the time is published.
+func PendingEndsLockPath(st *store.Store) string {
+	return filepath.Join(filepath.Dir(st.Path()), "pending-ends.lock")
+}
+
 // PruneUnreachableDeltas drops worktree's journal rows no baseline walk can
 // reach: those older than the 10th-most-recent session's start, never past the
 // current baseline (session id, started at startedAt, counted while its row is
@@ -327,8 +334,7 @@ func (e *Engine) PruneUnreachableDeltas(ctx context.Context, worktree, id string
 	if err != nil || pending {
 		return err
 	}
-	coordination := filepath.Join(filepath.Dir(e.st.Path()), "pending-ends.lock")
-	release, locked, err := store.TryLockFile(coordination)
+	release, locked, err := store.TryLockFile(PendingEndsLockPath(e.st))
 	if err != nil || !locked {
 		return err
 	}
