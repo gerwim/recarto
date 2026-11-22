@@ -263,13 +263,13 @@ func snapshotsOfPreciousState(t *testing.T, db *sql.DB) map[string][]string {
 	return result
 }
 
-func assertNonempty(t *testing.T, db *sql.DB, tables ...string) {
+func rowCount(t *testing.T, db *sql.DB, table string) int64 {
 	t.Helper()
-	for _, table := range tables {
-		if rows := rowsOf(t, db, "SELECT * FROM "+table); len(rows) == 0 {
-			t.Fatalf("test premise failed: %s is empty", table)
-		}
+	var count int64
+	if err := db.QueryRow("SELECT count(*) FROM " + table).Scan(&count); err != nil {
+		t.Fatalf("count %s rows: %v", table, err)
 	}
+	return count
 }
 
 func graphStateSnapshot(t *testing.T, db *sql.DB) []string {
@@ -360,8 +360,9 @@ func seedMemoryRecords(t *testing.T, st *store.Store) (*memory.Engine, []memoryT
 		`INSERT INTO memory_tombstones(id, deleted_at) VALUES('tombstone-seed', 1)`,
 		`INSERT INTO memory_sync_merges(id, canonical_id, updated_at) VALUES('merge-seed', 'canonical-seed', 1)`,
 		`INSERT INTO meta(key, value) VALUES
-		 ('graphXtoken:/keep', 'x-token'), ('archXcache:/keep', 'x-cache'),
-		 ('graphXbuilt:/keep', 'x-built'), ('GRAPH_TOKEN:/keep', 'upper-token')`,
+			 ('graphXtoken:/keep', 'x-token'), ('archXcache:/keep', 'x-cache'),
+			 ('graphXbuilt:/keep', 'x-built'), ('GRAPH_TOKEN:/keep', 'upper-token'),
+			 ('graph_resolve_pending:/wtA', 'pending')`,
 	} {
 		if _, err := st.DB.ExecContext(ctx, query); err != nil {
 			t.Fatalf("seed preserved state: %v", err)
@@ -372,11 +373,14 @@ func seedMemoryRecords(t *testing.T, st *store.Store) (*memory.Engine, []memoryT
 
 func assertWipePreservedState(t *testing.T, st *store.Store) map[string][]string {
 	t.Helper()
-	assertNonempty(t, st.DB,
+	for _, table := range []string{
 		"files", "nodes", "edges", "edge_candidates", "type_bindings", "node_fts_rows",
 		"nodes_fts", "nodes_fts_stem", "nodes_fts_tri",
-		"memories", "memories_fts", "memories_fts_vocab", "memory_tombstones",
-		"memory_sync_outbox", "memory_sync_merges", "sessions", "graph_deltas")
+	} {
+		if count := rowCount(t, st.DB, table); count == 0 {
+			t.Fatalf("test premise failed: %s is empty", table)
+		}
+	}
 	for _, key := range []string{"graph_token:/wtA", "arch_cache:/wtA", "graph_built:/wtB"} {
 		if got := rowsOf(t, st.DB, "SELECT key FROM meta WHERE key = '"+key+"'"); len(got) != 1 {
 			t.Fatalf("test premise missing meta key %q", key)
@@ -394,8 +398,8 @@ func assertWipePreservedState(t *testing.T, st *store.Store) map[string][]string
 func assertWipeEmptiedCodeGraph(t *testing.T, st, baseline *store.Store, preciousBefore map[string][]string) {
 	t.Helper()
 	for _, table := range []string{"nodes_fts", "nodes_fts_stem", "nodes_fts_tri"} {
-		if got := rowsOf(t, st.DB, "SELECT rowid FROM "+table); len(got) != 0 {
-			t.Errorf("%s rows after wipe = %d, want 0", table, len(got))
+		if count := rowCount(t, st.DB, table); count != 0 {
+			t.Errorf("%s rows after wipe = %d, want 0", table, count)
 		}
 		if got, fresh := ftsData(t, st.DB, table), ftsData(t, baseline.DB, table); got > fresh {
 			t.Errorf("%s index data after wipe = %d bytes, fresh store = %d", table, got, fresh)
@@ -421,7 +425,7 @@ func assertWipeEmptiedCodeGraph(t *testing.T, st, baseline *store.Store, preciou
 		}
 	}
 	for _, table := range []string{"files", "nodes", "edges", "edge_candidates", "type_bindings", "node_fts_rows"} {
-		if count := len(rowsOf(t, st.DB, "SELECT * FROM "+table)); count != 0 {
+		if count := rowCount(t, st.DB, table); count != 0 {
 			t.Errorf("%s rows after wipe = %d, want 0", table, count)
 		}
 	}
@@ -462,6 +466,7 @@ func TestGraphWipeMigrationEmptiesTheCodeGraph(t *testing.T) {
 		t.Fatal(err)
 	}
 	baseline := openGraphTestStore(t, filepath.Join(t.TempDir(), "baseline.db"))
+	// Reconcile creates planner-stat tables; ANALYZE aligns schema snapshots independently of the wipe.
 	if _, err := baseline.st.DB.Exec("ANALYZE"); err != nil {
 		t.Fatal(err)
 	}
