@@ -2,6 +2,7 @@ package graph
 
 import (
 	"context"
+	"slices"
 	"testing"
 )
 
@@ -62,6 +63,56 @@ func TestImplementationsFindsSubtypes(t *testing.T) {
 	}
 	if len(none) != 0 {
 		t.Errorf("cross-worktree Implementations leaked %d rows", len(none))
+	}
+}
+
+func TestImplementationsFollowsTypeScriptImplements(t *testing.T) {
+	e := newTestEngine(t)
+	ctx := context.Background()
+	src := []byte(`export interface Source { list(): string[] }
+export class IndexQueue implements Source { list(): string[] { return []; } }
+export class Base {}
+export interface I1 {}
+export interface I2 {}
+export class C extends Base implements I1, I2 {}
+`)
+	if err := e.IndexFile(ctx, "/wt", "a.ts", src, 1, int64(len(src))); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.Resolve(ctx, "/wt", noopProgress{}); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		symbol, direction string
+		want              []string
+	}{
+		{"Source", "down", []string{"IndexQueue implements"}},
+		{"IndexQueue", "up", []string{"Source implements"}},
+		{"C", "up", []string{"Base extends", "I1 implements", "I2 implements"}},
+		{"I1", "down", []string{"C implements"}},
+		{"Base", "down", []string{"C implements"}},
+	} {
+		got, err := e.Implementations(ctx, "/wt", tc.symbol, tc.direction, 10)
+		if err != nil {
+			t.Fatalf("Implementations(%s, %s): %v", tc.symbol, tc.direction, err)
+		}
+		gotNames := make([]string, len(got))
+		for i, r := range got {
+			gotNames[i] = r.Name + " " + r.Relation
+		}
+		if tc.symbol == "IndexQueue" && tc.direction == "up" && len(got) != 1 {
+			t.Errorf("Implementations(IndexQueue, up) returned %d results, want 1", len(got))
+			continue
+		}
+		if !slices.Equal(gotNames, tc.want) {
+			t.Errorf("Implementations(%s, %s) = %v, want %v", tc.symbol, tc.direction, gotNames, tc.want)
+		}
+		if tc.symbol == "IndexQueue" && tc.direction == "up" {
+			if got[0].Path != "a.ts" || got[0].Line != 1 {
+				t.Errorf("Implementations(IndexQueue, up) target = %s:%d, want a.ts:1", got[0].Path, got[0].Line)
+			}
+		}
 	}
 }
 
