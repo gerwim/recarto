@@ -221,3 +221,61 @@ func TestOneLineNotesCutLongTitles(t *testing.T) {
 		t.Errorf("pinned do-not-repeat body was cut:\n%s", mem)
 	}
 }
+
+func TestNoteTitleFallsBackToBodyStart(t *testing.T) {
+	long := strings.Repeat("é", 200) + strings.Repeat("x", 130)
+	r160 := strings.Repeat("ü", 160)
+	r170 := strings.Repeat("ü", 170)
+	for _, tc := range []struct{ title, body, want string }{
+		{"Keep WAL on", "different body text", "Keep WAL on"},
+		{"", "Do not run VACUUM while another process writes.", "Do not run VACUUM while another process writes."},
+		{"   ", "A short rule.", "A short rule."},
+		{"", "First line.\nSecond line.", "First line.…"},
+		{"", "\n\n  First line.\r\nSecond", "First line.…"},
+		{"", "First line.\n\n  ", "First line."},
+		{"", long, strings.Repeat("é", 160) + "…"},
+		{"", r160 + "\nmore", r160 + "…"},
+		{"", r170 + "\nmore", r160 + "…"},
+		{"", "  \n  ", "(untitled)"},
+	} {
+		if got := noteTitle(&memory.Record{Title: tc.title, Body: tc.body}); got != tc.want {
+			t.Errorf("noteTitle(%q, %q) = %q, want %q", tc.title, tc.body, got, tc.want)
+		}
+	}
+}
+
+func TestRecentBugsListShowsUntitledBodyStart(t *testing.T) {
+	bug := &memory.Record{ID: "b1", Kind: memory.KindBug, Body: "Reindex drops the last edge."}
+	out, _ := formatSessionContext(memoryHeader, "", nil, "", nil, graph.Architecture{}, "", []*memory.Record{bug}, nil, 0, 0, 1500, nil)
+	if !strings.Contains(out, "\n- Reindex drops the last edge.\n") {
+		t.Errorf("recent bugs list does not show the untitled bug's body:\n%s", out)
+	}
+	var src shareSource
+	bugSteps(&src, []*memory.Record{bug}, false)
+	if items := src.steps[2].items; len(items) != 1 || items[0].text != "- Reindex drops the last edge.\n" {
+		t.Errorf("shared recent bugs = %+v, want the untitled bug's body", items)
+	}
+}
+
+func TestSessionStartMemoryEntriesKeepUntitledHeading(t *testing.T) {
+	learning := memory.RecallResult{Record: &memory.Record{ID: "l", Kind: memory.KindLearning, Body: "WAL readers never block the writer."}}
+	results := []memory.RecallResult{
+		{Record: &memory.Record{ID: "d", Kind: memory.KindDoNotRepeat, Pinned: true, Body: "Do not run VACUUM while another process writes."}},
+		learning,
+	}
+	ws := []memory.RecallResult{{Record: &memory.Record{ID: "c", Kind: memory.KindDecision, Body: "Keep one writer per store."}}}
+	out, _ := formatSessionContext(memoryHeader, "", results, "w", ws, graph.Architecture{}, "", nil, nil, 0, 0, 1500, nil)
+	for _, want := range []string{
+		"- [learning] (untitled)\n  WAL readers never block the writer.\n",
+		"- [do_not_repeat] (untitled)\n  Do not run VACUUM while another process writes.\n",
+		"- [decision] (untitled)\n  Keep one writer per store.\n",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q:\n%s", want, out)
+		}
+	}
+	_, full, _, title := memoryTexts(learning, "repo x")
+	if full != "- [learning, repo x] (untitled)\n  WAL readers never block the writer.\n" || title != "- [learning, repo x] (untitled)\n" {
+		t.Errorf("shared entry: full %q, title %q", full, title)
+	}
+}

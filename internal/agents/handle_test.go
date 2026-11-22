@@ -942,3 +942,51 @@ func TestHookNotesUseHourly(t *testing.T) {
 		t.Errorf("mark after a hook 61 min later = %d, want %d", got, want)
 	}
 }
+
+func TestReadAndEditNotesShowUntitledBodies(t *testing.T) {
+	a, wt := newTreeApp(t)
+	ctx := context.Background()
+	writeIndexed(t, a, "big.go", []byte("package p\n\nfunc Big() {}\n"))
+	type note struct{ body, prefix string }
+	notes := map[memory.Kind]note{
+		memory.KindDoNotRepeat: {"Do not run VACUUM while another process writes.", "🚫 do-not-repeat for big.go: "},
+		memory.KindDecision:    {"Keep one writer per store.", "📌 prior decision for big.go: "},
+		memory.KindLearning:    {"WAL readers never block the writer.", "📚 prior learning for big.go: "},
+		memory.KindTodo:        {"Split the index queue.", "📝 open todo for big.go: "},
+		memory.KindBug:         {"Reindex drops the last edge.", "⚠ prior bug in big.go: "},
+	}
+	for k, n := range notes {
+		if _, _, _, err := a.Engine.Record(ctx, memory.NewMemory{Kind: k, Body: n.body, Branch: a.Git.Branch,
+			Refs: []memory.Ref{{Type: memory.RefFile, Value: "big.go"}}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for session, kind := range map[string]EventKind{"read": KindPostRead, "edit": KindPostEdit} {
+		res, err := Handle(ctx, a, Event{Kind: kind, SessionID: session, FilePath: filepath.Join(wt, "big.go")})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, n := range notes {
+			if want := n.prefix + n.body; !strings.Contains(res.Context, want) {
+				t.Errorf("%s: missing %q:\n%s", session, want, res.Context)
+			}
+		}
+		if strings.Contains(res.Context, "(untitled)") {
+			t.Errorf("%s: note shows (untitled):\n%s", session, res.Context)
+		}
+	}
+}
+
+func TestSearchHintShowsUntitledBugBody(t *testing.T) {
+	a := newTestApp(t, "main")
+	indexSource(t, a, "h.go", "package p\n\nfunc handleAugment() {}\n")
+	if _, _, _, err := a.Engine.Record(context.Background(), memory.NewMemory{Kind: memory.KindBug,
+		Body: "Hint drops the last line.", Branch: a.Git.Branch,
+		Refs: []memory.Ref{{Type: memory.RefSymbol, Value: "handleAugment"}}}); err != nil {
+		t.Fatal(err)
+	}
+	got := grepHint(t, a, "s", "handleAugment")
+	if !strings.Contains(got, "\n- ⚠ Hint drops the last line.") || strings.Contains(got, "(untitled)") {
+		t.Errorf("untitled bug hint does not show its body:\n%s", got)
+	}
+}
