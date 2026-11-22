@@ -17,7 +17,7 @@ func Compact(ctx context.Context, a *app.App, w io.Writer, args []string) (rerr 
 	force := fs.Bool("force", false, "ignore the once-per-interval gate")
 	dry := fs.Bool("dry-run", false, "report planned changes without writing")
 	budget := fs.Int("budget-tokens", 0, "live-set token budget (0 = default)")
-	vacuum := fs.Bool("vacuum", false, "after compaction, VACUUM the store so freed pages return to the OS (rewrites the file; needs comparable free disk)")
+	vacuum := fs.Bool("vacuum", false, "after compaction, optimize the FTS indexes, then VACUUM the store so freed pages return to the OS (rewrites the file; needs comparable free disk)")
 	if helped, err := parseFlags(fs, args); helped || err != nil {
 		return err
 	}
@@ -58,35 +58,56 @@ func Compact(ctx context.Context, a *app.App, w io.Writer, args []string) (rerr 
 			}
 		}
 	}
-	if *vacuum && !*dry {
-		if _, err := a.Store.DB.ExecContext(ctx, `VACUUM`); err != nil {
-			return err
-		}
-		_ = a.Store.Checkpoint(ctx)
-		if _, err := fmt.Fprintln(w, "vacuumed: freed pages returned to the OS"); err != nil {
-			return err
-		}
-	}
-
-	rep, err := a.Engine.Compact(ctx, memory.CompactOptions{
+	rep, memErr := a.Engine.Compact(ctx, memory.CompactOptions{
 		Force: *force, DryRun: *dry, BudgetTokens: *budget,
 	})
-	if err != nil {
-		return err
+	if memErr == nil {
+		if err := writeCompactReport(w, rep, *dry); err != nil {
+			return err
+		}
 	}
+	if *vacuum && !*dry {
+		// Run last so pages freed by the prune and memory pass are returned too.
+		// The prune alone can free most of the store, so reclaim even when the
+		// memory pass is skipped or fails.
+		if err := reclaimSpace(ctx, a, w); err != nil {
+			return errors.Join(memErr, err)
+		}
+	}
+	return memErr
+}
+
+func writeCompactReport(w io.Writer, rep memory.CompactReport, dry bool) error {
 	if !rep.Ran {
 		_, err := fmt.Fprintln(w, "compaction skipped (ran recently; use --force to override)")
 		return err
 	}
 	p := ""
-	if *dry {
+	if dry {
 		p = "[dry-run] "
 	}
-	fmt.Fprintf(w, "%sepoch:        %d\n", p, rep.Epoch)
-	fmt.Fprintf(w, "%ssuperseded:   %d gc'd\n", p, rep.SupersededGCd)
-	fmt.Fprintf(w, "%sarchived:     %d\n", p, rep.Archived)
-	fmt.Fprintf(w, "%sdeduped:      %d\n", p, rep.Deduped)
-	fmt.Fprintf(w, "%sarchive gc:   %d\n", p, rep.ArchiveGCd)
-	fmt.Fprintf(w, "%slive tokens:  %d -> %d (budget %d)\n", p, rep.LiveTokensBefore, rep.LiveTokensAfter, rep.Budget)
-	return nil
+	_, err := fmt.Fprintf(w,
+		"%sepoch:        %d\n%ssuperseded:   %d gc'd\n%sarchived:     %d\n%sdeduped:      %d\n%sarchive gc:   %d\n%slive tokens:  %d -> %d (budget %d)\n",
+		p, rep.Epoch, p, rep.SupersededGCd, p, rep.Archived, p, rep.Deduped, p, rep.ArchiveGCd,
+		p, rep.LiveTokensBefore, rep.LiveTokensAfter, rep.Budget)
+	return err
+}
+
+func reclaimSpace(ctx context.Context, a *app.App, w io.Writer) error {
+	// Incremental writes leave FTS5 segments and delete markers; optimize merges
+	// them, then VACUUM returns the freed pages to the OS.
+	tables, err := a.Store.OptimizeFTS(ctx)
+	if err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(w, "fts optimized: %d index(es)\n", len(tables)); err != nil {
+		return err
+	}
+	if _, err := a.Store.DB.ExecContext(ctx, `VACUUM`); err != nil {
+		return err
+	}
+	// VACUUM is committed; if this checkpoint cannot finish now, a later one can truncate the WAL.
+	_ = a.Store.Checkpoint(ctx)
+	_, err = fmt.Fprintln(w, "vacuumed: freed pages returned to the OS")
+	return err
 }
