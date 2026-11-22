@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 
@@ -281,29 +282,21 @@ func TestServedSearchGraphListsExactMatchesFirst(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		exactSet := make(map[string]bool, len(repo.exactNames))
-		for _, name := range repo.exactNames {
-			exactSet[name] = true
-		}
 		var gotExact []string
 		for _, result := range got.Results {
-			if exactSet[result.QualifiedName] {
-				gotExact = append(gotExact, result.QualifiedName)
+			for _, name := range repo.exactNames {
+				if result.QualifiedName == name {
+					gotExact = append(gotExact, result.QualifiedName)
+					break
+				}
 			}
 		}
-		if len(gotExact) != len(repo.exactNames) {
+		gotExactSorted := append([]string(nil), gotExact...)
+		wantExactSorted := append([]string(nil), repo.exactNames...)
+		sort.Strings(gotExactSorted)
+		sort.Strings(wantExactSorted)
+		if !reflect.DeepEqual(gotExactSorted, wantExactSorted) {
 			t.Fatalf("repo %s exact names = %v, want %v", repo.label, gotExact, repo.exactNames)
-		}
-		for _, name := range gotExact {
-			if !exactSet[name] {
-				t.Fatalf("repo %s exact names = %v, want %v", repo.label, gotExact, repo.exactNames)
-			}
-			exactSet[name] = false
-		}
-		for name, present := range exactSet {
-			if present {
-				t.Fatalf("repo %s exact names = %v, missing %s", repo.label, gotExact, name)
-			}
 		}
 		repoExactNames[repo.label] = gotExact
 		repoOutputs[repo.label] = got
