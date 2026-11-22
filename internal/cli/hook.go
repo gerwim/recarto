@@ -14,7 +14,10 @@ import (
 	"github.com/gerwim/recarto/internal/agents/copilot"
 	"github.com/gerwim/recarto/internal/agents/opencode"
 	"github.com/gerwim/recarto/internal/app"
+	"github.com/gerwim/recarto/internal/clock"
 )
+
+var hookClock clock.Clock
 
 // Hook dispatches a lifecycle hook for the host named by --agent (default claude)
 // against an already-open App, reading the hook payload from in and writing hook
@@ -44,7 +47,7 @@ func runHook(ctx context.Context, in io.Reader, out io.Writer, args []string) {
 	var mu sync.Mutex // the session start's tiers add to the lists side by side
 	var run warmRun
 	open := func(ev agents.Event) (*app.App, error) {
-		cfg := app.Config{SkipWorkspace: ev.Kind != agents.KindSessionStart && ev.Kind != agents.KindStop}
+		cfg := app.Config{Clock: hookClock, SkipWorkspace: ev.Kind != agents.KindSessionStart && ev.Kind != agents.KindStop}
 		var files, searched []string // the event acts only on these
 		switch {
 		case ev.Kind == agents.KindPostEdit:
@@ -64,6 +67,9 @@ func runHook(ctx context.Context, in io.Reader, out io.Writer, args []string) {
 		var err error
 		a, err = app.Open(cfg)
 		warm = err == nil && ev.Kind == agents.KindSessionStart
+		if err == nil && ev.Kind == agents.KindStop {
+			a.EndLater = func(id string) { run.end = id }
+		}
 		if warm {
 			run.session = ev.SessionID
 			a.StartIndex = func(wt string) (<-chan error, error) {
@@ -91,6 +97,11 @@ func runHook(ctx context.Context, in io.Reader, out io.Writer, args []string) {
 	if warm {
 		if err := startWarm(run); err != nil {
 			fmt.Fprintln(os.Stderr, "recarto hook: start the background index:", err)
+		}
+	}
+	if run.end != "" {
+		if err := startWarm(run); err != nil {
+			fmt.Fprintln(os.Stderr, "recarto hook: start the background session end:", err)
 		}
 	}
 }

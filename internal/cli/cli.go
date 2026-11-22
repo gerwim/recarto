@@ -116,7 +116,8 @@ func Run(args []string, out io.Writer) (rerr error) {
 	}
 
 	if cmd == "warm" {
-		stop := armWarmLimit(endWarm)
+		limit := warmRunLimit(rest)
+		stop := armWarmLimit(limit, func() { endWarm(limit) })
 		defer stop()
 	}
 

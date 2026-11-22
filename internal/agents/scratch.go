@@ -81,14 +81,20 @@ func insertSession(ctx context.Context, c store.Conn, id, agent string, g gitctx
 	return n == 1, err
 }
 
-// folderSession reads the start and agent of sessionID's row in st.
-func folderSession(ctx context.Context, st *store.Store, sessionID string) (startedAt int64, agent string, found bool, err error) {
+type folderRow struct {
+	startedAt int64
+	agent     string
+	ended     sql.NullInt64
+}
+
+// folderSession reads the start, agent and end of sessionID's row in st.
+func folderSession(ctx context.Context, st *store.Store, sessionID string) (row folderRow, found bool, err error) {
 	err = st.DB.QueryRowContext(ctx,
-		`SELECT started_at, agent FROM sessions WHERE id=?`, sessionID).Scan(&startedAt, &agent)
+		`SELECT started_at, agent, ended_at FROM sessions WHERE id=?`, sessionID).Scan(&row.startedAt, &row.agent, &row.ended)
 	if errors.Is(err, sql.ErrNoRows) {
-		return 0, "", false, nil
+		return folderRow{}, false, nil
 	}
-	return startedAt, agent, err == nil, err
+	return row, err == nil, err
 }
 
 // hasSession reports whether st holds a row for sessionID.
@@ -151,12 +157,12 @@ func startConversation(ctx context.Context, a *app.App, ev Event, now int64, wai
 		return conv, nil
 	}
 	known := func() (conversationStart, error) {
-		startedAt, agent, _, err := folderSession(ctx, a.Store, ev.SessionID)
+		row, _, err := folderSession(ctx, a.Store, ev.SessionID)
 		if err != nil {
 			return conversationStart{}, err
 		}
 		roster, err := readRoster(ctx, a.Ledger, ev.SessionID)
-		return conversationStart{roster: roster, startedAt: startedAt, agent: agent}, err
+		return conversationStart{roster: roster, startedAt: row.startedAt, agent: row.agent}, err
 	}
 	// Read first: a known conversation needs no write, so its resume never
 	// waits for another process's writer.
@@ -337,7 +343,7 @@ func RecordRosterSessions(ctx context.Context, a *app.App, sessionID string) err
 	if err != nil || len(roster) == 0 {
 		return err
 	}
-	startedAt, agent, found, err := folderSession(ctx, a.Store, sessionID)
+	row, found, err := folderSession(ctx, a.Store, sessionID)
 	if err != nil || !found {
 		return err
 	}
@@ -351,7 +357,7 @@ func RecordRosterSessions(ctx context.Context, a *app.App, sessionID string) err
 		rc := c.RepoContext
 		wg.Go(func() {
 			for {
-				err := recordRosterSession(store.WithWriteDeadline(ctx, time.Now().Add(writeGrace)), rc, sessionID, agent, startedAt)
+				err := recordRosterSession(store.WithWriteDeadline(ctx, time.Now().Add(writeGrace)), rc, sessionID, row.agent, row.startedAt)
 				if !store.IsBusy(err) {
 					errs[i] = err
 					return
@@ -364,49 +370,6 @@ func RecordRosterSessions(ctx context.Context, a *app.App, sessionID string) err
 		})
 	}
 	wg.Wait()
-	return errors.Join(errs...)
-}
-
-// endRosterSessions ends the session ev's conversation opened in each roster
-// repo it can open, recording it first when the repo has none. A repo that
-// cannot be opened keeps its open session: a later Stop that can open it ends it.
-func endRosterSessions(ctx context.Context, a *app.App, ev Event, now int64) error {
-	roster, err := readRoster(ctx, a.Ledger, ev.SessionID)
-	if err != nil || len(roster) == 0 {
-		return err
-	}
-	startedAt, agent, found, err := folderSession(ctx, a.Store, ev.SessionID)
-	if err != nil || !found {
-		return err
-	}
-	// A repo that cannot be opened keeps its session open: a later Stop that
-	// can open it ends it.
-	covered, _, done := cover(a, roster)
-	defer done()
-	var errs []error
-	for _, c := range covered {
-		rc := c.RepoContext
-		var ended bool
-		err := rc.Store.DB.QueryRowContext(ctx,
-			`SELECT EXISTS(SELECT 1 FROM sessions WHERE id=? AND ended_at IS NOT NULL)`, ev.SessionID).Scan(&ended)
-		if err != nil {
-			errs = append(errs, err)
-			continue
-		}
-		if ended {
-			continue
-		}
-		// One statement closes the row whichever process wrote it, and never
-		// overwrites an end already written.
-		errs = append(errs, rc.Store.WriteTx(ctx, func(c store.Conn) error {
-			_, err := c.ExecContext(ctx,
-				`INSERT INTO sessions(id, agent, branch, worktree, started_at, ended_at)
-				 VALUES (?, ?, ?, ?, ?, ?)
-				 ON CONFLICT(id) DO UPDATE SET ended_at = excluded.ended_at WHERE sessions.ended_at IS NULL`,
-				ev.SessionID, agent, nullable(rc.Git.Branch), rc.Git.Worktree, startedAt, now)
-			return err
-		}))
-	}
 	return errors.Join(errs...)
 }
 

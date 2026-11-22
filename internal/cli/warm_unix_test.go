@@ -32,7 +32,7 @@ func TestWarmLimitHelper(t *testing.T) {
 	}
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGUSR1)
-	armWarmLimit = func(f func()) func() bool {
+	armWarmLimit = func(_ time.Duration, f func()) func() bool {
 		// 0 armed, 1 stopped, 2 fired: whichever of stop and the signal claims
 		// it first wins, as with time.Timer.
 		var state atomic.Int32

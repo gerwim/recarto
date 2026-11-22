@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"sort"
 
 	"github.com/gerwim/recarto/internal/ids"
@@ -260,13 +261,17 @@ func (e *Engine) DeltaBaseline(ctx context.Context, worktree string, nowMs int64
 // end, both when the latest start is taken and among the earlier sessions a
 // baseline is chosen from. An empty id counts only the rows written.
 func (e *Engine) DeltaBaselineWith(ctx context.Context, worktree, id string, startedAt, nowMs int64) (int64, bool, error) {
+	return deltaBaselineWith(ctx, e.st.DB, worktree, id, startedAt, nowMs)
+}
+
+func deltaBaselineWith(ctx context.Context, c store.Conn, worktree, id string, startedAt, nowMs int64) (int64, bool, error) {
 	// s is the worktree's sessions plus the pending one, which counts only while
 	// no row of that id exists.
 	const s = `(SELECT started_at, ended_at FROM sessions WHERE worktree = ?1
 	  UNION ALL
 	  SELECT ?2, NULL WHERE ?3 <> '' AND NOT EXISTS (SELECT 1 FROM sessions WHERE id = ?3))`
 	var latest int64
-	err := e.st.DB.QueryRowContext(ctx,
+	err := c.QueryRowContext(ctx,
 		`SELECT COALESCE(MAX(started_at), 0) FROM `+s, worktree, startedAt, id).Scan(&latest)
 	if err != nil {
 		return 0, false, err
@@ -275,7 +280,7 @@ func (e *Engine) DeltaBaselineWith(ctx context.Context, worktree, id string, sta
 		return 0, false, nil
 	}
 	var baseline int64
-	err = e.st.DB.QueryRowContext(ctx, `
+	err = c.QueryRowContext(ctx, `
 SELECT s.started_at FROM `+s+` s
  WHERE s.started_at < ?4
    AND EXISTS (SELECT 1 FROM graph_deltas d
@@ -289,6 +294,66 @@ SELECT s.started_at FROM `+s+` s
 		return 0, false, err
 	}
 	return baseline, true, nil
+}
+
+// tenthSessionStart returns the started_at of the worktree's 10th-most-recent
+// session, or 0 when fewer exist.
+func tenthSessionStart(ctx context.Context, c store.Conn, worktree string) (int64, error) {
+	var at int64
+	err := c.QueryRowContext(ctx,
+		`SELECT started_at FROM sessions WHERE worktree = ?
+		  ORDER BY started_at DESC LIMIT 1 OFFSET 9`, worktree).Scan(&at)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	return at, err
+}
+
+// PruneUnreachableDeltas drops worktree's journal rows no baseline walk can
+// reach: those older than the 10th-most-recent session's start, never past the
+// current baseline (session id, started at startedAt, counted while its row is
+// not written). hold reports a session end still to be written, which makes it
+// delete nothing. Like PruneDeltas before it, it takes the write lock only when
+// the reads find ten sessions and no hold; it then decides again inside that
+// transaction, so an end written since the reads counts.
+// The store's pending-end lock also serializes this delete with Stops publishing
+// pending end records; if another writer holds it, this best-effort prune skips.
+func (e *Engine) PruneUnreachableDeltas(ctx context.Context, worktree, id string, startedAt, nowMs int64, hold func(c store.Conn) (bool, error)) error {
+	tenth, err := tenthSessionStart(ctx, e.st.DB, worktree)
+	if err != nil || tenth == 0 {
+		return err
+	}
+	pending, err := hold(e.st.DB)
+	if err != nil || pending {
+		return err
+	}
+	coordination := filepath.Join(filepath.Dir(e.st.Path()), "pending-ends.lock")
+	release, locked, err := store.TryLockFile(coordination)
+	if err != nil || !locked {
+		return err
+	}
+	defer release()
+	return e.st.WriteTx(ctx, func(c store.Conn) error {
+		pending, err := hold(c)
+		if err != nil || pending {
+			return err
+		}
+		tenth, err := tenthSessionStart(ctx, c, worktree)
+		if err != nil || tenth == 0 {
+			return err
+		}
+		cutoff := tenth
+		baseline, ok, err := deltaBaselineWith(ctx, c, worktree, id, startedAt, nowMs)
+		if err != nil {
+			return err
+		}
+		if ok && baseline < cutoff {
+			cutoff = baseline
+		}
+		_, err = c.ExecContext(ctx,
+			`DELETE FROM graph_deltas WHERE worktree=? AND at<?`, worktree, cutoff)
+		return err
+	})
 }
 
 // PruneDeltas drops journal rows older than beforeMs for the worktree.
