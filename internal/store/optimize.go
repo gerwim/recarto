@@ -17,6 +17,7 @@ func (s *Store) FTSTables(ctx context.Context) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	// A read-only cursor: rows.Err reports a failed read; Close only frees the cursor.
 	defer func() { _ = rows.Close() }()
 	var out []string
 	for rows.Next() {

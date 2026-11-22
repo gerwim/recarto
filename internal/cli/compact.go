@@ -17,7 +17,7 @@ func Compact(ctx context.Context, a *app.App, w io.Writer, args []string) (rerr 
 	force := fs.Bool("force", false, "ignore the once-per-interval gate")
 	dry := fs.Bool("dry-run", false, "report planned changes without writing")
 	budget := fs.Int("budget-tokens", 0, "live-set token budget (0 = default)")
-	vacuum := fs.Bool("vacuum", false, "after compaction, optimize the FTS indexes and VACUUM the store so freed pages return to the OS (rewrites the file; needs comparable free disk)")
+	vacuum := fs.Bool("vacuum", false, "after compaction, optimize the FTS indexes, then VACUUM the store so freed pages return to the OS (rewrites the file; needs comparable free disk)")
 	if helped, err := parseFlags(fs, args); helped || err != nil {
 		return err
 	}
