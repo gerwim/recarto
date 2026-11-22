@@ -10,10 +10,18 @@ import (
 // schemaVersion is the number of applied migrations.
 const schemaVersion = 27
 
+// migration is one schema step. sql runs first; run, when set, then runs Go
+// code on the same connection, for a step SQL alone cannot express (see
+// wipeCodeGraph). Every pending migration runs inside one transaction.
+type migration struct {
+	sql string
+	run func(ctx context.Context, c Conn) error
+}
+
 // migrations are applied in order; index+1 becomes user_version.
-var migrations = []string{
+var migrations = []migration{
 	// v1: core schema (no FTS yet — FTS5 is added in Phase 1B).
-	`
+	{sql: `
 CREATE TABLE meta (
   key   TEXT PRIMARY KEY,
   value TEXT NOT NULL
@@ -76,22 +84,22 @@ CREATE TABLE sessions (
   started_at INTEGER NOT NULL,
   ended_at   INTEGER
 );
-`,
+`},
 	// v2: FTS5 full-text index over search_text (Phase 1B). memory_id is
 	// UNINDEXED so it is stored and returned but not tokenized. Rows are synced
 	// manually from the memory write path — no external-content linkage, because
 	// memories.id is a TEXT UUID, not the INTEGER rowid FTS5 external content
 	// requires.
-	`
+	{sql: `
 CREATE VIRTUAL TABLE memories_fts USING fts5(
   memory_id UNINDEXED,
   search_text
 );
-`,
+`},
 	// v3 (Phase 2): worktree-aware code graph. files is the reconcile diff
 	// target; nodes/edges inherit worktree via file_id. nodes_fts is manually
 	// synced (FTS5 has no external-content link to TEXT-uuid rowids).
-	`
+	{sql: `
 CREATE TABLE files (
   id              TEXT PRIMARY KEY,
   worktree        TEXT NOT NULL,
@@ -141,18 +149,18 @@ CREATE VIRTUAL TABLE nodes_fts USING fts5(
   name,
   qualified_name
 );
-`,
+`},
 	// v4 (Phase 3): compaction/decay signals. last_used_epoch is the activity
 	// epoch at which a memory was last recalled (decay = current_epoch - it);
 	// recall_count is cumulative recall hits; archived_epoch is when eviction
 	// archived the row (drives archive-GC grace). Existing rows backfill to 0 —
 	// harmless because eviction is budget-triggered, never age-triggered.
-	`
+	{sql: `
 ALTER TABLE memories ADD COLUMN last_used_epoch INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE memories ADD COLUMN recall_count    INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE memories ADD COLUMN archived_epoch  INTEGER NOT NULL DEFAULT 0;
 CREATE INDEX idx_memories_last_used_epoch ON memories(last_used_epoch);
-`,
+`},
 	// v5 (Phase 2 fix): invalidate the derived code-graph index. The C# parser
 	// query was incomplete (missed records/enums/file-scoped namespaces) and the
 	// graph FTS did not split camelCase identifiers; both changed in the indexer.
@@ -161,26 +169,31 @@ CREATE INDEX idx_memories_last_used_epoch ON memories(last_used_epoch);
 	// rebuilds it with the fixed indexer. Memories are untouched. Bump this whenever
 	// parser queries or FTS content change so existing caches rebuild on upgrade.
 	// Delete children before parents so no foreign-key state is relied upon.
-	`
+	// Future migrations that need every worktree's graph rebuilt use {run:
+	// wipeCodeGraph}, or call it from their own run. FTS5 row deletes write a
+	// delete marker per token, so DELETE FROM can grow a long-lived index before
+	// rebuilding adds a full copy. Dropping and recreating from the stored
+	// definitions leaves the FTS tables as small as on a new store.
+	{sql: `
 DELETE FROM nodes_fts;
 DELETE FROM edges;
 DELETE FROM nodes;
 DELETE FROM files;
 DELETE FROM meta WHERE key LIKE 'graph_token:%';
-`,
+`},
 	// v6 (Phase 2 fix): the TypeScript and JavaScript parser queries were
 	// completed to capture enums, type aliases, namespaces, abstract classes, and
 	// arrow/function-expression consts (modern TS/React). Same rationale as v5 —
 	// the derived graph is rebuildable, so wipe it and clear the freshness token
 	// to force a rebuild with the fixed queries. See the v5 comment for the
 	// standing convention.
-	`
+	{sql: `
 DELETE FROM nodes_fts;
 DELETE FROM edges;
 DELETE FROM nodes;
 DELETE FROM files;
 DELETE FROM meta WHERE key LIKE 'graph_token:%';
-`,
+`},
 	// v7 (Ordia validation fix): the indexer now (a) populates a real dotted
 	// qualified_name from the structural context (namespace.class.member, with C#
 	// file-scoped namespaces handled) and feeds it to the node FTS, and (b)
@@ -189,13 +202,13 @@ DELETE FROM meta WHERE key LIKE 'graph_token:%';
 	// React `Select`). Both change stored node/edge content, so wipe the
 	// rebuildable graph and clear the freshness token to force a rebuild with the
 	// fixed indexer. See the v5 comment for the standing convention.
-	`
+	{sql: `
 DELETE FROM nodes_fts;
 DELETE FROM edges;
 DELETE FROM nodes;
 DELETE FROM files;
 DELETE FROM meta WHERE key LIKE 'graph_token:%';
-`,
+`},
 	// v8 (Tier A search quality): better lexical matching for code symbols, added
 	// as BROADENERS so they never dilute an already-precise match. nodes_fts
 	// (unicode61) stays the primary exact index; two more are consulted only when
@@ -209,7 +222,7 @@ DELETE FROM meta WHERE key LIKE 'graph_token:%';
 	// token to force a reconcile that repopulates all three FTS tables. The
 	// broadeners are DROP+CREATEd so the migration is safe to re-run. See the v5
 	// comment for the standing convention.
-	`
+	{sql: `
 DROP TABLE IF EXISTS nodes_fts_stem;
 CREATE VIRTUAL TABLE nodes_fts_stem USING fts5(
   node_id UNINDEXED,
@@ -228,7 +241,7 @@ DELETE FROM edges;
 DELETE FROM nodes;
 DELETE FROM files;
 DELETE FROM meta WHERE key LIKE 'graph_token:%';
-`,
+`},
 	// v9 (receiver-aware call resolution): add per-scope type bindings and
 	// per-edge candidate sets with confidence, plus a receiver column on edges.
 	// edges is rebuildable, so it is DROP+CREATEd with the new dst_recv column
@@ -237,7 +250,7 @@ DELETE FROM meta WHERE key LIKE 'graph_token:%';
 	// Wipe the derived graph + freshness token so the new indexer repopulates it.
 	// Memories/bugs are untouched (TestV9MigrationPreservesMemories). See the v5
 	// comment for the standing convention.
-	`
+	{sql: `
 DROP TABLE IF EXISTS edge_candidates;
 DROP TABLE IF EXISTS type_bindings;
 
@@ -282,14 +295,14 @@ DELETE FROM nodes_fts_tri;
 DELETE FROM nodes;
 DELETE FROM files;
 DELETE FROM meta WHERE key LIKE 'graph_token:%';
-`,
+`},
 	// v10 (receiver-aware resolution fix): csharp.scm's member-access call pattern
 	// now makes the receiver optional (expression: (_)?), so `this.Method()` calls
 	// — which parse without an `expression` field — are captured again (Phase 1's
 	// required-expression pattern silently dropped them). Indexer change, so wipe
 	// the rebuildable graph + freshness token to force a rebuild. Memories/bugs
 	// untouched. See the v5 comment for the standing convention.
-	`
+	{sql: `
 DELETE FROM edge_candidates;
 DELETE FROM type_bindings;
 DELETE FROM nodes_fts;
@@ -299,14 +312,14 @@ DELETE FROM edges;
 DELETE FROM nodes;
 DELETE FROM files;
 DELETE FROM meta WHERE key LIKE 'graph_token:%';
-`,
+`},
 	// v11 (receiver-aware resolution, Phase 3): the resolver now scores S5
 	// name-only candidates by AMBIGUITY (unique match = medium/expandable, several
 	// = low/terminal) — a change to the stored edge_candidates confidences that the
 	// freshness token (gated on source state) would not otherwise pick up. Wipe the
 	// rebuildable graph + freshness token so the next reconcile re-resolves with
 	// the new confidence model. Memories/bugs untouched. See the v5 comment.
-	`
+	{sql: `
 DELETE FROM edge_candidates;
 DELETE FROM type_bindings;
 DELETE FROM nodes_fts;
@@ -316,7 +329,7 @@ DELETE FROM edges;
 DELETE FROM nodes;
 DELETE FROM files;
 DELETE FROM meta WHERE key LIKE 'graph_token:%';
-`,
+`},
 	// v12 (todo kind): widen the memories CHECK constraints to admit kind='todo'
 	// and status='done'. SQLite cannot ALTER a CHECK, and a table rebuild is unsafe
 	// here (migrations run inside one BEGIN IMMEDIATE, so PRAGMA foreign_keys=OFF is
@@ -328,7 +341,7 @@ DELETE FROM meta WHERE key LIKE 'graph_token:%';
 	// reloads the schema and bumps the cookie so every pooled connection reparses the
 	// widened CHECKs. The `sql NOT LIKE` guards keep the edit idempotent (safe to
 	// re-run). This is NOT a graph migration; the derived graph is left untouched.
-	`
+	{sql: `
 PRAGMA writable_schema=ON;
 UPDATE sqlite_master
    SET sql = replace(sql,
@@ -341,15 +354,15 @@ UPDATE sqlite_master
      '''active'',''superseded'',''archived'',''done''')
  WHERE type='table' AND name='memories' AND sql NOT LIKE '%''done''%';
 PRAGMA writable_schema=RESET;
-`,
+`},
 	// v13 (index edges by file_id): the per-file rewrite path deletes a file's
 	// edges by file_id on every re-index (`DELETE FROM edges WHERE file_id=?`), and
 	// the resolver joins/filters edges by file_id; both were full table scans of
 	// edges. Add the covering index. Purely additive — the derived graph is left
 	// intact (no wipe), so existing stores gain the index without a rebuild.
-	`
+	{sql: `
 CREATE INDEX IF NOT EXISTS idx_edges_file ON edges(file_id);
-`,
+`},
 	// v14 (indexable receiver match): the call resolver's typed/static strategies
 	// matched a method to its declaring type with `qualified_name LIKE '%.T.name'`,
 	// a leading-wildcard scan run per same-name node — quadratic on large C# repos
@@ -366,7 +379,7 @@ CREATE INDEX IF NOT EXISTS idx_edges_file ON edges(file_id);
 	// migration tests exercise by rolling user_version back). Children referencing
 	// nodes are emptied first so the DROP has no rows to violate; edges' foreign key
 	// re-binds to the recreated table by name.
-	`
+	{sql: `
 DELETE FROM nodes_fts;
 DELETE FROM nodes_fts_stem;
 DELETE FROM nodes_fts_tri;
@@ -401,11 +414,11 @@ CREATE INDEX idx_nodes_name_parent ON nodes(name, parent_name);
 -- name was a residual scan, and at large scale the planner abandoned the good plan
 -- and built a transient index instead (S2 spiked from ~2s to >3min on HotChocolate).
 CREATE INDEX IF NOT EXISTS idx_type_bindings_file_name ON type_bindings(file_id, name);
-`,
+`},
 	// v15: graph cache reset so the now-populated node `signature` column
 	// backfills on the next reconcile. Clears all graph-derived rows + freshness
 	// tokens; memories are untouched. ReconcileIfStale re-indexes every file.
-	`
+	{sql: `
 DELETE FROM nodes_fts;
 DELETE FROM nodes_fts_stem;
 DELETE FROM nodes_fts_tri;
@@ -415,11 +428,11 @@ DELETE FROM edges;
 DELETE FROM nodes;
 DELETE FROM files;
 DELETE FROM meta WHERE key LIKE 'graph_token:%';
-`,
+`},
 	// v16: graph cache reset so the new `annotates` edges (attribute/decorator
 	// usages) backfill on the next reconcile. Same scope as v15 — graph-derived
 	// rows + freshness tokens only; memories are untouched.
-	`
+	{sql: `
 DELETE FROM nodes_fts;
 DELETE FROM nodes_fts_stem;
 DELETE FROM nodes_fts_tri;
@@ -429,7 +442,7 @@ DELETE FROM edges;
 DELETE FROM nodes;
 DELETE FROM files;
 DELETE FROM meta WHERE key LIKE 'graph_token:%';
-`,
+`},
 	// v17 (feedback kind): widen the memories CHECK constraints to admit
 	// kind='feedback' (recorded only via report_recarto_issue, into the dedicated
 	// global feedback store) and status='resolved' (the feedback triage terminal).
@@ -439,7 +452,7 @@ DELETE FROM meta WHERE key LIKE 'graph_token:%';
 	// value-lists with replace() to preserve ALTER-appended columns, then RESET so
 	// pooled connections reparse. The `sql NOT LIKE` guards keep it idempotent. This
 	// is NOT a graph migration; the derived graph is left untouched.
-	`
+	{sql: `
 PRAGMA writable_schema=ON;
 UPDATE sqlite_master
    SET sql = replace(sql,
@@ -452,7 +465,7 @@ UPDATE sqlite_master
      '''active'',''superseded'',''archived'',''done'',''resolved''')
  WHERE type='table' AND name='memories' AND sql NOT LIKE '%''resolved''%';
 PRAGMA writable_schema=RESET;
-`,
+`},
 	// v18: the Go parser now records single-spec type declarations with the
 	// `type` keyword span (start_byte/start_line now cover the leading `type`
 	// keyword, not just the identifier). Spans are stored at index time, so
@@ -461,7 +474,7 @@ PRAGMA writable_schema=RESET;
 	// graph + freshness tokens to force a full reindex with the corrected
 	// parser. Memories are untouched. See the v5 comment for the standing
 	// convention.
-	`
+	{sql: `
 DELETE FROM nodes_fts;
 DELETE FROM nodes_fts_stem;
 DELETE FROM nodes_fts_tri;
@@ -471,7 +484,7 @@ DELETE FROM edges;
 DELETE FROM nodes;
 DELETE FROM files;
 DELETE FROM meta WHERE key LIKE 'graph_token:%';
-`,
+`},
 	// v19: graph_deltas journals symbol-level index changes (added/removed/changed
 	// per file) so a session can show "what changed since you were last here"
 	// without snapshots or re-parsing. Rows are written by writeFileGraph/deleteFile
@@ -480,7 +493,7 @@ DELETE FROM meta WHERE key LIKE 'graph_token:%';
 	// comment for the standing convention.
 	// CREATE TABLE … IF NOT EXISTS keeps this migration idempotent when the store
 	// is rolled back (user_version reset) and reopened (e.g. in migration tests).
-	`
+	{sql: `
 CREATE TABLE IF NOT EXISTS graph_deltas (
   id             TEXT PRIMARY KEY,
   worktree       TEXT NOT NULL,
@@ -491,7 +504,7 @@ CREATE TABLE IF NOT EXISTS graph_deltas (
   at             INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_graph_deltas_wt_at ON graph_deltas(worktree, at);
-`,
+`},
 	// v20 (HTTP memory sync): two additive, non-graph tables supporting
 	// cross-machine memory sync over the HTTP API (internal/remotesync,
 	// internal/syncserver).
@@ -513,7 +526,7 @@ CREATE INDEX IF NOT EXISTS idx_graph_deltas_wt_at ON graph_deltas(worktree, at);
 	// ON DELETE CASCADE keeps it tidy when a memory is later hard-deleted.
 	// Both tables start empty and are idempotent (IF NOT EXISTS) so the
 	// migration replays safely under the rollback tests.
-	`
+	{sql: `
 CREATE TABLE IF NOT EXISTS memory_tombstones (
   id         TEXT PRIMARY KEY,
   deleted_at INTEGER NOT NULL,
@@ -524,7 +537,7 @@ CREATE TABLE IF NOT EXISTS memory_sync_outbox (
   memory_id  TEXT PRIMARY KEY REFERENCES memories(id) ON DELETE CASCADE,
   updated_at INTEGER NOT NULL
 );
-`,
+`},
 	// v21 (HTTP memory sync): idempotency guard for the near-duplicate
 	// reinforce-merge path in memory.SyncApply.
 	//
@@ -541,17 +554,17 @@ CREATE TABLE IF NOT EXISTS memory_sync_outbox (
 	// was last merged into and at what updated_at, so a later apply of the same
 	// (id, updated_at) is recognized as already-applied and returns Noop.
 	// Idempotent (IF NOT EXISTS) so the migration replays safely.
-	`
+	{sql: `
 CREATE TABLE IF NOT EXISTS memory_sync_merges (
   id            TEXT PRIMARY KEY,
   canonical_id  TEXT NOT NULL,
   updated_at    INTEGER NOT NULL
 );
-`,
+`},
 	// v22 (semantic memory recall): model vectors and the FTS5 vocabulary view
 	// are derived state. Vectors are neither synced nor exported and are lazily
 	// re-embedded after repair; the vocabulary is recreated from the FTS index.
-	`
+	{sql: `
 CREATE TABLE IF NOT EXISTS memory_vectors (
   memory_id TEXT PRIMARY KEY REFERENCES memories(id) ON DELETE CASCADE,
   model     TEXT NOT NULL,
@@ -559,23 +572,23 @@ CREATE TABLE IF NOT EXISTS memory_vectors (
   vec       BLOB NOT NULL
 );
 CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts_vocab USING fts5vocab(memories_fts, 'row');
-`,
+`},
 	// v23 (Rust support): .rs files are now indexed. Existing worktrees already
 	// hold them on disk, but the git-state freshness token does not change on a
 	// binary upgrade, so ReconcileIfStale would never look. Clearing the tokens
 	// forces one reconcile, which indexes the never-seen .rs files and skips every
 	// unchanged file by mtime/size. No wipe: no existing language's output changed.
-	`
+	{sql: `
 DELETE FROM meta WHERE key LIKE 'graph_token:%';
-`,
+`},
 	// v24 (Python support): the same token reset as v23, so the next reconcile
 	// indexes the .py files already on disk.
-	`
+	{sql: `
 DELETE FROM meta WHERE key LIKE 'graph_token:%';
-`,
+`},
 	// v25: map node ids to FTS rowids so per-file FTS cleanup can seek by rowid
 	// instead of scanning every symbol in every worktree.
-	`
+	{sql: `
 CREATE TABLE IF NOT EXISTS node_fts_rows (
   fts_rowid INTEGER PRIMARY KEY,
   node_id   TEXT NOT NULL UNIQUE REFERENCES nodes(id) ON DELETE CASCADE
@@ -583,18 +596,18 @@ CREATE TABLE IF NOT EXISTS node_fts_rows (
 INSERT OR IGNORE INTO node_fts_rows(fts_rowid, node_id)
 SELECT rowid, node_id FROM nodes_fts
 WHERE node_id IN (SELECT id FROM nodes);
-`,
+`},
 	// v26: name lookups that filter by kind (the name-fallback and implicit-ctor
 	// strategies) test it in the index instead of fetching every same-name node.
-	`
+	{sql: `
 DROP INDEX IF EXISTS idx_nodes_name;
 CREATE INDEX idx_nodes_name ON nodes(name, kind);
-`,
+`},
 	// v27: the implicit-ctor strategy no longer binds C# member calls
 	// (list.Add(x) is never class Add; see graph.ctorCallSite). Drop the stale
 	// candidates; ctor only fires for otherwise-unresolved calls, so those edges
 	// become unresolved, exactly as a fresh resolve leaves them.
-	`
+	{sql: `
 CREATE TEMP TABLE _v27 AS
   SELECT DISTINCT ec.edge_id FROM edge_candidates ec
     JOIN edges e ON e.id = ec.edge_id
@@ -603,7 +616,41 @@ CREATE TEMP TABLE _v27 AS
 DELETE FROM edge_candidates WHERE method = 'ctor' AND edge_id IN (SELECT edge_id FROM _v27);
 UPDATE edges SET dst_node_id = NULL WHERE id IN (SELECT edge_id FROM _v27);
 DROP TABLE _v27;
-`,
+`},
+}
+
+// wipeCodeGraph runs inside the migration's transaction, rebuilding the code
+// search tables without changing their definitions and invalidating the old
+// code map and outside-git built mark with the freshness tokens. Precious tables
+// are kept as they are in recarto repair.
+func wipeCodeGraph(ctx context.Context, c Conn) error {
+	for _, table := range []string{"nodes_fts", "nodes_fts_stem", "nodes_fts_tri"} {
+		var definition string
+		if err := c.QueryRowContext(ctx,
+			"SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?", table,
+		).Scan(&definition); err != nil {
+			return fmt.Errorf("read the definition of %s: %w", table, err)
+		}
+		if _, err := c.ExecContext(ctx, "DROP TABLE "+table); err != nil {
+			return fmt.Errorf("drop %s: %w", table, err)
+		}
+		if _, err := c.ExecContext(ctx, definition); err != nil {
+			return fmt.Errorf("recreate %s: %w", table, err)
+		}
+	}
+	if _, err := c.ExecContext(ctx, `
+DELETE FROM node_fts_rows;
+DELETE FROM edge_candidates;
+DELETE FROM type_bindings;
+DELETE FROM edges;
+DELETE FROM nodes;
+DELETE FROM files;
+DELETE FROM meta
+ WHERE key GLOB 'graph_token:*' OR key GLOB 'arch_cache:*' OR key GLOB 'graph_built:*';
+`); err != nil {
+		return fmt.Errorf("empty the code graph: %w", err)
+	}
+	return nil
 }
 
 // Migrate applies pending migrations under an IMMEDIATE lock so that
@@ -618,7 +665,7 @@ func Migrate(db *sql.DB) error {
 	// taking down MCP startup and doctor. An already-migrated store makes each
 	// attempt a cheap no-op apart from its lock acquisition.
 	for attempt := 0; ; attempt++ {
-		err := migrateOnce(ctx, db)
+		err := migrateOnce(ctx, db, migrations)
 		if err == nil || !IsBusy(err) || attempt >= maxWriteRetries {
 			return err
 		}
@@ -626,7 +673,7 @@ func Migrate(db *sql.DB) error {
 	}
 }
 
-func migrateOnce(ctx context.Context, db *sql.DB) error {
+func migrateOnce(ctx context.Context, db *sql.DB, list []migration) error {
 	conn, err := db.Conn(ctx)
 	if err != nil {
 		return err
@@ -647,7 +694,7 @@ func migrateOnce(ctx context.Context, db *sql.DB) error {
 	if err := conn.QueryRowContext(ctx, "PRAGMA user_version").Scan(&current); err != nil {
 		return err
 	}
-	if current >= len(migrations) {
+	if current >= len(list) {
 		return nil
 	}
 
@@ -667,18 +714,31 @@ func migrateOnce(ctx context.Context, db *sql.DB) error {
 	if err := conn.QueryRowContext(ctx, "PRAGMA user_version").Scan(&current); err != nil {
 		return rollback(err)
 	}
-	for i := current; i < len(migrations); i++ {
-		if _, err := conn.ExecContext(ctx, migrations[i]); err != nil {
+	for i := current; i < len(list); i++ {
+		if err := list[i].apply(ctx, conn); err != nil {
 			return rollback(fmt.Errorf("migration %d: %w", i+1, err))
 		}
 	}
 	// PRAGMA user_version does not accept bound params; format the literal int.
 	if _, err := conn.ExecContext(ctx,
-		fmt.Sprintf("PRAGMA user_version = %d", len(migrations))); err != nil {
+		fmt.Sprintf("PRAGMA user_version = %d", len(list))); err != nil {
 		return rollback(err)
 	}
 	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
 		return rollback(err)
 	}
 	return nil
+}
+
+// apply runs m on c, inside the caller's migration transaction.
+func (m migration) apply(ctx context.Context, c Conn) error {
+	if m.sql != "" {
+		if _, err := c.ExecContext(ctx, m.sql); err != nil {
+			return err
+		}
+	}
+	if m.run == nil {
+		return nil
+	}
+	return m.run(ctx, c)
 }

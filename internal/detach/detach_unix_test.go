@@ -5,6 +5,7 @@ package detach
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -29,12 +30,17 @@ func TestDetachHelper(t *testing.T) {
 		fmt.Println("started")
 		os.Exit(0)
 	case "child":
-		// Blocks until the test writes to the FIFO.
+		// Keep the reader open through the write so the FIFO handshake cannot race.
 		g, err := os.Open(os.Getenv("GATE"))
 		if err != nil {
 			os.Exit(1)
 		}
-		_ = g.Close() // read-only; nothing to lose
+		if _, err := io.CopyN(io.Discard, g, 1); err != nil {
+			os.Exit(1)
+		}
+		if err := g.Close(); err != nil {
+			os.Exit(1)
+		}
 		if err := os.WriteFile(os.Getenv("DONE"), nil, 0o644); err != nil {
 			os.Exit(1)
 		}
@@ -82,10 +88,10 @@ func TestStartOutlivesCallerAndHoldsNoOutput(t *testing.T) {
 	for {
 		w, err := os.OpenFile(gate, os.O_WRONLY|syscall.O_NONBLOCK, 0)
 		if err == nil {
-			_, werr := w.Write([]byte{1})
+			n, werr := w.Write([]byte{1})
 			cerr := w.Close()
-			if werr != nil || cerr != nil {
-				t.Fatal(werr, cerr)
+			if n != 1 || werr != nil || cerr != nil {
+				t.Fatalf("write gate: wrote %d bytes, write error %v, close error %v", n, werr, cerr)
 			}
 			break
 		}

@@ -850,7 +850,7 @@ func TestRepairSalvagesFromAnOlderSchema(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(migrations[0]); err != nil {
+	if _, err := db.Exec(migrations[0].sql); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.Exec(`PRAGMA user_version = 1`); err != nil {
