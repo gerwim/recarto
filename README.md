@@ -480,9 +480,9 @@ Measure-Command { recarto recall "auth flow" }
   unused worktrees. An invalid value keeps them too, while deleted worktrees are
   still dropped; `recarto doctor` and `recarto compact` report it. Memories, bugs and todos stay. The next session or graph query in
   that worktree indexes it again. Session start and `recarto compact` drop them;
-  `recarto compact --dry-run` lists what it would drop, and `--vacuum` returns the
-  freed space to the OS. `recarto status` shows the store's size and how many
-  worktrees it indexes.
+  `recarto compact --dry-run` lists what it would drop, and `--vacuum` compacts the
+  search indexes and returns the freed space to the OS. `recarto status` shows the
+  store's size and how many worktrees it indexes.
 - **Languages:** Go, C#, TypeScript (+TSX), JavaScript (+JSX), Rust, Python via tree-sitter.
 
 ## If the store gets corrupted
