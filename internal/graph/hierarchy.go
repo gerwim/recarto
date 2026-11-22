@@ -57,10 +57,12 @@ SELECT DISTINCT COALESCE(dn.id, ''), COALESCE(dn.name, e.dst_name),
   LEFT JOIN nodes dn ON dn.id = e.dst_node_id
   LEFT JOIN files df ON df.id = dn.file_id
  WHERE e.kind IN ` + typeEdgeKinds + ` AND sf.worktree = ?
-    AND (sn.name = ? OR sn.qualified_name = ?)
-  ORDER BY 2, 5, 6, 7 LIMIT ?`
+   AND (sn.name = ? OR sn.qualified_name = ?)
+ ORDER BY 2, 5, 6, 7 LIMIT ?`
 	} else {
-		// Subtypes/implementers of the named type match by resolved node or name.
+		// Every subtype is labelled "implements", whichever edge kind links it:
+		// C# records interface implementations as `extends` too, and one label
+		// lets DISTINCT list a class linked by both kinds once.
 		sql = `
 SELECT DISTINCT n.id, n.name, n.qualified_name, n.kind, f.path, n.start_line, 'implements'
   FROM edges e
