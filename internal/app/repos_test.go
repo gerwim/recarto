@@ -1,12 +1,14 @@
 package app
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 // initGitRepo creates a real, minimal git repo with one committed file.
@@ -154,6 +156,82 @@ func TestOpenDecidesCodelessOnlyWhenRequested(t *testing.T) {
 		t.Fatal("explicit false code-less decision was ignored")
 	}
 	_ = a.Close()
+}
+
+func setCodeCheckDeadline(t *testing.T, f func(context.Context) (context.Context, context.CancelFunc)) {
+	t.Helper()
+	old := codeCheckDeadline
+	codeCheckDeadline = f
+	t.Cleanup(func() { codeCheckDeadline = old })
+}
+
+func TestCodelessNowCountsACheckCutShortAsCode(t *testing.T) {
+	t.Setenv("RECARTO_CACHE_DIR", t.TempDir())
+	t.Setenv("RECARTO_REPOS", "")
+	t.Setenv("RECARTO_WORKSPACE", "")
+	t.Setenv("RECARTO_SYNC_URL", "")
+	t.Setenv("RECARTO_SYNC_KEY", "")
+	cfg := Config{CWD: t.TempDir(), DecideCodeless: true}
+
+	t.Run("finished", func(t *testing.T) {
+		setCodeCheckDeadline(t, func(ctx context.Context) (context.Context, context.CancelFunc) {
+			return context.WithTimeout(ctx, time.Minute)
+		})
+		codeless, err := CodelessNow(context.Background(), cfg)
+		if err != nil || !codeless {
+			t.Fatalf("CodelessNow() = (%v, %v), want (true, nil)", codeless, err)
+		}
+	})
+	t.Run("cut short", func(t *testing.T) {
+		setCodeCheckDeadline(t, func(ctx context.Context) (context.Context, context.CancelFunc) {
+			ctx, cancel := context.WithCancel(ctx)
+			cancel()
+			return ctx, cancel
+		})
+		codeless, err := CodelessNow(context.Background(), cfg)
+		if err != nil || codeless {
+			t.Fatalf("CodelessNow() = (%v, %v), want (false, nil)", codeless, err)
+		}
+	})
+}
+
+func TestCodeLessWithinDoesNotWaitForACheckCutShort(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	finished := make(chan struct{})
+	t.Cleanup(func() {
+		close(release)
+		select {
+		case <-finished:
+		case <-time.After(time.Minute):
+			t.Error("check did not finish after release")
+		}
+	})
+	result := make(chan bool, 1)
+	go func() {
+		result <- codeLessWithin(ctx, func(context.Context) bool {
+			defer close(finished)
+			close(started)
+			<-release
+			return true
+		})
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Minute):
+		t.Fatal("check did not start")
+	}
+	cancel()
+	select {
+	case codeless := <-result:
+		if codeless {
+			t.Fatal("cut-short check was counted as no code")
+		}
+	case <-time.After(time.Minute):
+		t.Fatal("codeLessWithin waited for the cut-short check")
+	}
 }
 
 // assertDescribeMatches checks that Describe(cfg) offers what the App opened

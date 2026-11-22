@@ -597,7 +597,7 @@ for the cross-repo store that belongs to no single repo.
 
 When `recarto serve` starts in a folder outside git that holds no file Recarto indexes, and `RECARTO_REPOS` serves at least one repo, `record_memory` and `record_bug` called without `repo` store into a served repo, not the folder's own store.
 
-- The server decides this once, when it starts. Files added to or removed from the folder later change nothing until the next start.
+- The server decides this once, when it starts, and looks for such a file for at most 2 seconds, as session start does. A folder it has not finished checking by then counts as holding code. Files added to or removed from the folder later change nothing until the next start.
 - **One repo:** the memory goes to it. With `supersedes_id`, that repo's store must hold the memory it replaces; otherwise nothing is stored.
 - **Several repos:** the anchors choose the repo.
   - A file anchor is in the repos that own a real file at that path. An absolute path is taken as given; a relative one is tried under each repo's root. Symlinks are followed, and a file belongs to the innermost served repo that contains it.
