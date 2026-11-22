@@ -18,8 +18,7 @@ type anchors struct {
 	bug        bool
 }
 
-// route is the served repo a write goes to, with the file anchors to store
-// (resolved against its worktree by memory.RelFileRef).
+// route is the served repo a write goes to, with its file anchors as paths relative to that repo.
 type route struct {
 	rc    *app.RepoContext
 	files []string
@@ -97,7 +96,7 @@ func routeWrite(ctx context.Context, a *app.App, w anchors) (route, error) {
 	otherAnchors := append(append([]resolvedAnchor(nil), fileAnchors...), symbolAnchors...)
 	other := settledRepo(repos, otherAnchors, states)
 	if w.supersedes != "" && !anyHeld(held) {
-		return route{}, refuseNoHolder(ctx, a, w, held, other)
+		return route{}, refuseNoHolder(ctx, a, w, held, other, nil)
 	}
 	return selectRoute(a, w, repos, held, states, fileAnchors, symbolAnchors, other)
 }
@@ -118,14 +117,33 @@ func repoHolders(ctx context.Context, repos []*app.RepoContext, id string) ([]bo
 }
 
 func routeSingleRepo(ctx context.Context, a *app.App, w anchors, rc *app.RepoContext, held []bool) (route, error) {
-	if w.supersedes != "" && !held[0] {
-		return route{}, refuseNoHolder(ctx, a, w, held, rc)
+	fileAnchors, _ := resolveAnchors([]*app.RepoContext{rc}, w.files, nil, nil, nil)
+	var missing []string
+	seen := make(map[string]bool)
+	for _, anchor := range fileAnchors {
+		if len(anchor.files) == 0 && !seen[anchor.value] {
+			seen[anchor.value] = true
+			missing = append(missing, anchor.value)
+		}
 	}
 	var other *app.RepoContext
-	if w.supersedes != "" {
+	if w.supersedes != "" && len(missing) == 0 {
 		other = rc
 	}
-	return route{rc: rc, files: w.files, held: heldOrNil(w, held), other: other}, nil
+	var fileLines []string
+	if len(missing) > 0 {
+		for _, value := range missing {
+			fileLines = append(fileLines, fmt.Sprintf("Not stored: %s names no file in %s.", value, repoLabel(a, rc)))
+		}
+		fileLines = append(fileLines, "Pass each file as a path relative to the repo's root or as an absolute path.")
+	}
+	if w.supersedes != "" && !held[0] {
+		return route{}, refuseNoHolder(ctx, a, w, held, other, fileLines)
+	}
+	if len(missing) > 0 {
+		return route{}, refuse(append(fileLines, nextSteps(a, w, heldOrNil(w, held), other, false, false)...)...)
+	}
+	return route{rc: rc, files: storedFiles(fileAnchors, rc), held: heldOrNil(w, held), other: other}, nil
 }
 
 func readIndexes(ctx context.Context, a *app.App, repos []*app.RepoContext, symbols []string) ([]repoIndex, [][]bool, error) {
@@ -202,22 +220,28 @@ func selectRoute(a *app.App, w anchors, repos []*app.RepoContext, held []bool, s
 		return route{}, refuse(lines...)
 	}
 
+	var routedOther *app.RepoContext
+	if w.supersedes != "" {
+		routedOther = other
+	}
+	return route{rc: repos[r], files: storedFiles(fileAnchors, repos[r]), held: heldOrNil(w, held), other: routedOther}, nil
+}
+
+// storedFiles returns the paths relative to rc of the files the anchors name
+// in rc, each once, in anchor order.
+func storedFiles(fileAnchors []resolvedAnchor, rc *app.RepoContext) []string {
 	rels := make([]string, 0, len(fileAnchors))
 	seen := make(map[string]bool)
 	for _, anchor := range fileAnchors {
 		for _, candidate := range anchor.files {
-			if candidate.Repo == repos[r] && !seen[candidate.Rel] {
+			if candidate.Repo == rc && !seen[candidate.Rel] {
 				seen[candidate.Rel] = true
 				rels = append(rels, candidate.Rel)
 				break
 			}
 		}
 	}
-	var routedOther *app.RepoContext
-	if w.supersedes != "" {
-		routedOther = other
-	}
-	return route{rc: repos[r], files: rels, held: heldOrNil(w, held), other: routedOther}, nil
+	return rels
 }
 
 func heldOrNil(w anchors, held []bool) []bool {
@@ -337,7 +361,7 @@ func anyHeld(values []bool) bool {
 	return false
 }
 
-func refuseNoHolder(ctx context.Context, a *app.App, w anchors, held []bool, other *app.RepoContext) error {
+func refuseNoHolder(ctx context.Context, a *app.App, w anchors, held []bool, other *app.RepoContext, fileLines []string) error {
 	inFolder, inWorkspace := false, false
 	rec, err := a.Engine.GetByID(ctx, w.supersedes)
 	if err != nil {
@@ -359,6 +383,7 @@ func refuseNoHolder(ctx context.Context, a *app.App, w anchors, held []bool, oth
 		line += "; it is in the workspace store"
 	}
 	lines := []string{line + "."}
+	lines = append(lines, fileLines...)
 	lines = append(lines, nextSteps(a, w, held, other, inFolder, inWorkspace)...)
 	return refuse(lines...)
 }
