@@ -625,6 +625,10 @@ is indexed and `search_content` searches the folder.
     `find_annotated`, `get_architecture` and `get_graph_delta` cover every repo,
     label entries, and split result limits evenly. A hint names `repo` to narrow a
     capped result; architecture and delta replies have one section per repo.
+  - `search_graph` lists exact matches first: entries whose name or qualified name
+    equals the query or one of the `candidate_symbols`, in the same case. The other
+    entries follow. In each group the repos take turns, one entry at a time, in
+    `RECARTO_REPOS` order.
   - `find_references`, `trace_call_path` and `get_code_snippet` answer from the one
     repo with the symbol, or list the repos to pick if several have it. If none
     do, `find_references` returns text hits from every repo, `trace_call_path`
