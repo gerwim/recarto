@@ -95,6 +95,9 @@ func TestCompactPrunesDeadWorktreesAndVacuums(t *testing.T) {
 	if !strings.Contains(out.String(), "vacuum") {
 		t.Errorf("output %q should report the vacuum", out.String())
 	}
+	if !strings.Contains(out.String(), "fts optimized: ") {
+		t.Errorf("output %q should report the FTS optimize", out.String())
+	}
 }
 
 // TestCompactDryRunDoesNotPrune: --dry-run must not delete anything.
