@@ -273,18 +273,58 @@ func OpenContext(ctx context.Context, cfg Config) (*App, error) {
 	return a, nil
 }
 
-// CodelessNow returns the decision an App opened with cfg makes: false unless
-// cfg.DecideCodeless; else whether cfg's folder is outside git and holds no
-// file an index would take in now.
+// CodeCheckWait is how long a check whether a session folder holds code may
+// run, at a server's start and at a session start, so a folder of many files
+// holds up neither. A check cut short counts as holding code (CodeLess).
+const CodeCheckWait = 2 * time.Second
+
+// codeCheckDeadline is the deadline of CodelessNow's check of a folder outside
+// git. A var so a test can end the check at a moment it picks.
+var codeCheckDeadline = func(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(ctx, CodeCheckWait)
+}
+
+// CodelessNow returns the decision a server makes before it answers the
+// handshake: false unless cfg.DecideCodeless; else whether cfg's folder is
+// outside git and its check, which runs at most CodeCheckWait, finds no file an
+// index would take in.
 func CodelessNow(ctx context.Context, cfg Config) (bool, error) {
 	if !cfg.DecideCodeless {
 		return false, nil
 	}
 	_, gc, _, err := resolvePrimary(cfg)
-	if err != nil {
+	if err != nil || !gc.NonGit {
 		return false, err
 	}
-	return CodeLess(ctx, gc), nil
+	dctx, cancel := codeCheckDeadline(ctx)
+	defer cancel()
+	return codeLessWithin(dctx, func(ctx context.Context) bool { return CodeLess(ctx, gc) }), nil
+}
+
+// codeLessWithin returns check's answer if the check gives it before ctx ends,
+// else false: a check cut short proves nothing (CodeLess), and the caller must
+// not wait for a directory read the check is still in.
+func codeLessWithin(ctx context.Context, check func(context.Context) bool) bool {
+	got := make(chan bool, 1)
+	go func() {
+		// A walk can end after ctx without another entry to notice it: its
+		// answer then comes from a check cut short.
+		got <- check(ctx) && ctx.Err() == nil
+	}()
+	select {
+	case codeless := <-got:
+		return codeless
+	case <-ctx.Done():
+		// An answer already given still counts; the worker sent false if it
+		// was given late. got is buffered, so a walk still running finishes
+		// without a reader.
+		select {
+		case codeless := <-got:
+			return codeless
+		default:
+			return false
+		}
+	}
 }
 
 // CodeLess reports whether gc is outside git and holds no file an index would
