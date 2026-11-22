@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gerwim/recarto/internal/agents"
 	"github.com/gerwim/recarto/internal/app"
 	"github.com/gerwim/recarto/internal/graph"
 	"github.com/gerwim/recarto/internal/memory"
@@ -134,6 +135,16 @@ func getRawRecord(t *testing.T, eng *memory.Engine, id string) *memory.Record {
 	return rec
 }
 
+func fileRefs(rec *memory.Record) []string {
+	var refs []string
+	for _, ref := range rec.Refs {
+		if ref.Type == memory.RefFile {
+			refs = append(refs, ref.Value)
+		}
+	}
+	return refs
+}
+
 func TestRouteWriteTwoIndexedRepos(t *testing.T) {
 	folder, recarto, second := routeRepos(t)
 	a := codelessApp(t, folder, recarto, second)
@@ -166,13 +177,7 @@ func TestRouteWriteTwoIndexedRepos(t *testing.T) {
 			if rec == nil {
 				t.Fatal("memory was not stored in the selected repo")
 			}
-			var refs []string
-			for _, ref := range rec.Refs {
-				if ref.Type == memory.RefFile {
-					refs = append(refs, ref.Value)
-				}
-			}
-			if fmt.Sprint(refs) != fmt.Sprint(tc.refs) {
+			if refs := fileRefs(rec); fmt.Sprint(refs) != fmt.Sprint(tc.refs) {
 				t.Fatalf("file refs = %v, want %v", refs, tc.refs)
 			}
 		})
@@ -783,6 +788,231 @@ func TestCodeLessWriteRoutesOneServedRepo(t *testing.T) {
 	if err != nil || out.Repo != "recarto" || out.Superseded != oldID || getRawRecord(t, a.Repos[0].Engine, oldID).Status != "superseded" {
 		t.Fatalf("one-repo replacement = %+v, %v", out, err)
 	}
+}
+
+func TestCodeLessOneServedRepoResolvesFileAnchors(t *testing.T) {
+	folder, recarto, second := routeRepos(t)
+	a := codelessApp(t, folder, recarto)
+	if err := os.Symlink(recarto, filepath.Join(folder, "link")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	warm := filepath.Join(recarto, "internal", "cli", "warm.go")
+	pathLine := "Pass each file as a path relative to the repo's root or as an absolute path."
+
+	forms := []string{
+		"internal/cli/warm.go",
+		warm,
+		"./internal/cli/warm.go",
+		"../recarto/internal/cli/warm.go",
+		filepath.Join(folder, "link", "internal", "cli", "warm.go"),
+	}
+	bugMessages := []string{
+		"copper telescope anchor regression",
+		"violet sandcastle path failure",
+		"granite orchard symlink mismatch",
+		"silver kettle relative anchor defect",
+		"velvet compass absolute path failure",
+	}
+	for i, form := range forms {
+		t.Run(fmt.Sprintf("stored form %d", i+1), func(t *testing.T) {
+			title := fmt.Sprintf("one repo anchor memory %d", i+1)
+			out, err := recordMemory(context.Background(), a, RecordMemoryInput{
+				Kind: "learning", Title: title, Body: routeBody(600 + i), Files: []string{form},
+			})
+			if err != nil || out.Repo != "recarto" {
+				t.Fatalf("record_memory(%q) = %+v, %v", form, out, err)
+			}
+			rec := assertOnlyStored(t, a, out.ID, a.Repos[0])
+			if rec == nil {
+				t.Fatal("record_memory was not stored in the served repo")
+			}
+			if got := fileRefs(rec); fmt.Sprint(got) != fmt.Sprint([]string{"internal/cli/warm.go"}) {
+				t.Fatalf("record_memory refs for %q = %v", form, got)
+			}
+
+			bugMessage := bugMessages[i]
+			bug, err := recordBug(context.Background(), a, RecordBugInput{ErrorMessage: bugMessage, File: form})
+			if err != nil || bug.Repo != "recarto" {
+				t.Fatalf("record_bug(%q) = %+v, %v", form, bug, err)
+			}
+			bugRec := assertOnlyStored(t, a, bug.ID, a.Repos[0])
+			if bugRec == nil {
+				t.Fatal("record_bug was not stored in the served repo")
+			}
+			if got := fileRefs(bugRec); fmt.Sprint(got) != fmt.Sprint([]string{"internal/cli/warm.go"}) {
+				t.Fatalf("record_bug refs for %q = %v", form, got)
+			}
+
+			res, err := agents.Handle(context.Background(), a, agents.Event{Kind: agents.KindPostRead, FilePath: warm})
+			if err != nil || !strings.Contains(res.Context, title) || !strings.Contains(res.Context, bugMessage) {
+				t.Fatalf("Read after recording %q = %q, %v", form, res.Context, err)
+			}
+		})
+	}
+
+	checkRefusal := func(t *testing.T, err error, form string, bug bool) {
+		t.Helper()
+		if err == nil {
+			t.Fatal("write unexpectedly stored")
+		}
+		for _, want := range []string{
+			"Not stored: " + form + " names no file in recarto.",
+			pathLine,
+			"Pass repo as one of: \"recarto\".",
+		} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("refusal %q does not contain %q", err, want)
+			}
+		}
+		if bug && strings.Contains(err.Error(), "workspace") {
+			t.Errorf("bug refusal mentions workspace: %q", err)
+		}
+		if !bug && !strings.Contains(err.Error(), "scope: \"workspace\"") {
+			t.Errorf("memory refusal omits workspace option: %q", err)
+		}
+	}
+
+	refused := []struct {
+		name string
+		form string
+	}{
+		{name: "scratch-relative", form: "link/internal/cli/warm.go"},
+		{name: "parent-relative", form: "recarto/internal/cli/warm.go"},
+		{name: "missing", form: "internal/cli/nosuch.go"},
+		{name: "outside-repo", form: filepath.Join(second, "store", "filelock.go")},
+	}
+	for i, tc := range refused {
+		t.Run("refused memory "+tc.name, func(t *testing.T) {
+			before := totalMemoryRows(t, a)
+			_, err := recordMemory(context.Background(), a, RecordMemoryInput{
+				Kind: "learning", Title: fmt.Sprintf("refused memory %d", i), Body: routeBody(700 + i), Files: []string{tc.form},
+			})
+			checkRefusal(t, err, tc.form, false)
+			if got := totalMemoryRows(t, a); got != before {
+				t.Fatalf("refusal stored a memory: rows %d, want %d", got, before)
+			}
+		})
+		t.Run("refused bug "+tc.name, func(t *testing.T) {
+			before := totalMemoryRows(t, a)
+			_, err := recordBug(context.Background(), a, RecordBugInput{
+				ErrorMessage: fmt.Sprintf("refused bug %d", i), File: tc.form,
+			})
+			checkRefusal(t, err, tc.form, true)
+			if got := totalMemoryRows(t, a); got != before {
+				t.Fatalf("refusal stored a bug: rows %d, want %d", got, before)
+			}
+		})
+	}
+
+	t.Run("one bad anchor refuses all", func(t *testing.T) {
+		before := totalMemoryRows(t, a)
+		_, err := recordMemory(context.Background(), a, RecordMemoryInput{
+			Kind: "learning", Title: "one bad anchor", Body: routeBody(750),
+			Files: []string{"internal/cli/warm.go", "link/internal/cli/warm.go"},
+		})
+		if err == nil || !strings.Contains(err.Error(), "Not stored: link/internal/cli/warm.go names no file in recarto.") ||
+			!strings.Contains(err.Error(), pathLine) || strings.Contains(err.Error(), "Not stored: internal/cli/warm.go") {
+			t.Fatalf("multiple-anchor refusal = %v", err)
+		}
+		if got := totalMemoryRows(t, a); got != before {
+			t.Fatalf("refusal stored a memory: rows %d, want %d", got, before)
+		}
+	})
+
+	t.Run("held supersede with bad anchor", func(t *testing.T) {
+		heldID := recordRawLearning(t, a.Repos[0].Engine, "one repo held memory for invalid anchor")
+		before := totalMemoryRows(t, a)
+		_, err := recordMemory(context.Background(), a, RecordMemoryInput{
+			Kind: "learning", Body: routeBody(760), Files: []string{"link/internal/cli/warm.go"}, SupersedesID: heldID,
+		})
+		if err == nil || !strings.Contains(err.Error(), "Not stored: link/internal/cli/warm.go names no file in recarto.") || !strings.Contains(err.Error(), pathLine) {
+			t.Fatalf("held supersede refusal = %v", err)
+		}
+		if rec := getRawRecord(t, a.Repos[0].Engine, heldID); rec.Status != "active" {
+			t.Fatalf("held memory status = %q, want active", rec.Status)
+		}
+		if got := totalMemoryRows(t, a); got != before {
+			t.Fatalf("refusal changed memory rows: got %d, want %d", got, before)
+		}
+	})
+
+	t.Run("unknown supersede with bad anchor", func(t *testing.T) {
+		before := totalMemoryRows(t, a)
+		_, err := recordMemory(context.Background(), a, RecordMemoryInput{
+			Kind: "learning", Body: routeBody(761), Files: []string{"link/internal/cli/warm.go"}, SupersedesID: "unknown-memory-id",
+		})
+		if err == nil {
+			t.Fatal("write unexpectedly stored")
+		}
+		for _, want := range []string{
+			"no served repo's store holds memory unknown-memory-id",
+			"Not stored: link/internal/cli/warm.go names no file in recarto.",
+			pathLine,
+			"record again without supersedes_id",
+		} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("refusal %q does not contain %q", err, want)
+			}
+		}
+		if strings.Contains(err.Error(), `in "recarto" without replacing`) {
+			t.Errorf("refusal offers an invalid repo retry: %q", err)
+		}
+		if got := totalMemoryRows(t, a); got != before {
+			t.Fatalf("refusal changed memory rows: got %d, want %d", got, before)
+		}
+	})
+
+	t.Run("unknown supersede with valid anchor", func(t *testing.T) {
+		before := totalMemoryRows(t, a)
+		_, err := recordMemory(context.Background(), a, RecordMemoryInput{
+			Kind: "learning", Body: routeBody(762), Files: []string{"./internal/cli/warm.go"}, SupersedesID: "unknown-memory-id",
+		})
+		if err == nil || !strings.Contains(err.Error(), "no served repo's store holds memory unknown-memory-id") ||
+			!strings.Contains(err.Error(), `To store the memory in "recarto" without replacing anything, record again without supersedes_id.`) ||
+			strings.Contains(err.Error(), "names no file") {
+			t.Fatalf("unknown supersede refusal = %v", err)
+		}
+		if got := totalMemoryRows(t, a); got != before {
+			t.Fatalf("refusal changed memory rows: got %d, want %d", got, before)
+		}
+	})
+
+	t.Run("explicit repo and workspace writes stay unchanged", func(t *testing.T) {
+		explicit, err := recordMemory(context.Background(), a, RecordMemoryInput{
+			Kind: "learning", Body: routeBody(770), Repo: "recarto", Files: []string{"link/internal/cli/warm.go"},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		rec := assertOnlyStored(t, a, explicit.ID, a.Repos[0])
+		if rec == nil {
+			t.Fatal("explicit memory was not stored in the served repo")
+		}
+		if got := fileRefs(rec); fmt.Sprint(got) != fmt.Sprint([]string{"link/internal/cli/warm.go"}) {
+			t.Fatalf("explicit repo refs = %v", got)
+		}
+
+		explicitBug, err := recordBug(context.Background(), a, RecordBugInput{
+			ErrorMessage: "explicit repo missing file stays as written", Repo: "recarto", File: "internal/cli/nosuch.go",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		rec = assertOnlyStored(t, a, explicitBug.ID, a.Repos[0])
+		if rec == nil {
+			t.Fatal("explicit bug was not stored in the served repo")
+		}
+		if got := fileRefs(rec); fmt.Sprint(got) != fmt.Sprint([]string{"internal/cli/nosuch.go"}) {
+			t.Fatalf("explicit bug refs = %v", got)
+		}
+
+		workspace, err := recordMemory(context.Background(), a, RecordMemoryInput{
+			Kind: "learning", Body: routeBody(771), Scope: scopeWorkspace, Files: []string{"./internal/cli/warm.go"},
+		})
+		if err != nil || getRawRecord(t, a.Workspace.Engine, workspace.ID) == nil {
+			t.Fatalf("workspace write = %+v, %v", workspace, err)
+		}
+	})
 }
 
 func TestGitSessionWritesRemainInThePrimaryRepo(t *testing.T) {
