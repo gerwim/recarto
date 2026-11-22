@@ -83,7 +83,7 @@ func isPin(r memory.RecallResult) bool {
 // memoryTexts returns r's line as a pin, in full, as the full gate measures it,
 // and as a title, labelled with label.
 func memoryTexts(r memory.RecallResult, label string) (pin, full, gate, title string) {
-	prefix := fmt.Sprintf("- [%s, %s] %s\n", r.Record.Kind, label, noteTitle(r.Record))
+	prefix := fmt.Sprintf("- [%s, %s] %s\n", r.Record.Kind, label, headingTitle(r.Record))
 	caveat := ""
 	if c := r.Caveat(); c != "" {
 		caveat = "  " + c + "\n"

@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gerwim/recarto/internal/features"
 	"github.com/gerwim/recarto/internal/graph"
@@ -193,7 +194,7 @@ func formatMemories(results []memory.RecallResult, budget int) (string, []string
 	}
 	used := 0
 	for _, r := range results {
-		title := noteTitle(r.Record)
+		title := headingTitle(r.Record)
 		if r.Record.Kind == memory.KindDoNotRepeat && r.Record.Pinned {
 			line := fmt.Sprintf("- [%s] %s\n  %s\n", r.Record.Kind, title, r.Record.Body)
 			b.WriteString(line)
@@ -245,7 +246,7 @@ func formatWorkspaceMemories(name string, rs []memory.RecallResult) (string, []s
 	var emitted []string
 	fmt.Fprintf(&b, "\nWorkspace memory (%s, shared across repos):\n", name)
 	for _, r := range rs {
-		title := noteTitle(r.Record)
+		title := headingTitle(r.Record)
 		fmt.Fprintf(&b, "- [%s] %s\n  %s\n", r.Record.Kind, title, trimOneLine(r.Record.Body))
 		emitted = append(emitted, r.Record.ID)
 	}
@@ -321,12 +322,35 @@ func clip(s string, max int) string {
 	return s
 }
 
-// noteTitle is r's title as one-line notes and lists show it.
-func noteTitle(r *memory.Record) string {
+// headingTitle is r's title as a heading over its separately shown body.
+func headingTitle(r *memory.Record) string {
 	if t := clip(r.Title, titleMax); t != "" {
 		return t
 	}
 	return "(untitled)"
+}
+
+// noteTitle is r's title as one-line notes and lists show it. An untitled
+// memory shows the start of its body, since the note shows nothing else of it.
+func noteTitle(r *memory.Record) string {
+	if strings.TrimSpace(r.Title) == "" {
+		if s := bodyStart(r.Body); s != "" {
+			return s
+		}
+	}
+	return headingTitle(r)
+}
+
+// bodyStart is the first line of body, clipped like a title, with "…" when
+// the body has more lines.
+func bodyStart(body string) string {
+	line, more, _ := strings.Cut(strings.TrimSpace(body), "\n")
+	s := clip(line, titleMax)
+	// A first line longer than titleMax already ends in clip's "…"; one mark is enough.
+	if more != "" && utf8.RuneCountInString(s) <= titleMax {
+		s += "…"
+	}
+	return s
 }
 
 // nullable maps "" to a SQL NULL so repo-global rows store NULL, not "".
