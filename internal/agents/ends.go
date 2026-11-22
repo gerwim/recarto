@@ -3,6 +3,7 @@ package agents
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -17,10 +18,10 @@ import (
 	"github.com/gerwim/recarto/internal/store"
 )
 
-// endRecord is one of the files that keep a conversation's pending session
-// ends without a store lock: F and D are in the shared cache directory, and M
-// is beside the repo store. D also carries the repo's chosen end time so it can
-// be recovered if publication stops before M.
+// endRecord stores F (the conversation end), L (the one warm launch claim), R
+// (a lock-free request with no launch right), D (repo-end discovery), or M (a
+// repo's chosen end time). D carries its time so interrupted publication is
+// still recoverable.
 type endRecord struct {
 	Session  string   `json:"session"`
 	Folder   string   `json:"folder,omitempty"`
@@ -50,6 +51,16 @@ func requestEndName(folder, sessionID string) string {
 	return folderEndName(folder, sessionID) + "-request"
 }
 
+func launchEndName(folder, sessionID string) string {
+	return folderEndName(folder, sessionID) + "-launch"
+}
+
+// endClaimsLockPath serializes publication and removal of F and L in a folder,
+// so each claim decision reads the current folder row and records.
+func endClaimsLockPath(st *store.Store) string {
+	return filepath.Join(filepath.Dir(st.Path()), "end-claims.lock")
+}
+
 func entryName(folder, sessionID, worktree string) string {
 	h := sha256.Sum256([]byte(worktree))
 	return folderEndName(folder, sessionID) + "-" + hex.EncodeToString(h[:])
@@ -63,16 +74,9 @@ func coveredWorktrees(covered []coveredRepo) []string {
 	return worktrees
 }
 
-// acquireEndLock takes all given repos' coordination locks in lock-path order,
-// all or none, waiting until ctx ends or not at all when try is true. It is a
-// var so tests can step lock acquisition.
-var acquireEndLock = func(ctx context.Context, covered []coveredRepo, try bool) (release func(), ok bool, err error) {
-	paths := make([]string, 0, len(covered))
-	for _, c := range covered {
-		paths = append(paths, graph.PendingEndsLockPath(c.Store))
-	}
-	slices.Sort(paths)
-	paths = slices.Compact(paths)
+// lockFiles takes locks in the given order, all or none, waiting until ctx ends
+// or not at all when try is true.
+func lockFiles(ctx context.Context, paths []string, try bool) (release func(), ok bool, err error) {
 	var releases []func()
 	unlock := func() {
 		for i := len(releases) - 1; i >= 0; i-- {
@@ -82,8 +86,13 @@ var acquireEndLock = func(ctx context.Context, covered []coveredRepo, try bool) 
 	for _, path := range paths {
 		var release func()
 		var got bool
-		if try {
+		if try || ctx.Err() != nil {
+			// A deadline that has passed gets one try: LockFile would leave a
+			// waiter that can briefly hold the lock after its holder releases it.
 			release, got, err = store.TryLockFile(path)
+			if !got && err == nil && !try {
+				err = ctx.Err()
+			}
 		} else {
 			release, err = store.LockFile(ctx, path, nil)
 			got = err == nil
@@ -95,6 +104,19 @@ var acquireEndLock = func(ctx context.Context, covered []coveredRepo, try bool) 
 		releases = append(releases, release)
 	}
 	return unlock, true, nil
+}
+
+// acquireEndLock takes all given repos' coordination locks in lock-path order,
+// all or none, waiting until ctx ends or not at all when try is true. It is a
+// var so tests can step lock acquisition.
+var acquireEndLock = func(ctx context.Context, covered []coveredRepo, try bool) (release func(), ok bool, err error) {
+	paths := make([]string, 0, len(covered))
+	for _, c := range covered {
+		paths = append(paths, graph.PendingEndsLockPath(c.Store))
+	}
+	slices.Sort(paths)
+	paths = slices.Compact(paths)
+	return lockFiles(ctx, paths, try)
 }
 
 // claimEnd publishes rec as dir/name unless it exists, and returns the record
@@ -181,7 +203,7 @@ func removeEnd(dir, name string) error {
 // conversationEnd is what endConversation did.
 type conversationEnd struct {
 	at      int64
-	first   bool // the request or F this call published is the single launch claim
+	first   bool // this call published the conversation's launch claim L
 	pending bool
 }
 
@@ -193,6 +215,7 @@ type repoEnd struct {
 type endChoice struct {
 	f       endRecord
 	fok     bool
+	ended   sql.NullInt64
 	at      int64
 	first   bool
 	pending bool
@@ -200,8 +223,17 @@ type endChoice struct {
 	errs    []error
 }
 
-func removeMissingFolderEnds(dir, fid, sessionID, fname, rname string) []error {
-	errs := []error{removeEnd(dir, fname), removeEnd(dir, rname)}
+type endClaim struct {
+	locked bool
+	ended  sql.NullInt64
+	f      endRecord
+	fok    bool
+	first  bool
+	now    int64
+}
+
+func removeMissingFolderEnds(dir, fid, sessionID, fname, lname, rname string) []error {
+	errs := []error{removeEnd(dir, fname), removeEnd(dir, lname), removeEnd(dir, rname)}
 	entries, err := listEnds(dir)
 	if err != nil {
 		errs = append(errs, err)
@@ -298,7 +330,64 @@ func publishRepoEnds(sessionID, fdir, fid string, ends []repoEnd) ([]repoEnd, []
 	return published, errs
 }
 
-func chooseEndTimes(lockCtx context.Context, a *app.App, sessionID, fdir, fid, fname, rname string, covered, unset []coveredRepo, f endRecord, fok, rok, claimF, stop, tryLock bool) endChoice {
+// claimConversationEnd publishes L for the first Stop and F once a writer with
+// the required repo locks has a time to record. The claims lock makes each
+// decision use current row/F/L/R state and prevents cleanup from reopening a
+// launch claim after the row has ended.
+func claimConversationEnd(ctx, lockCtx context.Context, a *app.App, sessionID, fdir, fid string, covered []coveredRepo, stop, choose, tryLock bool) (endClaim, []error) {
+	release, ok, err := lockFiles(lockCtx, []string{endClaimsLockPath(a.Store)}, tryLock)
+	if err != nil || !ok {
+		if err != nil {
+			return endClaim{}, []error{err}
+		}
+		return endClaim{}, nil
+	}
+	defer release()
+
+	f, fok, err := readEnd(fdir, folderEndName(fid, sessionID))
+	if err != nil {
+		return endClaim{}, []error{err}
+	}
+	row, found, err := folderSession(ctx, a.Store, sessionID)
+	if err != nil {
+		return endClaim{}, []error{err}
+	}
+	c := endClaim{locked: true, ended: row.ended, f: f, fok: fok}
+	if !found || row.ended.Valid || fok {
+		return c, nil
+	}
+	_, lok, err := readEnd(fdir, launchEndName(fid, sessionID))
+	if err != nil {
+		return endClaim{}, []error{err}
+	}
+	_, rok, err := readEnd(fdir, requestEndName(fid, sessionID))
+	if err != nil {
+		return endClaim{}, []error{err}
+	}
+	if stop && !lok {
+		_, c.first, err = claimEnd(fdir, launchEndName(fid, sessionID), endRecord{
+			Session: sessionID, Folder: fid, Repos: coveredWorktrees(covered),
+		})
+		if err != nil {
+			return endClaim{}, []error{err}
+		}
+		lok = c.first
+	}
+	if !choose || (!lok && !rok) {
+		return c, nil
+	}
+	c.now = a.Clock.Now().UnixMilli()
+	c.f, _, err = claimEnd(fdir, folderEndName(fid, sessionID), endRecord{
+		Session: sessionID, Folder: fid, EndedAt: c.now, Repos: coveredWorktrees(covered),
+	})
+	if err != nil {
+		return c, []error{err}
+	}
+	c.fok = true
+	return c, nil
+}
+
+func chooseEndTimes(ctx, lockCtx context.Context, a *app.App, sessionID, fdir, fid string, covered, unset []coveredRepo, f endRecord, fok, claimF, stop, tryLock bool) endChoice {
 	choice := endChoice{f: f, fok: fok}
 	lockSet := []coveredRepo(nil)
 	if claimF || stop {
@@ -324,44 +413,46 @@ func chooseEndTimes(lockCtx context.Context, a *app.App, sessionID, fdir, fid, f
 		}
 		locked = ok && err == nil
 	}
-	if !ok || err != nil {
-		choice.pending = true
-		if claimF && stop && errors.Is(err, context.DeadlineExceeded) {
-			_, choice.first, err = claimEnd(fdir, rname, endRecord{Session: sessionID, Folder: fid, Repos: coveredWorktrees(covered)})
-			if err != nil {
-				choice.errs = append(choice.errs, err)
+	held := ok && err == nil
+	var own int64
+	if claimF && (held || stop) {
+		c, errs := claimConversationEnd(ctx, lockCtx, a, sessionID, fdir, fid, covered, stop, held, tryLock)
+		choice.errs = append(choice.errs, errs...)
+		if !c.locked {
+			choice.pending = true
+			if stop {
+				_, _, err := claimEnd(fdir, requestEndName(fid, sessionID), endRecord{Session: sessionID, Folder: fid})
+				if err != nil {
+					choice.errs = append(choice.errs, err)
+				}
 			}
+			return choice
 		}
+		choice.first, choice.ended = c.first, c.ended
+		if c.fok {
+			choice.f, choice.fok = c.f, true
+		} else if c.now != 0 {
+			choice.at = c.now
+		}
+		own = c.now
+	}
+	if !held {
+		choice.pending = true
 		return choice
 	}
-
-	now := a.Clock.Now().UnixMilli()
-	if claimF {
-		g, claimed, claimErr := claimEnd(fdir, fname, endRecord{
-			Session: sessionID, Folder: fid, EndedAt: now, Repos: coveredWorktrees(covered),
-		})
-		if claimErr != nil {
-			choice.errs = append(choice.errs, claimErr)
-			choice.at, choice.first, choice.fok = now, !rok, false
-		} else {
-			choice.f, choice.fok = g, true
-			choice.first = claimed && !rok
-			if rok {
-				choice.errs = append(choice.errs, removeEnd(fdir, rname))
-			}
+	if own == 0 && stop {
+		own = a.Clock.Now().UnixMilli()
+	}
+	known, fresh, errs := classifyRepoEnds(ctx, sessionID, lockSet, fdir, fid, choice.f, choice.fok)
+	choice.errs = append(choice.errs, errs...)
+	ends := known
+	if own != 0 {
+		for _, c := range fresh {
+			ends = append(ends, repoEnd{coveredRepo: c, at: own})
 		}
 	}
-	newEnds := make([]repoEnd, 0, len(lockSet))
-	for _, c := range lockSet {
-		at := now
-		if choice.fok && slices.Contains(choice.f.Repos, c.Git.Worktree) {
-			at = choice.f.EndedAt
-		}
-		newEnds = append(newEnds, repoEnd{coveredRepo: c, at: at})
-	}
-	published, publishErrs := publishRepoEnds(sessionID, fdir, fid, newEnds)
-	choice.written = published
-	choice.errs = append(choice.errs, publishErrs...)
+	choice.written, errs = publishRepoEnds(sessionID, fdir, fid, ends)
+	choice.errs = append(choice.errs, errs...)
 	if locked {
 		release()
 		locked = false
@@ -393,67 +484,102 @@ func writeRepoEnds(ctx context.Context, sessionID string, row folderRow, pending
 	return busy, errs
 }
 
-func removeFinishedFolderEnd(ctx context.Context, a *app.App, sessionID string, covered []coveredRepo, dir, fname, rname string, f endRecord) []error {
-	folder, ok, err := folderSession(ctx, a.Store, sessionID)
-	if err != nil {
-		return []error{err}
+func removeSettledClaims(ctx, lockCtx context.Context, a *app.App, sessionID string, covered []coveredRepo, fdir, fname, lname, rname string, tryLock bool) (bool, []error) {
+	_, fok, ferr := readEnd(fdir, fname)
+	_, lok, lerr := readEnd(fdir, lname)
+	_, rok, rerr := readEnd(fdir, rname)
+	if !fok && !lok && !rok && ferr == nil && lerr == nil && rerr == nil {
+		return false, nil
 	}
-	if !ok || !folder.ended.Valid {
-		return nil
+	release, ok, err := lockFiles(lockCtx, []string{endClaimsLockPath(a.Store)}, tryLock)
+	if err != nil || !ok {
+		if (!ok && err == nil) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			// The end writes already determined pending status; cleanup can wait for the next hook.
+			return false, nil
+		}
+		return false, []error{err}
+	}
+	defer release()
+
+	folder, found, err := folderSession(ctx, a.Store, sessionID)
+	if err != nil {
+		return false, []error{err}
+	}
+	if !found || !folder.ended.Valid {
+		return false, nil
+	}
+	f, fok, err := readEnd(fdir, fname)
+	if err != nil {
+		return false, []error{err}
+	}
+	errs := []error{removeEnd(fdir, lname), removeEnd(fdir, rname)}
+	if !fok {
+		return false, errs
 	}
 	for _, wt := range f.Repos {
 		i := slices.IndexFunc(covered, func(c coveredRepo) bool { return c.Git.Worktree == wt })
 		if i < 0 {
-			return nil
+			return false, errs
 		}
 		var ended bool
 		if err := covered[i].Store.DB.QueryRowContext(ctx,
 			`SELECT EXISTS(SELECT 1 FROM sessions WHERE id=? AND ended_at IS NOT NULL)`, sessionID).Scan(&ended); err != nil {
-			return []error{err}
+			return false, append(errs, err)
 		}
 		if !ended {
-			return nil
+			return false, errs
 		}
 	}
-	return []error{removeEnd(dir, fname), removeEnd(dir, rname)}
+	errs = append(errs, removeEnd(fdir, fname))
+	return false, errs
 }
 
 // endConversation writes sessionID's folder and repo session ends, inserting
 // missing repo rows. Recorded M, D and F times replay without coordination
-// locks. New times come from a.Clock only after the affected repo locks are held
-// and are published before release. Store writes use ctx; lock waits use
-// lockCtx, or do not wait when tryLock is true.
+// locks. New repo times are chosen after the affected repo locks are held and
+// published before release. F and L decisions use the claims lock; store writes
+// use ctx and lock waits use lockCtx, or do not wait when tryLock is true.
 func endConversation(ctx, lockCtx context.Context, a *app.App, sessionID string, covered []coveredRepo, stop, tryLock bool) (conversationEnd, error) {
 	var e conversationEnd
 	var errs []error
 	fdir := folderEndsDir(a.Store)
 	fid := folderID(a.Store)
 	fname := folderEndName(fid, sessionID)
+	lname := launchEndName(fid, sessionID)
 	rname := requestEndName(fid, sessionID)
-	row, found, err := folderSession(ctx, a.Store, sessionID)
-	if err != nil {
-		return e, err
-	}
-	if !found {
-		errs = append(errs, removeMissingFolderEnds(fdir, fid, sessionID, fname, rname)...)
-		return e, errors.Join(errs...)
-	}
-
+	// Records are removed only after the row is ended, so an open row read after
+	// them means no end had been settled yet.
 	f, fok, ferr := readEnd(fdir, fname)
 	if ferr != nil {
 		errs = append(errs, ferr)
 		fok = false
+	}
+	_, lok, lerr := readEnd(fdir, lname)
+	if lerr != nil {
+		errs = append(errs, lerr)
+		lok = false
 	}
 	_, rok, rerr := readEnd(fdir, rname)
 	if rerr != nil {
 		errs = append(errs, rerr)
 		rok = false
 	}
-	if rok && (row.ended.Valid || fok) {
-		errs = append(errs, removeEnd(fdir, rname))
-		rok = false
+	row, found, err := folderSession(ctx, a.Store, sessionID)
+	if err != nil {
+		return e, err
 	}
-	claimF := !row.ended.Valid && !fok && (stop || rok)
+	if !found {
+		release, ok, lockErr := lockFiles(lockCtx, []string{endClaimsLockPath(a.Store)}, tryLock)
+		if lockErr != nil {
+			errs = append(errs, lockErr)
+		}
+		if ok && lockErr == nil {
+			errs = append(errs, removeMissingFolderEnds(fdir, fid, sessionID, fname, lname, rname)...)
+			release()
+		}
+		return e, errors.Join(errs...)
+	}
+	claimF := !row.ended.Valid && !fok && (stop || lok || rok)
 	if !row.ended.Valid && !fok && !claimF {
 		return e, errors.Join(errs...)
 	}
@@ -462,11 +588,14 @@ func endConversation(ctx, lockCtx context.Context, a *app.App, sessionID string,
 	errs = append(errs, classifyErrs...)
 	written, publishErrs := publishRepoEnds(sessionID, fdir, fid, known)
 	errs = append(errs, publishErrs...)
-	choice := chooseEndTimes(lockCtx, a, sessionID, fdir, fid, fname, rname, covered, unset, f, fok, rok, claimF, stop, tryLock)
+	choice := chooseEndTimes(ctx, lockCtx, a, sessionID, fdir, fid, covered, unset, f, fok, claimF, stop, tryLock)
 	f, fok = choice.f, choice.fok
 	e.at, e.first, e.pending = choice.at, choice.first, choice.pending
 	written = append(written, choice.written...)
 	errs = append(errs, choice.errs...)
+	if choice.ended.Valid {
+		row.ended = choice.ended
+	}
 
 	if row.ended.Valid {
 		e.at = row.ended.Int64
@@ -489,9 +618,9 @@ func endConversation(ctx, lockCtx context.Context, a *app.App, sessionID string,
 	e.pending = e.pending || repoBusy
 	errs = append(errs, repoErrs...)
 
-	if fok {
-		errs = append(errs, removeFinishedFolderEnd(ctx, a, sessionID, covered, fdir, fname, rname, f)...)
-	}
+	busy, cleanupErrs := removeSettledClaims(ctx, lockCtx, a, sessionID, covered, fdir, fname, lname, rname, tryLock)
+	e.pending = e.pending || busy
+	errs = append(errs, cleanupErrs...)
 	return e, errors.Join(errs...)
 }
 

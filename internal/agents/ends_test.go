@@ -27,6 +27,33 @@ func stopScratch(t *testing.T, s *scratch, a *app.App, id string) (Result, int64
 	return res, at
 }
 
+func requirePendingRecord(t *testing.T, dir, name string, want bool) endRecord {
+	t.Helper()
+	rec, ok, err := readEnd(dir, name)
+	if err != nil || ok != want {
+		t.Fatalf("record %s/%s = %+v, %v, %v; want present=%v", dir, name, rec, ok, err, want)
+	}
+	return rec
+}
+
+func requireSessionEnd(t *testing.T, repo *app.RepoContext, id string, ended bool, at int64) {
+	t.Helper()
+	rows := sessionRows(t, repo, id)
+	if len(rows) != 1 || rows[0].end.Valid != ended || (ended && rows[0].end.Int64 != at) {
+		t.Fatalf("session %s rows = %+v; want ended=%v at=%d", id, rows, ended, at)
+	}
+}
+
+func requireNoPendingEnds(t *testing.T, dirs ...string) {
+	t.Helper()
+	for _, dir := range dirs {
+		entries, err := listEnds(dir)
+		if err != nil || len(entries) != 0 {
+			t.Fatalf("records in %s = %+v, %v", dir, entries, err)
+		}
+	}
+}
+
 func TestEndRecords(t *testing.T) {
 	dir := t.TempDir()
 	want := endRecord{Session: "s", EndedAt: 17, Repos: []string{"/a", "/b"}}
@@ -201,16 +228,16 @@ func TestScratchStopCoordinationTimeoutDefersUntilSessionStart(t *testing.T) {
 	if err != nil || res.Failure == nil || !strings.Contains(res.Failure.Error(), context.DeadlineExceeded.Error()) || !slices.Equal(later, []string{"s"}) {
 		t.Fatalf("timed-out Stop = %+v, %v; background requests %v", res, err, later)
 	}
-	request, ok, err := readEnd(folderEndsDir(a.Store), requestEndName(folderID(a.Store), "s"))
-	if err != nil || !ok || request.EndedAt != 0 || !slices.Equal(request.Repos, []string{r}) {
-		t.Fatalf("pending request = %+v, %v, %v", request, ok, err)
+	launch, ok, err := readEnd(folderEndsDir(a.Store), launchEndName(folderID(a.Store), "s"))
+	if err != nil || !ok || launch.EndedAt != 0 || !slices.Equal(launch.Repos, []string{r}) {
+		t.Fatalf("launch claim = %+v, %v, %v", launch, ok, err)
 	}
 	if rows := sessionRows(t, rc(t, a, r), "s"); len(rows) != 1 || rows[0].end.Valid {
 		t.Fatalf("timed-out repo row = %+v, want open", rows)
 	}
 	start(t, a, "next", "startup")
-	if _, ok, err := readEnd(folderEndsDir(a.Store), requestEndName(folderID(a.Store), "s")); err != nil || ok {
-		t.Fatalf("pending request remains after recovery: %v %v", ok, err)
+	if _, ok, err := readEnd(folderEndsDir(a.Store), launchEndName(folderID(a.Store), "s")); err != nil || ok {
+		t.Fatalf("launch claim remains after recovery: %v %v", ok, err)
 	}
 	folder := sessionRows(t, a.AllRepos()[0], "s")
 	repo := sessionRows(t, rc(t, a, r), "s")
@@ -264,6 +291,279 @@ func TestScratchNextHookEndsAFreeRepo(t *testing.T) {
 		stop bool
 	}{{name: "next Stop", stop: true}, {name: "session start"}} {
 		t.Run(tc.name, func(t *testing.T) { testScratchNextHookEndsAFreeRepo(t, tc.stop) })
+	}
+}
+
+func TestScratchOverlappingStopsStartOneRun(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		firstToPublish bool
+	}{
+		{"the inner Stop times out", true},
+		{"the outer Stop times out", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newScratch(t)
+			r := s.goRepo("repo")
+			a := s.open(s.folder, r)
+			start(t, a, "s", "startup")
+			release := holdWriter(t, rc(t, a, r).Store)
+			defer release()
+			var launches int
+			a.EndLater = func(string) { launches++ }
+			previousAcquire := acquireEndLock
+			var nested Result
+			inNested := false
+			acquireEndLock = func(ctx context.Context, repos []coveredRepo, try bool) (func(), bool, error) {
+				inside := inNested
+				if !inside {
+					inNested = true
+					nested, _ = stopScratch(t, s, a, "s")
+					inNested = false
+				}
+				if inside == tc.firstToPublish {
+					return nil, false, context.DeadlineExceeded
+				}
+				return previousAcquire(ctx, repos, try)
+			}
+			t.Cleanup(func() { acquireEndLock = previousAcquire })
+			outer, _ := stopScratch(t, s, a, "s")
+			timedOut, gotEnd := outer, nested
+			if tc.firstToPublish {
+				timedOut, gotEnd = nested, outer
+			}
+			if gotEnd.Failure != nil || !errors.Is(timedOut.Failure, context.DeadlineExceeded) {
+				t.Fatalf("fixture: timed-out failure=%v, timestamping Stop failure=%v", timedOut.Failure, gotEnd.Failure)
+			}
+			if row := sessionRows(t, rc(t, a, r), "s")[0]; row.end.Valid {
+				t.Fatalf("held repo row ended: %+v", row)
+			}
+			if launches != 1 {
+				t.Fatalf("overlapping Stops requested %d end runs; want one", launches)
+			}
+		})
+	}
+}
+
+func TestScratchStopAfterASettledEndStartsNoRun(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		timeout bool
+	}{{"times out", true}, {"takes the lock", false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newScratch(t)
+			r := s.goRepo("repo")
+			a := s.open(s.folder, r)
+			start(t, a, "s", "startup")
+			var launches int
+			a.EndLater = func(string) { launches++ }
+			previousAcquire := acquireEndLock
+			t.Cleanup(func() { acquireEndLock = previousAcquire })
+			firstAcquire := true
+			var nested Result
+			var nestedAt int64
+			acquireEndLock = func(ctx context.Context, repos []coveredRepo, try bool) (func(), bool, error) {
+				if firstAcquire {
+					firstAcquire = false
+					nested, nestedAt = stopScratch(t, s, a, "s")
+					t.Cleanup(holdWriter(t, rc(t, a, r).Store))
+					if tc.timeout {
+						return nil, false, context.DeadlineExceeded
+					}
+				}
+				return previousAcquire(ctx, repos, try)
+			}
+			outer, _ := stopScratch(t, s, a, "s")
+			if nested.Failure != nil {
+				t.Fatalf("nested Stop failure = %v", nested.Failure)
+			}
+			if tc.timeout && !errors.Is(outer.Failure, context.DeadlineExceeded) || !tc.timeout && outer.Failure != nil {
+				t.Fatalf("outer Stop failure = %v", outer.Failure)
+			}
+			if launches != 0 {
+				t.Fatalf("settled conversation requested %d end runs; want none", launches)
+			}
+			if rows := sessionRows(t, a.AllRepos()[0], "s"); len(rows) != 1 || !rows[0].end.Valid || rows[0].end.Int64 != nestedAt {
+				t.Fatalf("folder row = %+v, want end %d", rows, nestedAt)
+			}
+			if rows := sessionRows(t, rc(t, a, r), "s"); len(rows) != 1 || !rows[0].end.Valid || rows[0].end.Int64 != nestedAt {
+				t.Fatalf("repo row = %+v, want end %d", rows, nestedAt)
+			}
+			for _, dir := range []string{folderEndsDir(a.Store), repoEndsDir(rc(t, a, r).Store)} {
+				if entries, err := listEnds(dir); err != nil || len(entries) != 0 {
+					t.Fatalf("records in %s = %+v, %v", dir, entries, err)
+				}
+			}
+		})
+	}
+}
+
+func TestScratchClaimsLockMissLeavesARequest(t *testing.T) {
+	s := newScratch(t)
+	r := s.goRepo("repo")
+	a := s.open(s.folder, r)
+	start(t, a, "s", "startup")
+	var launches int
+	a.EndLater = func(string) { launches++ }
+	release, ok, err := store.TryLockFile(endClaimsLockPath(a.Store))
+	if err != nil || !ok {
+		t.Fatalf("hold claims lock: %v, %v", ok, err)
+	}
+	defer release()
+	res, _ := stopScratch(t, s, a, "s")
+	if !errors.Is(res.Failure, context.DeadlineExceeded) || launches != 0 {
+		t.Fatalf("Stop = %+v; launches = %d, want timeout and no launch", res, launches)
+	}
+	if rows := sessionRows(t, a.AllRepos()[0], "s"); len(rows) != 1 || rows[0].end.Valid {
+		t.Fatalf("folder row = %+v, want open", rows)
+	}
+	if rows := sessionRows(t, rc(t, a, r), "s"); len(rows) != 1 || rows[0].end.Valid {
+		t.Fatalf("repo row = %+v, want open", rows)
+	}
+	if _, ok, err := readEnd(folderEndsDir(a.Store), folderEndName(folderID(a.Store), "s")); err != nil || ok {
+		t.Fatalf("F = %v, %v; want absent", ok, err)
+	}
+	if _, ok, err := readEnd(folderEndsDir(a.Store), launchEndName(folderID(a.Store), "s")); err != nil || ok {
+		t.Fatalf("L = %v, %v; want absent", ok, err)
+	}
+	request, ok, err := readEnd(folderEndsDir(a.Store), requestEndName(folderID(a.Store), "s"))
+	if err != nil || !ok || request.EndedAt != 0 || request.Repos != nil {
+		t.Fatalf("R = %+v, %v, %v; want a time-less request", request, ok, err)
+	}
+	release()
+	start(t, a, "next", "startup")
+	folder := sessionRows(t, a.AllRepos()[0], "s")
+	repo := sessionRows(t, rc(t, a, r), "s")
+	if len(folder) != 1 || !folder[0].end.Valid || len(repo) != 1 || !repo[0].end.Valid || folder[0].end.Int64 != repo[0].end.Int64 {
+		t.Fatalf("recovered rows differ: folder=%+v repo=%+v", folder, repo)
+	}
+	if launches != 0 {
+		t.Fatalf("recovery requested %d end runs; want none", launches)
+	}
+	for _, dir := range []string{folderEndsDir(a.Store), repoEndsDir(rc(t, a, r).Store)} {
+		if entries, err := listEnds(dir); err != nil || len(entries) != 0 {
+			t.Fatalf("records in %s = %+v, %v", dir, entries, err)
+		}
+	}
+}
+
+func TestScratchCleanupWaitsForTheClaimsLock(t *testing.T) {
+	s := newScratch(t)
+	r := s.goRepo("repo")
+	a := s.open(s.folder, r)
+	start(t, a, "s", "startup")
+	var launches int
+	a.EndLater = func(string) { launches++ }
+	releaseWriter := holdWriter(t, rc(t, a, r).Store)
+	t.Cleanup(releaseWriter)
+	first, t1 := stopScratch(t, s, a, "s")
+	if first.Failure != nil || launches != 1 {
+		t.Fatalf("first Stop = %+v; launches = %d, want no failure and one launch", first, launches)
+	}
+	requireSessionEnd(t, a.AllRepos()[0], "s", true, t1)
+	requireSessionEnd(t, rc(t, a, r), "s", false, 0)
+	fdir, fid := folderEndsDir(a.Store), folderID(a.Store)
+	if f := requirePendingRecord(t, fdir, folderEndName(fid, "s"), true); !slices.Equal(f.Repos, []string{r}) {
+		t.Fatalf("F = %+v; want repo list [%s]", f, r)
+	}
+	requirePendingRecord(t, fdir, launchEndName(fid, "s"), false)
+	requirePendingRecord(t, fdir, requestEndName(fid, "s"), false)
+	requirePendingRecord(t, repoEndsDir(rc(t, a, r).Store), endName("s"), true)
+	requirePendingRecord(t, fdir, entryName(fid, "s", r), true)
+	if _, first, err := claimEnd(fdir, launchEndName(fid, "s"), endRecord{Session: "s", Folder: fid}); err != nil || !first {
+		t.Fatalf("publish stale L: first=%v err=%v", first, err)
+	}
+	releaseWriter()
+	releaseClaims, ok, err := store.TryLockFile(endClaimsLockPath(a.Store))
+	if err != nil || !ok {
+		t.Fatalf("hold claims lock: %v, %v", ok, err)
+	}
+	t.Cleanup(releaseClaims)
+	second, _ := stopScratch(t, s, a, "s")
+	if second.Failure != nil || launches != 1 {
+		t.Fatalf("second Stop = %+v; launches = %d, want no failure and one launch", second, launches)
+	}
+	requireSessionEnd(t, rc(t, a, r), "s", true, t1)
+	requirePendingRecord(t, repoEndsDir(rc(t, a, r).Store), endName("s"), false)
+	requirePendingRecord(t, fdir, entryName(fid, "s", r), false)
+	requirePendingRecord(t, fdir, folderEndName(fid, "s"), true)
+	requirePendingRecord(t, fdir, launchEndName(fid, "s"), true)
+	releaseClaims()
+	start(t, a, "next", "startup")
+	if launches != 1 {
+		t.Fatalf("cleanup requested %d end runs; want one", launches)
+	}
+	requireNoPendingEnds(t, fdir, repoEndsDir(rc(t, a, r).Store))
+	requireSessionEnd(t, a.AllRepos()[0], "s", true, t1)
+	requireSessionEnd(t, rc(t, a, r), "s", true, t1)
+}
+
+func TestScratchBackgroundRunRetriesAClaimsLockMiss(t *testing.T) {
+	s := newScratch(t)
+	r := s.goRepo("repo")
+	a := s.open(s.folder, r)
+	start(t, a, "s", "startup")
+	var launches int
+	a.EndLater = func(string) { launches++ }
+	previousAcquire := acquireEndLock
+	acquireEndLock = func(ctx context.Context, covered []coveredRepo, try bool) (func(), bool, error) {
+		if !try {
+			return nil, false, context.DeadlineExceeded
+		}
+		return previousAcquire(ctx, covered, try)
+	}
+	first, _ := stopScratch(t, s, a, "s")
+	acquireEndLock = previousAcquire
+	if !errors.Is(first.Failure, context.DeadlineExceeded) || launches != 1 {
+		t.Fatalf("Stop = %+v; launches = %d, want timeout and one launch", first, launches)
+	}
+	fdir, fid := folderEndsDir(a.Store), folderID(a.Store)
+	if _, ok, err := readEnd(fdir, launchEndName(fid, "s")); err != nil || !ok {
+		t.Fatalf("L = %v, %v; want present", ok, err)
+	}
+	if _, ok, err := readEnd(fdir, folderEndName(fid, "s")); err != nil || ok {
+		t.Fatalf("F = %v, %v; want absent", ok, err)
+	}
+	if _, ok, err := readEnd(fdir, requestEndName(fid, "s")); err != nil || ok {
+		t.Fatalf("R = %v, %v; want absent", ok, err)
+	}
+	releaseClaims, ok, err := store.TryLockFile(endClaimsLockPath(a.Store))
+	if err != nil || !ok {
+		t.Fatalf("hold claims lock: %v, %v", ok, err)
+	}
+	waits := 0
+	previousWait := rosterRetryWait
+	rosterRetryWait = func(context.Context) error {
+		waits++
+		if waits == 1 {
+			releaseClaims()
+			return nil
+		}
+		return errors.New("unexpected retry wait")
+	}
+	t.Cleanup(func() {
+		acquireEndLock = previousAcquire
+		rosterRetryWait = previousWait
+		releaseClaims()
+	})
+	if err := EndRosterSessions(context.Background(), a, "s"); err != nil {
+		t.Fatal(err)
+	}
+	if waits != 1 {
+		t.Fatalf("retry waits = %d, want one", waits)
+	}
+	if launches != 1 {
+		t.Fatalf("background recovery requested %d end runs; want one", launches)
+	}
+	folder := sessionRows(t, a.AllRepos()[0], "s")
+	repo := sessionRows(t, rc(t, a, r), "s")
+	if len(folder) != 1 || !folder[0].end.Valid || len(repo) != 1 || !repo[0].end.Valid || folder[0].end.Int64 != repo[0].end.Int64 {
+		t.Fatalf("recovered rows differ: folder=%+v repo=%+v", folder, repo)
+	}
+	for _, dir := range []string{fdir, repoEndsDir(rc(t, a, r).Store)} {
+		if entries, err := listEnds(dir); err != nil || len(entries) != 0 {
+			t.Fatalf("records in %s = %+v, %v", dir, entries, err)
+		}
 	}
 }
 
