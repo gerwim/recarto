@@ -947,7 +947,8 @@ func TestReadAndEditNotesShowUntitledBodies(t *testing.T) {
 	a, wt := newTreeApp(t)
 	ctx := context.Background()
 	writeIndexed(t, a, "big.go", []byte("package p\n\nfunc Big() {}\n"))
-	notes := map[memory.Kind][2]string{
+	type note struct{ body, prefix string }
+	notes := map[memory.Kind]note{
 		memory.KindDoNotRepeat: {"Do not run VACUUM while another process writes.", "🚫 do-not-repeat for big.go: "},
 		memory.KindDecision:    {"Keep one writer per store.", "📌 prior decision for big.go: "},
 		memory.KindLearning:    {"WAL readers never block the writer.", "📚 prior learning for big.go: "},
@@ -955,7 +956,7 @@ func TestReadAndEditNotesShowUntitledBodies(t *testing.T) {
 		memory.KindBug:         {"Reindex drops the last edge.", "⚠ prior bug in big.go: "},
 	}
 	for k, n := range notes {
-		if _, _, _, err := a.Engine.Record(ctx, memory.NewMemory{Kind: k, Body: n[0], Branch: a.Git.Branch,
+		if _, _, _, err := a.Engine.Record(ctx, memory.NewMemory{Kind: k, Body: n.body, Branch: a.Git.Branch,
 			Refs: []memory.Ref{{Type: memory.RefFile, Value: "big.go"}}}); err != nil {
 			t.Fatal(err)
 		}
@@ -966,8 +967,8 @@ func TestReadAndEditNotesShowUntitledBodies(t *testing.T) {
 			t.Fatal(err)
 		}
 		for _, n := range notes {
-			if !strings.Contains(res.Context, n[1]+n[0]) {
-				t.Errorf("%s: missing %q:\n%s", session, n[1]+n[0], res.Context)
+			if want := n.prefix + n.body; !strings.Contains(res.Context, want) {
+				t.Errorf("%s: missing %q:\n%s", session, want, res.Context)
 			}
 		}
 		if strings.Contains(res.Context, "(untitled)") {

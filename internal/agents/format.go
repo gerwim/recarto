@@ -344,10 +344,10 @@ func noteTitle(r *memory.Record) string {
 // bodyStart is the first line of body, clipped like a title, with "…" when
 // the body has more lines.
 func bodyStart(body string) string {
-	line, more, _ := strings.Cut(strings.TrimSpace(body), "\n")
+	line, _, more := strings.Cut(strings.TrimSpace(body), "\n")
 	s := clip(line, titleMax)
 	// A first line longer than titleMax already ends in clip's "…"; one mark is enough.
-	if more != "" && utf8.RuneCountInString(s) <= titleMax {
+	if more && utf8.RuneCountInString(s) <= titleMax {
 		s += "…"
 	}
 	return s
