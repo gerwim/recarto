@@ -114,6 +114,14 @@ func testGuard(session, wt, dir string) repoEndRecord {
 }
 
 func TestEndRecordFiles(t *testing.T) {
+	t.Run("claim first wins", testClaimEndFirstWins)
+	t.Run("stamp guard", testStampGuard)
+	t.Run("read under a regular file", testReadEndUnderAFile)
+	t.Run("list and sweep", testListAndRemoveStaleEnds)
+	t.Run("folder end and its creator", testClaimFolderEnd)
+}
+
+func testClaimEndFirstWins(t *testing.T) {
 	dir := t.TempDir()
 	g1 := testGuard("s", "/wt", "/folder")
 	got, created, err := claimEnd(dir, guardName("s"), g1)
@@ -133,7 +141,14 @@ func TestEndRecordFiles(t *testing.T) {
 	if _, _, err := claimEnd(dir, endName("u"), m); err == nil {
 		t.Fatal("a claim over an unreadable file succeeded")
 	}
+}
 
+func testStampGuard(t *testing.T) {
+	dir := t.TempDir()
+	g1 := testGuard("s", "/wt", "/folder")
+	if _, _, err := claimEnd(dir, guardName("s"), g1); err != nil {
+		t.Fatal(err)
+	}
 	if err := stampGuard(dir, g1, 7); err != nil {
 		t.Fatal(err)
 	}
@@ -147,7 +162,10 @@ func TestEndRecordFiles(t *testing.T) {
 	if again, ok, err := readEnd[repoEndRecord](dir, guardName("s")); err != nil || !ok || again != stamped {
 		t.Fatalf("removing the plain guard took the stamped one: %+v %v %v", again, ok, err)
 	}
+}
 
+func testReadEndUnderAFile(t *testing.T) {
+	dir := t.TempDir()
 	file := filepath.Join(dir, "file")
 	if err := os.WriteFile(file, nil, 0o644); err != nil {
 		t.Fatal(err)
@@ -155,7 +173,9 @@ func TestEndRecordFiles(t *testing.T) {
 	if _, ok, err := readEnd[repoEndRecord](filepath.Join(file, "child"), "x"); err == nil || ok {
 		t.Fatalf("read under a regular file = %v, %v; want an error", ok, err)
 	}
+}
 
+func testListAndRemoveStaleEnds(t *testing.T) {
 	list := t.TempDir()
 	if _, _, err := claimEnd(list, guardName("g"), testGuard("g", "/wt", "/folder")); err != nil {
 		t.Fatal(err)
@@ -210,7 +230,9 @@ func TestEndRecordFiles(t *testing.T) {
 	if len(recs) != 1 || len(other) != 1 || other[0].name != held {
 		t.Fatalf("after the old entries went: %+v, %+v; want the record and the held liveness file", recs, other)
 	}
+}
 
+func testClaimFolderEnd(t *testing.T) {
 	fdir := t.TempDir()
 	folder := t.TempDir()
 	f, created, rel, err := claimFolderEnd(fdir, folderEndRecord{Session: "s", Dir: folder, EndedAt: 9})

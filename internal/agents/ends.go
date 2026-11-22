@@ -666,279 +666,337 @@ type targetEnd struct {
 // or order one store's worker.
 var endWrite = func(slot string, write func() error) error { return write() }
 
+// conversationEnding is the state of one endConversation call.
+type conversationEnding struct {
+	ctx          context.Context
+	a            *app.App
+	sessionID    string
+	targets      []endTarget
+	fdir, fname  string
+	row          folderRow
+	ts           []targetEnd
+	fin          *folderEndRecord // the live F, if any
+	release      func()           // drops this call's creator lock on F; nil when it holds none
+	createdAny   bool             // this call created a record
+	folderRecErr error            // F could not be created
+	tc           int64            // the common time of a direct write without a record
+	folderBusy   bool
+	errs         []error
+}
+
 // endConversation writes sessionID's folder and repo session ends. With stop it
 // also records the ends not yet recorded: guards first, then the time, then F,
 // then each guard's time. Store writes use ctx's write deadline. Without stop it
 // gives covered guards F's time and writes what is recorded.
 func endConversation(ctx context.Context, a *app.App, sessionID string, targets []endTarget, stop bool) (conversationEnd, error) {
-	var e conversationEnd
-	var errs []error
-	fdir := folderEndsDir(a.Store)
-	fname := folderEndName(folderID(a.Store), sessionID)
-
-	// Records are read before rows: a row read open after its record was read
-	// means no writer had settled that end yet.
-	f, fok, err := readEnd[folderEndRecord](fdir, fname)
-	if err != nil {
-		errs = append(errs, err)
+	c := &conversationEnding{ctx: ctx, a: a, sessionID: sessionID, targets: targets,
+		fdir: folderEndsDir(a.Store), fname: folderEndName(folderID(a.Store), sessionID)}
+	if found, err := c.read(); err != nil || !found {
+		return conversationEnd{}, errors.Join(append(c.errs, err)...)
 	}
-	row, found, err := folderSession(ctx, a.Store, sessionID)
+	if stop {
+		c.publish()
+	} else if c.fin != nil {
+		c.errs = append(c.errs, settleFolderEnd(*c.fin))
+	}
+	for i, t := range targets {
+		c.ts[i].r = readRepoRecords(repoEndsDir(t.dir), sessionID)
+	}
+	c.writeStores(stop)
+	// Every write attempt of this call is over, so another Stop that finds the
+	// lock free can treat this one as finished.
+	if c.release != nil {
+		c.release()
+	}
+	e := conversationEnd{pending: c.finishFolder()}
+	e.pending = c.finishRepos() || e.pending
+	e.launch = stop && e.pending && c.createdAny
+	return e, errors.Join(c.errs...)
+}
+
+// read reads the records, then the rows: a row read open after its record was
+// read means no writer had settled that end yet. found is false when the
+// folder holds no row of the conversation.
+func (c *conversationEnding) read() (found bool, err error) {
+	f, fok, err := readEnd[folderEndRecord](c.fdir, c.fname)
+	c.errs = append(c.errs, err)
+	c.row, found, err = folderSession(c.ctx, c.a.Store, c.sessionID)
 	if err != nil {
-		return e, errors.Join(append(errs, err)...)
+		return false, err
 	}
 	if !found {
 		if fok {
-			errs = append(errs, settleFolderEnd(f), removeFolderEnd(fdir, fname, f))
+			c.errs = append(c.errs, settleFolderEnd(f), removeFolderEnd(c.fdir, c.fname, f))
 		}
-		return e, errors.Join(errs...)
+		return false, nil
 	}
-	if fok && row.ended.Valid && row.ended.Int64 != f.EndedAt {
+	if fok && c.row.ended.Valid && c.row.ended.Int64 != f.EndedAt {
 		// The stale claim of a Stop that resumed after another settled the folder.
-		errs = append(errs, removeFolderEnd(fdir, fname, f))
+		c.errs = append(c.errs, removeFolderEnd(c.fdir, c.fname, f))
 		fok = false
 	}
-	ts := make([]targetEnd, len(targets))
-	for i, t := range targets {
-		ts[i].r = readRepoRecords(repoEndsDir(t.dir), sessionID)
-		if t.rc != nil {
-			ts[i].ended, err = rowEnded(ctx, t.rc.Store.DB, sessionID)
-			errs = append(errs, err)
-		}
-	}
-
-	var fin *folderEndRecord
 	if fok {
-		fin = &f
+		c.fin = &f
 	}
-	var release func()
-	createdAny := false
-	var folderRecErr error
-	tc := int64(0)
-	if stop {
-		needFolder := !row.ended.Valid && !fok
-		var seen []int
-		for i := range ts {
-			if ts[i].r.plain() {
-				seen = append(seen, i)
-			}
+	c.ts = make([]targetEnd, len(c.targets))
+	for i, t := range c.targets {
+		c.ts[i].r = readRepoRecords(repoEndsDir(t.dir), c.sessionID)
+		if t.rc != nil {
+			c.ts[i].ended, err = rowEnded(c.ctx, t.rc.Store.DB, c.sessionID)
+			c.errs = append(c.errs, err)
 		}
-		guarding := false
-		for i, t := range targets {
-			s := &ts[i]
-			if s.r.mok || s.r.gok || !((t.rc != nil && !s.ended) || (t.rc == nil && needFolder)) {
-				continue
-			}
-			guarding = true
-			g := repoEndRecord{Session: sessionID, Agent: row.agent, Worktree: t.wt, StartedAt: row.startedAt,
-				Root: t.root, Dir: a.Dir, Nonce: newNonce()}
-			if t.rc != nil {
-				g.Branch = t.rc.Git.Branch
-			}
-			got, created, err := claimEnd(repoEndsDir(t.dir), guardName(sessionID), g)
-			if err != nil {
-				s.recErr = fmt.Errorf("record the pending session end for %s: %w", t.wt, err)
-				continue
-			}
-			createdAny = createdAny || created
-			s.r.g, s.r.gok = got, true
-			if got.EndedAt == 0 {
-				seen = append(seen, i)
-			}
-		}
-		// The time is taken only after every guard it may be given was seen, so
-		// a prune that saw no guard ran before the time.
-		var now int64
-		if guarding || needFolder || len(seen) > 0 {
-			now = a.Clock.Now().UnixMilli()
-		}
-		createdF := false
-		if needFolder {
-			rec := folderEndRecord{Session: sessionID, Dir: a.Dir, EndedAt: now}
-			for _, i := range seen {
-				rec.Covered = append(rec.Covered, repoID(targets[i].dir))
-			}
-			got, created, rel, err := claimFolderEnd(fdir, rec)
-			switch {
-			case err != nil:
-				folderRecErr = fmt.Errorf("record the pending session end for %s: %w", a.Dir, err)
-			case created:
-				fin, createdF, createdAny, release = &got, true, true, rel
-			default:
-				fin = &got
-			}
-		}
-		if createdF {
-			again, _, err := folderSession(ctx, a.Store, sessionID)
-			errs = append(errs, err)
-			if err == nil && again.ended.Valid && again.ended.Int64 != fin.EndedAt {
-				release()
-				release = nil
-				errs = append(errs, removeFolderEnd(fdir, fname, *fin))
-				fin, createdF = nil, false
-			}
-		}
-		// A direct write without a record takes the conversation's common time:
-		// F's while its creator still runs, since that creator writes F's time
-		// everywhere it can; otherwise this Stop's own.
-		tc = now
-		if fin != nil {
-			if createdF {
-				tc = fin.EndedAt
-			} else if slices.ContainsFunc(ts, func(s targetEnd) bool { return s.recErr != nil }) {
-				running, err := fCreatorRunning(fdir, *fin)
-				errs = append(errs, err)
-				if running {
-					tc = fin.EndedAt
-				}
-			}
-		}
-		for _, i := range seen {
-			at := now
-			if fin != nil && fin.covers(repoID(targets[i].dir)) {
-				at = fin.EndedAt
-			}
-			_, created, err := finalizeGuard(targets[i], ts[i].r.g, at)
-			createdAny = createdAny || created
-			if err != nil {
-				ts[i].finErr = fmt.Errorf("record the pending session end for %s: %w", targets[i].wt, err)
-				ts[i].finG = ts[i].r.g
-				ts[i].finG.EndedAt = at
-			}
-		}
-	} else if fin != nil {
-		errs = append(errs, settleFolderEnd(*fin))
 	}
+	return true, nil
+}
 
-	for i, t := range targets {
-		ts[i].r = readRepoRecords(repoEndsDir(t.dir), sessionID)
+// publish records the ends not yet recorded: the guards, then the time, then F,
+// then each guard's time.
+func (c *conversationEnding) publish() {
+	needFolder := !c.row.ended.Valid && c.fin == nil
+	var seen []int
+	for i := range c.ts {
+		if c.ts[i].r.plain() {
+			seen = append(seen, i)
+		}
 	}
+	guarded, guarding := c.guard(needFolder)
+	seen = append(seen, guarded...)
+	// The time is taken only after every guard it may be given was seen, so a
+	// prune that saw no guard ran before the time.
+	var now int64
+	if guarding || needFolder || len(seen) > 0 {
+		now = c.a.Clock.Now().UnixMilli()
+	}
+	createdF := needFolder && c.claimFolder(now, seen)
+	c.tc = c.commonTime(now, createdF)
+	for _, i := range seen {
+		at := now
+		if c.fin != nil && c.fin.covers(repoID(c.targets[i].dir)) {
+			at = c.fin.EndedAt
+		}
+		_, created, err := finalizeGuard(c.targets[i], c.ts[i].r.g, at)
+		c.createdAny = c.createdAny || created
+		if err != nil {
+			c.ts[i].finErr = fmt.Errorf("record the pending session end for %s: %w", c.targets[i].wt, err)
+			c.ts[i].finG = c.ts[i].r.g
+			c.ts[i].finG.EndedAt = at
+		}
+	}
+}
 
-	// Every store is written side by side under the one deadline, so a busy
-	// store never holds up a free one.
+// guard links a guard for each target that has no record and needs one, and
+// returns the targets whose guard waits for its time and whether it tried any.
+func (c *conversationEnding) guard(needFolder bool) (seen []int, guarding bool) {
+	for i, t := range c.targets {
+		s := &c.ts[i]
+		if s.r.mok || s.r.gok || !((t.rc != nil && !s.ended) || (t.rc == nil && needFolder)) {
+			continue
+		}
+		guarding = true
+		g := repoEndRecord{Session: c.sessionID, Agent: c.row.agent, Worktree: t.wt, StartedAt: c.row.startedAt,
+			Root: t.root, Dir: c.a.Dir, Nonce: newNonce()}
+		if t.rc != nil {
+			g.Branch = t.rc.Git.Branch
+		}
+		got, created, err := claimEnd(repoEndsDir(t.dir), guardName(c.sessionID), g)
+		if err != nil {
+			s.recErr = fmt.Errorf("record the pending session end for %s: %w", t.wt, err)
+			continue
+		}
+		c.createdAny = c.createdAny || created
+		s.r.g, s.r.gok = got, true
+		if got.EndedAt == 0 {
+			seen = append(seen, i)
+		}
+	}
+	return seen, guarding
+}
+
+// claimFolder claims F at now, covering the seen guards, and reports whether
+// this call created it and it holds.
+func (c *conversationEnding) claimFolder(now int64, seen []int) bool {
+	rec := folderEndRecord{Session: c.sessionID, Dir: c.a.Dir, EndedAt: now}
+	for _, i := range seen {
+		rec.Covered = append(rec.Covered, repoID(c.targets[i].dir))
+	}
+	got, created, release, err := claimFolderEnd(c.fdir, rec)
+	if err != nil {
+		c.folderRecErr = fmt.Errorf("record the pending session end for %s: %w", c.a.Dir, err)
+		return false
+	}
+	c.fin = &got
+	if !created {
+		return false
+	}
+	c.createdAny = true
+	again, _, err := folderSession(c.ctx, c.a.Store, c.sessionID)
+	c.errs = append(c.errs, err)
+	if err == nil && again.ended.Valid && again.ended.Int64 != got.EndedAt {
+		release()
+		c.errs = append(c.errs, removeFolderEnd(c.fdir, c.fname, got))
+		c.fin = nil
+		return false
+	}
+	c.release = release
+	return true
+}
+
+// commonTime is the time of a direct write without a record: F's while its
+// creator still runs, since that creator writes F's time everywhere it can;
+// otherwise this Stop's own, now.
+func (c *conversationEnding) commonTime(now int64, createdF bool) int64 {
+	if c.fin == nil {
+		return now
+	}
+	if createdF {
+		return c.fin.EndedAt
+	}
+	if !slices.ContainsFunc(c.ts, func(s targetEnd) bool { return s.recErr != nil }) {
+		return now
+	}
+	running, err := fCreatorRunning(c.fdir, *c.fin)
+	c.errs = append(c.errs, err)
+	if running {
+		return c.fin.EndedAt
+	}
+	return now
+}
+
+// repoRecord returns what target i's store gets written, if anything.
+func (c *conversationEnding) repoRecord(i int, stop bool) (repoEndRecord, bool) {
+	s, t := &c.ts[i], c.targets[i]
+	if rec, ok := s.r.recorded(); ok {
+		return rec, true
+	}
+	if s.finErr != nil {
+		return s.finG, true
+	}
+	if stop && s.recErr != nil {
+		return repoEndRecord{Session: c.sessionID, Agent: c.row.agent, Branch: t.rc.Git.Branch, Worktree: t.wt,
+			StartedAt: c.row.startedAt, Dir: c.a.Dir, EndedAt: c.tc}, true
+	}
+	return repoEndRecord{}, false
+}
+
+// writeStores writes every store side by side under the one deadline, so a
+// busy store never holds up a free one.
+func (c *conversationEnding) writeStores(stop bool) {
 	var folderAt int64
-	if !row.ended.Valid {
-		if fin != nil {
-			folderAt = fin.EndedAt
-		} else if folderRecErr != nil {
-			folderAt = tc
+	if !c.row.ended.Valid {
+		if c.fin != nil {
+			folderAt = c.fin.EndedAt
+		} else if c.folderRecErr != nil {
+			folderAt = c.tc
 		}
 	}
-	var folderBusy bool
 	var folderErr error
 	var wg sync.WaitGroup
 	if folderAt != 0 {
 		wg.Go(func() {
-			// A panicking write is reported and then decided like a busy one.
-			panicked := true
-			defer func() { folderBusy = folderBusy || panicked }()
-			defer recoverInto(&folderErr, "end the session in "+a.Dir)
-			err := endWrite(a.Dir, func() error {
-				_, _, err := writeFolderEnd(ctx, a, sessionID, folderAt)
+			c.folderBusy, folderErr = c.writeSlot(c.a.Dir, func() error {
+				_, _, err := writeFolderEnd(c.ctx, c.a, c.sessionID, folderAt)
 				return err
-			})
-			panicked = false
-			switch {
-			case store.IsBusy(err):
-				folderBusy = true
-			case err != nil:
-				folderErr = fmt.Errorf("end the session in %s: %w", a.Dir, err)
-			}
+			}, func() error { return nil })
 		})
 	}
-	for i, t := range targets {
-		s := &ts[i]
+	for i, t := range c.targets {
+		s := &c.ts[i]
 		if t.rc == nil {
 			// Its records wait for a session start that serves the repository.
 			continue
 		}
 		pdir := repoEndsDir(t.dir)
 		if s.ended {
-			errs = append(errs, s.r.remove(pdir))
+			c.errs = append(c.errs, s.r.remove(pdir))
 			continue
 		}
-		rec, ok := s.r.recorded()
-		switch {
-		case ok:
-		case s.finErr != nil:
-			rec, ok = s.finG, true
-		case stop && s.recErr != nil:
-			rec = repoEndRecord{Session: sessionID, Agent: row.agent, Branch: t.rc.Git.Branch, Worktree: t.wt,
-				StartedAt: row.startedAt, Dir: a.Dir, EndedAt: tc}
-			ok = true
-		}
+		rec, ok := c.repoRecord(i, stop)
 		if !ok {
 			continue
 		}
 		wg.Go(func() {
-			panicked := true
-			defer func() { s.busy = s.busy || panicked }()
-			defer recoverInto(&s.err, "end the session in "+t.wt)
-			err := endWrite(t.wt, func() error { return writeRepoEnd(ctx, t.rc.Store, rec) })
-			panicked = false
-			switch {
-			case err == nil:
-				s.err = s.r.remove(pdir)
-			case store.IsBusy(err):
-				s.busy = true
-			default:
-				s.err = fmt.Errorf("end the session in %s: %w", t.wt, err)
-			}
+			s.busy, s.err = c.writeSlot(t.wt, func() error { return writeRepoEnd(c.ctx, t.rc.Store, rec) },
+				func() error { return s.r.remove(pdir) })
 		})
 	}
 	wg.Wait()
+	c.errs = append(c.errs, c.folderRecErr, folderErr)
+}
 
-	// Every write attempt of this call is over, so another Stop that finds the
-	// lock free can treat this one as finished.
-	if release != nil {
-		release()
+// writeSlot runs one store's write and, once it succeeded, done. A panicking
+// write is reported and then decided like a busy one.
+func (c *conversationEnding) writeSlot(slot string, write, done func() error) (busy bool, err error) {
+	panicked := true
+	defer func() { busy = busy || panicked }()
+	defer recoverInto(&err, "end the session in "+slot)
+	werr := endWrite(slot, write)
+	panicked = false
+	switch {
+	case werr == nil:
+		return false, done()
+	case store.IsBusy(werr):
+		return true, nil
+	default:
+		return false, fmt.Errorf("end the session in %s: %w", slot, werr)
 	}
-	errs = append(errs, folderRecErr, folderErr)
-	if fin != nil {
-		again, found, err := folderSession(ctx, a.Store, sessionID)
-		errs = append(errs, err)
-		switch {
-		case err != nil:
-		case !found || again.ended.Valid:
-			if found && again.ended.Int64 == fin.EndedAt {
-				errs = append(errs, settleFolderEnd(*fin))
-			}
-			errs = append(errs, removeFolderEnd(fdir, fname, *fin))
-		case folderBusy:
-			e.pending = true
+}
+
+// finishFolder settles and removes F once the folder's row is ended, and
+// reports whether the folder's end is still pending.
+func (c *conversationEnding) finishFolder() bool {
+	if c.fin == nil {
+		if c.folderBusy {
+			c.errs = append(c.errs, fmt.Errorf("session end not recorded in %s: its store stayed busy; the conversation's next Stop writes it", c.a.Dir))
 		}
-	} else if folderBusy {
-		errs = append(errs, fmt.Errorf("session end not recorded in %s: its store stayed busy; the conversation's next Stop writes it", a.Dir))
+		return false
 	}
+	again, found, err := folderSession(c.ctx, c.a.Store, c.sessionID)
+	switch {
+	case err != nil:
+		c.errs = append(c.errs, err)
+	case !found || again.ended.Valid:
+		if found && again.ended.Int64 == c.fin.EndedAt {
+			c.errs = append(c.errs, settleFolderEnd(*c.fin))
+		}
+		c.errs = append(c.errs, removeFolderEnd(c.fdir, c.fname, *c.fin))
+	case c.folderBusy:
+		return true
+	}
+	return false
+}
+
+// finishRepos decides each busy repo store: pending when a later writer can
+// finish its end, reported when only the conversation's next Stop can.
+func (c *conversationEnding) finishRepos() (pending bool) {
 	var present *folderEndRecord
-	if p, ok, _ := readEnd[folderEndRecord](fdir, fname); ok {
-		// An unreadable F was reported above; it covers nothing.
+	if p, ok, _ := readEnd[folderEndRecord](c.fdir, c.fname); ok {
+		// An unreadable F was reported when read; it covers nothing.
 		present = &p
 	}
-	for i, t := range targets {
-		s := &ts[i]
-		errs = append(errs, s.recErr, s.finErr, s.err)
+	for i, t := range c.targets {
+		s := &c.ts[i]
+		c.errs = append(c.errs, s.recErr, s.finErr, s.err)
 		if !s.busy {
 			continue
 		}
-		ended, err := rowEnded(ctx, t.rc.Store.DB, sessionID)
+		ended, err := rowEnded(c.ctx, t.rc.Store.DB, c.sessionID)
 		if err != nil {
-			errs = append(errs, err)
+			c.errs = append(c.errs, err)
 			continue
 		}
 		pdir := repoEndsDir(t.dir)
-		r := readRepoRecords(pdir, sessionID)
+		r := readRepoRecords(pdir, c.sessionID)
 		_, recorded := r.recorded()
 		switch {
 		case ended:
-			errs = append(errs, r.remove(pdir))
+			c.errs = append(c.errs, r.remove(pdir))
 		case recorded || (r.plain() && present != nil && present.covers(repoID(t.dir))):
-			e.pending = true
+			pending = true
 		default:
-			errs = append(errs, fmt.Errorf("session end not recorded in %s: its time could not be recorded; the conversation's next Stop writes it", t.wt))
+			c.errs = append(c.errs, fmt.Errorf("session end not recorded in %s: its time could not be recorded; the conversation's next Stop writes it", t.wt))
 		}
 	}
-	e.launch = stop && e.pending && createdAny
-	return e, errors.Join(errs...)
+	return pending
 }
 
 // endPendingRepoEnds writes, trying each store once, the pending session ends

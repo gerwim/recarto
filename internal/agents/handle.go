@@ -920,16 +920,11 @@ func handleStop(ctx context.Context, writes context.Context, a *app.App, ev Even
 	if err != nil || edits < stopNudgeEditThreshold || !a.Features.On(features.StopNudge) {
 		return Result{SystemMessage: reminder}, nil
 	}
-	nudged, err := a.Ledger.Get(ctx, ev.SessionID, "stop_nudged")
+	nudged, err := conversationNudged(ctx, a, ev.SessionID)
 	if err != nil {
 		return Result{SystemMessage: reminder}, nil
 	}
-	mark := nudgeMarkPath(a.Store, ev.SessionID)
-	_, err = os.Stat(mark)
-	if err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return Result{SystemMessage: reminder}, nil
-	}
-	if nudged > 0 || err == nil {
+	if nudged {
 		// The model just saw the block reason; re-showing the reminder is noise.
 		return Result{}, nil
 	}
@@ -971,24 +966,45 @@ func handleStop(ctx context.Context, writes context.Context, a *app.App, ev Even
 			return Result{SystemMessage: reminder}, nil
 		}
 	}
-	var markErr error
-	if err := a.Ledger.Incr(writes, ev.SessionID, "stop_nudged", 1); err != nil {
-		// A Stop of a folder conversation gives a busy store no more than its
-		// write deadline: the mark file then keeps the nudge once per conversation.
-		if !store.IsBusy(err) {
-			markErr = fmt.Errorf("record the capture nudge: %w", err)
-		}
-		if err := os.MkdirAll(filepath.Dir(mark), 0o755); err != nil {
-			markErr = errors.Join(markErr, err)
-		} else if err := os.WriteFile(mark, nil, 0o644); err != nil {
-			markErr = errors.Join(markErr, err)
-		}
-	}
+	markErr := markNudged(writes, a, ev.SessionID)
 	reason := fmt.Sprintf("recarto: you made %d edits this session and recorded nothing. Record learnings, preferences (especially if the user corrected your approach), or bug fixes now with the recarto MCP tools `record_memory` and `record_bug`", edits)
 	if f.On(features.IssueReports) {
 		reason += " — and `report_recarto_issue` if Recarto itself misbehaved"
 	}
 	return Result{Block: true, Reason: reason + ". Or finish if there's genuinely nothing to keep.", Failure: markErr}, nil
+}
+
+// conversationNudged reports whether sessionID's conversation already got the
+// capture nudge: its ledger counter is set or its mark file exists.
+func conversationNudged(ctx context.Context, a *app.App, sessionID string) (bool, error) {
+	nudged, err := a.Ledger.Get(ctx, sessionID, "stop_nudged")
+	if err != nil || nudged > 0 {
+		return nudged > 0, err
+	}
+	_, err = os.Stat(nudgeMarkPath(a.Store, sessionID))
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
+// markNudged records that sessionID's conversation got the capture nudge.
+func markNudged(writes context.Context, a *app.App, sessionID string) error {
+	err := a.Ledger.Incr(writes, sessionID, "stop_nudged", 1)
+	if err == nil {
+		return nil
+	}
+	var markErr error
+	// A Stop of a folder conversation gives a busy store no more than its write
+	// deadline: the mark file then keeps the nudge once per conversation.
+	if !store.IsBusy(err) {
+		markErr = fmt.Errorf("record the capture nudge: %w", err)
+	}
+	mark := nudgeMarkPath(a.Store, sessionID)
+	if err := os.MkdirAll(filepath.Dir(mark), 0o755); err != nil {
+		return errors.Join(markErr, err)
+	}
+	return errors.Join(markErr, os.WriteFile(mark, nil, 0o644))
 }
 
 // nudgeMarkPath marks a conversation nudged when its ledger counter could not

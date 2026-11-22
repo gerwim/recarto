@@ -504,342 +504,352 @@ func TestRecordsCannotBeCreatedStoreBusy(t *testing.T) {
 }
 
 func TestDirectWriteKeepsTheCommonTime(t *testing.T) {
-	setup := func(t *testing.T) (*scratch, *app.App, string) {
-		s := newScratch(t)
-		r := s.goRepo("repo")
-		f := s.open(s.folder, r)
-		start(t, f, "s", "startup")
-		return s, f, r
-	}
+	t.Run("one Stop", testDirectWriteOneStop)
+	t.Run("two overlapping first Stops", testDirectWriteTwoOverlappingFirstStops)
+	t.Run("a second Stop while the first is still running", testDirectWriteASecondStopWhileTheFirstIsStillRunning)
+	t.Run("the next Stop after the first has returned", testDirectWriteTheNextStopAfterTheFirstHasReturned)
+	t.Run("a sweep between the creator's folder commit and its repo write", testDirectWriteASweepBetweenTheCreatorSFolderCommitAndItsRepoWrite)
+	t.Run("two sweeps and a new claim around one F", testDirectWriteTwoSweepsAndANewClaimAroundOneF)
+	t.Run("the next Stop during another writer's removal of F", testDirectWriteTheNextStopDuringAnotherWriterSRemovalOfF)
+	t.Run("an unrelated removal or lock does not make a removal miss its file", testDirectWriteAnUnrelatedRemovalOrLockDoesNotMakeARemovalMissItsFile)
+	t.Run("a creator that died after publishing F", testDirectWriteACreatorThatDiedAfterPublishingF)
+}
 
-	t.Run("one Stop", func(t *testing.T) {
-		s, f, r := setup(t)
-		release := holdWriter(t, rc(t, f, r).Store)
-		onPublish(t, func(dir, name string, data []byte) ([]byte, bool, error) {
-			if isGuard(name) {
-				return nil, false, errors.New("injected")
-			}
-			if isFolder(dir) {
-				s.clk.Advance(time.Second)
-				release()
-			}
-			return linkEnd(dir, name, data)
-		})
-		_, at := stopScratch(t, s, f, "s")
-		requireSessionEnd(t, folderRC(f), "s", true, at)
-		requireSessionEnd(t, rc(t, f, r), "s", true, at)
-	})
+func directWriteSetup(t *testing.T) (*scratch, *app.App, string) {
+	s := newScratch(t)
+	r := s.goRepo("repo")
+	f := s.open(s.folder, r)
+	start(t, f, "s", "startup")
+	return s, f, r
+}
 
-	t.Run("two overlapping first Stops", func(t *testing.T) {
-		s, f, r := setup(t)
-		unwritable(t, pendingDir(rc(t, f, r)))
-		inner := false
-		var t2 int64
-		onPublish(t, func(dir, name string, data []byte) ([]byte, bool, error) {
-			if isFolder(dir) && !inner {
-				inner = true
-				_, t2 = stopScratch(t, s, f, "s")
-				inner = false
-			}
-			return linkEnd(dir, name, data)
-		})
-		stopScratch(t, s, f, "s")
-		requireSessionEnd(t, folderRC(f), "s", true, t2)
-		requireSessionEnd(t, rc(t, f, r), "s", true, t2)
-		requireNoPendingFiles(t, f)
-	})
-
-	t.Run("a second Stop while the first is still running", func(t *testing.T) {
-		s, f, r := setup(t)
-		unwritable(t, pendingDir(rc(t, f, r)))
-		inner := false
-		onPublish(t, func(dir, name string, data []byte) ([]byte, bool, error) {
-			existing, created, err := linkEnd(dir, name, data)
-			if isFolder(dir) && !inner {
-				inner = true
-				s.clk.Advance(time.Second)
-				stopScratch(t, s, f, "s")
-				inner = false
-			}
-			return existing, created, err
-		})
-		_, t1 := stopScratch(t, s, f, "s")
-		requireSessionEnd(t, folderRC(f), "s", true, t1)
-		requireSessionEnd(t, rc(t, f, r), "s", true, t1)
-		requireNoPendingFiles(t, f)
-	})
-
-	t.Run("the next Stop after the first has returned", func(t *testing.T) {
-		s, f, r := setup(t)
-		unwritable(t, pendingDir(rc(t, f, r)))
-		releaseFolder := holdWriter(t, f.Store)
-		releaseRepo := holdWriter(t, rc(t, f, r).Store)
-		res, t1 := stopScratch(t, s, f, "s")
-		if !strings.Contains(failure(res), "session end not recorded in "+r) {
-			t.Fatalf("failure = %q", failure(res))
+func testDirectWriteOneStop(t *testing.T) {
+	s, f, r := directWriteSetup(t)
+	release := holdWriter(t, rc(t, f, r).Store)
+	onPublish(t, func(dir, name string, data []byte) ([]byte, bool, error) {
+		if isGuard(name) {
+			return nil, false, errors.New("injected")
 		}
-		releaseFolder()
-		releaseRepo()
-		s.clk.Advance(100 * time.Millisecond)
-		t2 := s.clk.Now().UnixMilli()
-		if _, err := Handle(context.Background(), f, Event{Kind: KindStop, SessionID: "s", StopActive: true}); err != nil {
-			t.Fatal(err)
-		}
-		requireSessionEnd(t, folderRC(f), "s", true, t1)
-		requireSessionEnd(t, rc(t, f, r), "s", true, t2)
-		requireNoPendingFiles(t, f)
-	})
-
-	t.Run("a sweep between the creator's folder commit and its repo write", func(t *testing.T) {
-		s, f, r := setup(t)
-		u := s.goRepo("unrelated")
-		ua := s.open(u)
-		unwritable(t, pendingDir(rc(t, f, r)))
-		launches := 0
-		f.EndLater = func(string) { launches++ }
-		folderDone := make(chan struct{})
-		var once sync.Once
-		inner := false
-		var sweep, innerStop Result
-		var sweepErr, innerErr, lockErr error
-		prev := endWrite
-		t.Cleanup(func() { endWrite = prev })
-		endWrite = func(slot string, write func() error) error {
-			if slot == s.folder {
-				err := write()
-				once.Do(func() { close(folderDone) })
-				return err
-			}
-			if slot == r && !inner {
-				<-folderDone
-				inner = true
-				sweep, sweepErr = Handle(context.Background(), ua, Event{Kind: KindSessionStart, SessionID: "u1", Source: "startup"})
-				// The sweep kept F and left no lock on it.
-				release, ok, err := store.TryLockFile(folderEndPath(f, s.folder, "s"))
-				if err == nil && ok {
-					release()
-				} else {
-					lockErr = fmt.Errorf("lock F after the sweep: %v, %v", ok, err)
-				}
-				s.clk.Advance(2 * time.Second)
-				innerStop, innerErr = Handle(context.Background(), f, Event{Kind: KindStop, SessionID: "s", StopActive: true})
-				inner = false
-			}
-			return write()
-		}
-		res, t1 := stopScratch(t, s, f, "s")
-		if err := errors.Join(sweepErr, sweep.Failure, lockErr, innerErr); err != nil {
-			t.Fatal(err)
-		}
-		if strings.Contains(failure(res)+failure(innerStop), "not recorded") || launches != 0 {
-			t.Fatalf("Stops reported %q / %q, launches %d", failure(res), failure(innerStop), launches)
-		}
-		requireSessionEnd(t, folderRC(f), "s", true, t1)
-		requireSessionEnd(t, rc(t, f, r), "s", true, t1)
-		requireNoPendingFiles(t, f)
-	})
-
-	t.Run("two sweeps and a new claim around one F", func(t *testing.T) {
-		for _, variant := range []string{"new file", "same file overwritten", "removal under way"} {
-			t.Run(variant, func(t *testing.T) {
-				s := newScratch(t)
-				u := s.goRepo("unrelated")
-				ua := s.open(u)
-				fdir := folderEndsDir(ua.Store)
-				gone := filepath.Join(s.base, "gone")
-				old := deadFolderEnd(t, fdir, folderEndRecord{Session: "x", Dir: gone, EndedAt: 5})
-				fpath := folderEndPath(ua, gone, "x")
-				ctx := context.Background()
-				var newF folderEndRecord
-				var releaseNew func()
-				var s2Err error
-				inner := false
-				prev := removeFile
-				t.Cleanup(func() { removeFile = prev })
-				removeFile = func(path string, match func(f *os.File, fi fs.FileInfo) bool) (bool, error) {
-					if path != fpath || inner {
-						return prev(path, match)
-					}
-					inner = true
-					defer func() { inner = false }()
-					switch variant {
-					case "new file":
-						s2Err = endPendingFolderEnds(ctx, ua, false)
-						var created bool
-						var err error
-						newF, created, releaseNew, err = claimFolderEnd(fdir, folderEndRecord{Session: "x", Dir: gone, EndedAt: 6})
-						if err != nil || !created {
-							t.Fatalf("new claim: %v %v", created, err)
-						}
-					case "same file overwritten":
-						k, err := createUnique(fdir, liveFilePrefix)
-						if err != nil {
-							t.Fatal(err)
-						}
-						_ = k.Close()
-						unlock, ok, err := store.TryLockFile(k.Name())
-						if err != nil || !ok {
-							t.Fatalf("lock K: %v %v", ok, err)
-						}
-						releaseNew = unlock
-						newF = folderEndRecord{Session: "x", Dir: gone, EndedAt: 6, Live: filepath.Base(k.Name())}
-						data := fmt.Sprintf(`{"session":"x","dir":%q,"ended_at":6,"live":%q}`, gone, newF.Live)
-						if err := os.WriteFile(fpath, []byte(data), 0o644); err != nil {
-							t.Fatal(err)
-						}
-					case "removal under way":
-						unlock, ok, err := store.TryLockFile(fpath)
-						if err != nil || !ok {
-							t.Fatalf("lock F: %v %v", ok, err)
-						}
-						s2Err = endPendingFolderEnds(ctx, ua, false)
-						unlock()
-					}
-					return prev(path, match)
-				}
-				if err := endPendingFolderEnds(ctx, ua, false); err != nil || s2Err != nil {
-					t.Fatalf("sweeps: %v, %v", err, s2Err)
-				}
-				if variant == "removal under way" {
-					for _, p := range []string{fpath, filepath.Join(fdir, old.Live)} {
-						if _, err := os.Stat(p); !errors.Is(err, fs.ErrNotExist) {
-							t.Fatalf("%s left: %v", p, err)
-						}
-					}
-					return
-				}
-				defer releaseNew()
-				got, ok, err := readEnd[folderEndRecord](fdir, filepath.Base(fpath))
-				if err != nil || !ok || got.Live != newF.Live {
-					t.Fatalf("F after the sweeps = %+v, %v, %v; want the new one", got, ok, err)
-				}
-				if running, err := fCreatorRunning(fdir, got); err != nil || !running {
-					t.Fatalf("new F's creator running = %v, %v", running, err)
-				}
-			})
-		}
-	})
-
-	t.Run("the next Stop during another writer's removal of F", func(t *testing.T) {
-		s, f, r := setup(t)
-		unwritable(t, pendingDir(rc(t, f, r)))
-		releaseFolder := holdWriter(t, f.Store)
-		releaseRepo := holdWriter(t, rc(t, f, r).Store)
-		_, t1 := stopScratch(t, s, f, "s")
-		releaseFolder()
-		releaseRepo()
-		fpath := folderEndPath(f, s.folder, "s")
-		inner := false
-		var b Result
-		var t2 int64
-		prev := removeFile
-		t.Cleanup(func() { removeFile = prev })
-		removeFile = func(path string, match func(f *os.File, fi fs.FileInfo) bool) (bool, error) {
-			if path == fpath && !inner {
-				inner = true
-				release, ok, err := store.TryLockFile(path)
-				if err != nil || !ok {
-					t.Fatalf("lock F: %v %v", ok, err)
-				}
-				b, t2 = stopScratch(t, s, f, "s")
-				release()
-				inner = false
-			}
-			return prev(path, match)
-		}
-		if err := EndRosterSessions(context.Background(), f, "s"); err != nil {
-			t.Fatal(err)
-		}
-		if strings.Contains(failure(b), folderEndsDir(f.Store)) {
-			t.Fatalf("Stop B reported %q", failure(b))
-		}
-		requireSessionEnd(t, folderRC(f), "s", true, t1)
-		requireSessionEnd(t, rc(t, f, r), "s", true, t2)
-		requireNoPendingFiles(t, f)
-	})
-
-	t.Run("an unrelated removal or lock does not make a removal miss its file", func(t *testing.T) {
-		s, f, r := setup(t)
-		u := s.goRepo("unrelated")
-		ua := s.open(u)
-		fdir := folderEndsDir(f.Store)
-		settled := func(name string) {
-			t.Helper()
-			dir := filepath.Join(s.base, name)
-			if err := os.MkdirAll(dir, 0o755); err != nil {
-				t.Fatal(err)
-			}
-			o := s.open(dir, r)
-			start(t, o, name, "startup")
-			fe := deadFolderEnd(t, fdir, folderEndRecord{Session: name, Dir: dir, EndedAt: 7})
-			if err := os.Remove(filepath.Join(fdir, fe.Live)); err != nil {
-				t.Fatal(err)
-			}
-			if _, err := o.Store.DB.Exec(`UPDATE sessions SET ended_at=7 WHERE id=?`, name); err != nil {
-				t.Fatal(err)
-			}
-		}
-		settled("b")
-		fpath := folderEndPath(f, s.folder, "s")
-		inner := false
-		var sweep Result
-		var sweepErr error
-		prev := removeFile
-		t.Cleanup(func() { removeFile = prev })
-		removeFile = func(path string, match func(f *os.File, fi fs.FileInfo) bool) (bool, error) {
-			if path == fpath && !inner {
-				inner = true
-				release, ok, err := store.TryLockFile(path)
-				if err != nil || !ok {
-					t.Fatalf("lock F: %v %v", ok, err)
-				}
-				sweep, sweepErr = Handle(context.Background(), ua, Event{Kind: KindSessionStart, SessionID: "u1", Source: "startup"})
-				release()
-				inner = false
-			}
-			return prev(path, match)
-		}
-		res, at := stopScratch(t, s, f, "s")
-		if err := errors.Join(res.Failure, sweepErr, sweep.Failure); err != nil {
-			t.Fatal(err)
-		}
-		requireSessionEnd(t, folderRC(f), "s", true, at)
-		requireNoPendingFiles(t, f)
-
-		settled("c")
-		var locks []func()
-		for _, name := range []string{"junk", ".claim-young"} {
-			release, ok, err := store.TryLockFile(filepath.Join(fdir, name))
-			if err != nil || !ok {
-				t.Fatalf("lock %s: %v %v", name, ok, err)
-			}
-			locks = append(locks, release)
-		}
-		start(t, ua, "u2", "startup")
-		for _, release := range locks {
+		if isFolder(dir) {
+			s.clk.Advance(time.Second)
 			release()
 		}
-		if _, err := os.Stat(folderEndPath(f, filepath.Join(s.base, "c"), "c")); !errors.Is(err, fs.ErrNotExist) {
-			t.Fatalf("settled F left: %v", err)
-		}
+		return linkEnd(dir, name, data)
 	})
+	_, at := stopScratch(t, s, f, "s")
+	requireSessionEnd(t, folderRC(f), "s", true, at)
+	requireSessionEnd(t, rc(t, f, r), "s", true, at)
+}
 
-	t.Run("a creator that died after publishing F", func(t *testing.T) {
-		s, f, r := setup(t)
-		unwritable(t, pendingDir(rc(t, f, r)))
-		s.clk.Advance(time.Second)
-		t1 := s.clk.Now().UnixMilli()
-		fe := deadFolderEnd(t, folderEndsDir(f.Store), folderEndRecord{Session: "s", Dir: s.folder, EndedAt: t1})
-		release, ok, err := store.TryLockFile(filepath.Join(folderEndsDir(f.Store), fe.Live))
-		if err != nil || !ok {
-			t.Fatalf("lock K: %v %v", ok, err)
+func testDirectWriteTwoOverlappingFirstStops(t *testing.T) {
+	s, f, r := directWriteSetup(t)
+	unwritable(t, pendingDir(rc(t, f, r)))
+	inner := false
+	var t2 int64
+	onPublish(t, func(dir, name string, data []byte) ([]byte, bool, error) {
+		if isFolder(dir) && !inner {
+			inner = true
+			_, t2 = stopScratch(t, s, f, "s")
+			inner = false
 		}
-		release() // as the OS does when its holder exits
-		_, t2 := stopScratch(t, s, f, "s")
-		requireSessionEnd(t, folderRC(f), "s", true, t1)
-		requireSessionEnd(t, rc(t, f, r), "s", true, t2)
-		requireNoPendingFiles(t, f)
+		return linkEnd(dir, name, data)
 	})
+	stopScratch(t, s, f, "s")
+	requireSessionEnd(t, folderRC(f), "s", true, t2)
+	requireSessionEnd(t, rc(t, f, r), "s", true, t2)
+	requireNoPendingFiles(t, f)
+}
+
+func testDirectWriteASecondStopWhileTheFirstIsStillRunning(t *testing.T) {
+	s, f, r := directWriteSetup(t)
+	unwritable(t, pendingDir(rc(t, f, r)))
+	inner := false
+	onPublish(t, func(dir, name string, data []byte) ([]byte, bool, error) {
+		existing, created, err := linkEnd(dir, name, data)
+		if isFolder(dir) && !inner {
+			inner = true
+			s.clk.Advance(time.Second)
+			stopScratch(t, s, f, "s")
+			inner = false
+		}
+		return existing, created, err
+	})
+	_, t1 := stopScratch(t, s, f, "s")
+	requireSessionEnd(t, folderRC(f), "s", true, t1)
+	requireSessionEnd(t, rc(t, f, r), "s", true, t1)
+	requireNoPendingFiles(t, f)
+}
+
+func testDirectWriteTheNextStopAfterTheFirstHasReturned(t *testing.T) {
+	s, f, r := directWriteSetup(t)
+	unwritable(t, pendingDir(rc(t, f, r)))
+	releaseFolder := holdWriter(t, f.Store)
+	releaseRepo := holdWriter(t, rc(t, f, r).Store)
+	res, t1 := stopScratch(t, s, f, "s")
+	if !strings.Contains(failure(res), "session end not recorded in "+r) {
+		t.Fatalf("failure = %q", failure(res))
+	}
+	releaseFolder()
+	releaseRepo()
+	s.clk.Advance(100 * time.Millisecond)
+	t2 := s.clk.Now().UnixMilli()
+	if _, err := Handle(context.Background(), f, Event{Kind: KindStop, SessionID: "s", StopActive: true}); err != nil {
+		t.Fatal(err)
+	}
+	requireSessionEnd(t, folderRC(f), "s", true, t1)
+	requireSessionEnd(t, rc(t, f, r), "s", true, t2)
+	requireNoPendingFiles(t, f)
+}
+
+func testDirectWriteASweepBetweenTheCreatorSFolderCommitAndItsRepoWrite(t *testing.T) {
+	s, f, r := directWriteSetup(t)
+	u := s.goRepo("unrelated")
+	ua := s.open(u)
+	unwritable(t, pendingDir(rc(t, f, r)))
+	launches := 0
+	f.EndLater = func(string) { launches++ }
+	folderDone := make(chan struct{})
+	var once sync.Once
+	inner := false
+	var sweep, innerStop Result
+	var sweepErr, innerErr, lockErr error
+	prev := endWrite
+	t.Cleanup(func() { endWrite = prev })
+	endWrite = func(slot string, write func() error) error {
+		if slot == s.folder {
+			err := write()
+			once.Do(func() { close(folderDone) })
+			return err
+		}
+		if slot == r && !inner {
+			<-folderDone
+			inner = true
+			sweep, sweepErr = Handle(context.Background(), ua, Event{Kind: KindSessionStart, SessionID: "u1", Source: "startup"})
+			// The sweep kept F and left no lock on it.
+			release, ok, err := store.TryLockFile(folderEndPath(f, s.folder, "s"))
+			if err == nil && ok {
+				release()
+			} else {
+				lockErr = fmt.Errorf("lock F after the sweep: %v, %v", ok, err)
+			}
+			s.clk.Advance(2 * time.Second)
+			innerStop, innerErr = Handle(context.Background(), f, Event{Kind: KindStop, SessionID: "s", StopActive: true})
+			inner = false
+		}
+		return write()
+	}
+	res, t1 := stopScratch(t, s, f, "s")
+	if err := errors.Join(sweepErr, sweep.Failure, lockErr, innerErr); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(failure(res)+failure(innerStop), "not recorded") || launches != 0 {
+		t.Fatalf("Stops reported %q / %q, launches %d", failure(res), failure(innerStop), launches)
+	}
+	requireSessionEnd(t, folderRC(f), "s", true, t1)
+	requireSessionEnd(t, rc(t, f, r), "s", true, t1)
+	requireNoPendingFiles(t, f)
+}
+
+func testDirectWriteTwoSweepsAndANewClaimAroundOneF(t *testing.T) {
+	for _, variant := range []string{"new file", "same file overwritten", "removal under way"} {
+		t.Run(variant, func(t *testing.T) {
+			s := newScratch(t)
+			u := s.goRepo("unrelated")
+			ua := s.open(u)
+			fdir := folderEndsDir(ua.Store)
+			gone := filepath.Join(s.base, "gone")
+			old := deadFolderEnd(t, fdir, folderEndRecord{Session: "x", Dir: gone, EndedAt: 5})
+			fpath := folderEndPath(ua, gone, "x")
+			ctx := context.Background()
+			var newF folderEndRecord
+			var releaseNew func()
+			var s2Err error
+			inner := false
+			prev := removeFile
+			t.Cleanup(func() { removeFile = prev })
+			removeFile = func(path string, match func(f *os.File, fi fs.FileInfo) bool) (bool, error) {
+				if path != fpath || inner {
+					return prev(path, match)
+				}
+				inner = true
+				defer func() { inner = false }()
+				switch variant {
+				case "new file":
+					s2Err = endPendingFolderEnds(ctx, ua, false)
+					var created bool
+					var err error
+					newF, created, releaseNew, err = claimFolderEnd(fdir, folderEndRecord{Session: "x", Dir: gone, EndedAt: 6})
+					if err != nil || !created {
+						t.Fatalf("new claim: %v %v", created, err)
+					}
+				case "same file overwritten":
+					k, err := createUnique(fdir, liveFilePrefix)
+					if err != nil {
+						t.Fatal(err)
+					}
+					_ = k.Close()
+					unlock, ok, err := store.TryLockFile(k.Name())
+					if err != nil || !ok {
+						t.Fatalf("lock K: %v %v", ok, err)
+					}
+					releaseNew = unlock
+					newF = folderEndRecord{Session: "x", Dir: gone, EndedAt: 6, Live: filepath.Base(k.Name())}
+					data := fmt.Sprintf(`{"session":"x","dir":%q,"ended_at":6,"live":%q}`, gone, newF.Live)
+					if err := os.WriteFile(fpath, []byte(data), 0o644); err != nil {
+						t.Fatal(err)
+					}
+				case "removal under way":
+					unlock, ok, err := store.TryLockFile(fpath)
+					if err != nil || !ok {
+						t.Fatalf("lock F: %v %v", ok, err)
+					}
+					s2Err = endPendingFolderEnds(ctx, ua, false)
+					unlock()
+				}
+				return prev(path, match)
+			}
+			if err := endPendingFolderEnds(ctx, ua, false); err != nil || s2Err != nil {
+				t.Fatalf("sweeps: %v, %v", err, s2Err)
+			}
+			if variant == "removal under way" {
+				for _, p := range []string{fpath, filepath.Join(fdir, old.Live)} {
+					if _, err := os.Stat(p); !errors.Is(err, fs.ErrNotExist) {
+						t.Fatalf("%s left: %v", p, err)
+					}
+				}
+				return
+			}
+			defer releaseNew()
+			got, ok, err := readEnd[folderEndRecord](fdir, filepath.Base(fpath))
+			if err != nil || !ok || got.Live != newF.Live {
+				t.Fatalf("F after the sweeps = %+v, %v, %v; want the new one", got, ok, err)
+			}
+			if running, err := fCreatorRunning(fdir, got); err != nil || !running {
+				t.Fatalf("new F's creator running = %v, %v", running, err)
+			}
+		})
+	}
+}
+
+func testDirectWriteTheNextStopDuringAnotherWriterSRemovalOfF(t *testing.T) {
+	s, f, r := directWriteSetup(t)
+	unwritable(t, pendingDir(rc(t, f, r)))
+	releaseFolder := holdWriter(t, f.Store)
+	releaseRepo := holdWriter(t, rc(t, f, r).Store)
+	_, t1 := stopScratch(t, s, f, "s")
+	releaseFolder()
+	releaseRepo()
+	fpath := folderEndPath(f, s.folder, "s")
+	inner := false
+	var b Result
+	var t2 int64
+	prev := removeFile
+	t.Cleanup(func() { removeFile = prev })
+	removeFile = func(path string, match func(f *os.File, fi fs.FileInfo) bool) (bool, error) {
+		if path == fpath && !inner {
+			inner = true
+			release, ok, err := store.TryLockFile(path)
+			if err != nil || !ok {
+				t.Fatalf("lock F: %v %v", ok, err)
+			}
+			b, t2 = stopScratch(t, s, f, "s")
+			release()
+			inner = false
+		}
+		return prev(path, match)
+	}
+	if err := EndRosterSessions(context.Background(), f, "s"); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(failure(b), folderEndsDir(f.Store)) {
+		t.Fatalf("Stop B reported %q", failure(b))
+	}
+	requireSessionEnd(t, folderRC(f), "s", true, t1)
+	requireSessionEnd(t, rc(t, f, r), "s", true, t2)
+	requireNoPendingFiles(t, f)
+}
+
+func testDirectWriteAnUnrelatedRemovalOrLockDoesNotMakeARemovalMissItsFile(t *testing.T) {
+	s, f, r := directWriteSetup(t)
+	u := s.goRepo("unrelated")
+	ua := s.open(u)
+	fdir := folderEndsDir(f.Store)
+	settled := func(name string) {
+		t.Helper()
+		dir := filepath.Join(s.base, name)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		o := s.open(dir, r)
+		start(t, o, name, "startup")
+		fe := deadFolderEnd(t, fdir, folderEndRecord{Session: name, Dir: dir, EndedAt: 7})
+		if err := os.Remove(filepath.Join(fdir, fe.Live)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := o.Store.DB.Exec(`UPDATE sessions SET ended_at=7 WHERE id=?`, name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	settled("b")
+	fpath := folderEndPath(f, s.folder, "s")
+	inner := false
+	var sweep Result
+	var sweepErr error
+	prev := removeFile
+	t.Cleanup(func() { removeFile = prev })
+	removeFile = func(path string, match func(f *os.File, fi fs.FileInfo) bool) (bool, error) {
+		if path == fpath && !inner {
+			inner = true
+			release, ok, err := store.TryLockFile(path)
+			if err != nil || !ok {
+				t.Fatalf("lock F: %v %v", ok, err)
+			}
+			sweep, sweepErr = Handle(context.Background(), ua, Event{Kind: KindSessionStart, SessionID: "u1", Source: "startup"})
+			release()
+			inner = false
+		}
+		return prev(path, match)
+	}
+	res, at := stopScratch(t, s, f, "s")
+	if err := errors.Join(res.Failure, sweepErr, sweep.Failure); err != nil {
+		t.Fatal(err)
+	}
+	requireSessionEnd(t, folderRC(f), "s", true, at)
+	requireNoPendingFiles(t, f)
+
+	settled("c")
+	var locks []func()
+	for _, name := range []string{"junk", ".claim-young"} {
+		release, ok, err := store.TryLockFile(filepath.Join(fdir, name))
+		if err != nil || !ok {
+			t.Fatalf("lock %s: %v %v", name, ok, err)
+		}
+		locks = append(locks, release)
+	}
+	start(t, ua, "u2", "startup")
+	for _, release := range locks {
+		release()
+	}
+	if _, err := os.Stat(folderEndPath(f, filepath.Join(s.base, "c"), "c")); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("settled F left: %v", err)
+	}
+}
+
+func testDirectWriteACreatorThatDiedAfterPublishingF(t *testing.T) {
+	s, f, r := directWriteSetup(t)
+	unwritable(t, pendingDir(rc(t, f, r)))
+	s.clk.Advance(time.Second)
+	t1 := s.clk.Now().UnixMilli()
+	fe := deadFolderEnd(t, folderEndsDir(f.Store), folderEndRecord{Session: "s", Dir: s.folder, EndedAt: t1})
+	release, ok, err := store.TryLockFile(filepath.Join(folderEndsDir(f.Store), fe.Live))
+	if err != nil || !ok {
+		t.Fatalf("lock K: %v %v", ok, err)
+	}
+	release() // as the OS does when its holder exits
+	_, t2 := stopScratch(t, s, f, "s")
+	requireSessionEnd(t, folderRC(f), "s", true, t1)
+	requireSessionEnd(t, rc(t, f, r), "s", true, t2)
+	requireNoPendingFiles(t, f)
 }
 
 func TestOneBusyStoreLeavesTheOthersEnded(t *testing.T) {
