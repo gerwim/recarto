@@ -484,54 +484,54 @@ func writeRepoEnds(ctx context.Context, sessionID string, row folderRow, pending
 	return busy, errs
 }
 
-func removeSettledClaims(ctx, lockCtx context.Context, a *app.App, sessionID string, covered []coveredRepo, fdir, fname, lname, rname string, tryLock bool) (bool, []error) {
+func removeSettledClaims(ctx, lockCtx context.Context, a *app.App, sessionID string, covered []coveredRepo, fdir, fname, lname, rname string, tryLock bool) []error {
 	_, fok, ferr := readEnd(fdir, fname)
 	_, lok, lerr := readEnd(fdir, lname)
 	_, rok, rerr := readEnd(fdir, rname)
 	if !fok && !lok && !rok && ferr == nil && lerr == nil && rerr == nil {
-		return false, nil
+		return nil
 	}
 	release, ok, err := lockFiles(lockCtx, []string{endClaimsLockPath(a.Store)}, tryLock)
 	if err != nil || !ok {
 		if (!ok && err == nil) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 			// The end writes already determined pending status; cleanup can wait for the next hook.
-			return false, nil
+			return nil
 		}
-		return false, []error{err}
+		return []error{err}
 	}
 	defer release()
 
 	folder, found, err := folderSession(ctx, a.Store, sessionID)
 	if err != nil {
-		return false, []error{err}
+		return []error{err}
 	}
 	if !found || !folder.ended.Valid {
-		return false, nil
+		return nil
 	}
 	f, fok, err := readEnd(fdir, fname)
 	if err != nil {
-		return false, []error{err}
+		return []error{err}
 	}
 	errs := []error{removeEnd(fdir, lname), removeEnd(fdir, rname)}
 	if !fok {
-		return false, errs
+		return errs
 	}
 	for _, wt := range f.Repos {
 		i := slices.IndexFunc(covered, func(c coveredRepo) bool { return c.Git.Worktree == wt })
 		if i < 0 {
-			return false, errs
+			return errs
 		}
 		var ended bool
 		if err := covered[i].Store.DB.QueryRowContext(ctx,
 			`SELECT EXISTS(SELECT 1 FROM sessions WHERE id=? AND ended_at IS NOT NULL)`, sessionID).Scan(&ended); err != nil {
-			return false, append(errs, err)
+			return append(errs, err)
 		}
 		if !ended {
-			return false, errs
+			return errs
 		}
 	}
 	errs = append(errs, removeEnd(fdir, fname))
-	return false, errs
+	return errs
 }
 
 // endConversation writes sessionID's folder and repo session ends, inserting
@@ -618,8 +618,7 @@ func endConversation(ctx, lockCtx context.Context, a *app.App, sessionID string,
 	e.pending = e.pending || repoBusy
 	errs = append(errs, repoErrs...)
 
-	busy, cleanupErrs := removeSettledClaims(ctx, lockCtx, a, sessionID, covered, fdir, fname, lname, rname, tryLock)
-	e.pending = e.pending || busy
+	cleanupErrs := removeSettledClaims(ctx, lockCtx, a, sessionID, covered, fdir, fname, lname, rname, tryLock)
 	errs = append(errs, cleanupErrs...)
 	return e, errors.Join(errs...)
 }
