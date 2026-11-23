@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -136,6 +137,33 @@ func TestEndRecordFiles(t *testing.T) {
 	t.Run("list and sweep", testListAndRemoveStaleEnds)
 	t.Run("folder end and its creator", testClaimFolderEnd)
 	t.Run("spellings of a record's name", testListSpellings)
+	t.Run("a claim's store liveness files", testClaimWrites)
+}
+
+func testClaimWrites(t *testing.T) {
+	folder := t.TempDir()
+	name := folderEndName(gitctx.NonGitID(folder), "s")
+	decode := func(writes map[string]string) (folderEndRecord, error) {
+		data, err := json.Marshal(folderEndRecord{Session: "s", Dir: folder, EndedAt: 9, Live: liveFilePrefix + "k", Writes: writes})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return decodeEnd[folderEndRecord](name, data)
+	}
+	for _, bad := range []map[string]string{
+		{"repo": "../" + liveFilePrefix + "w"},
+		{"repo": "w"},
+		{"": liveFilePrefix + "w"},
+	} {
+		if _, err := decode(bad); err == nil {
+			t.Fatalf("a claim with writes %v was read", bad)
+		}
+	}
+	want := map[string]string{"folder": liveFilePrefix + "a", "repo": liveFilePrefix + "b"}
+	got, err := decode(want)
+	if err != nil || !maps.Equal(got.Writes, want) {
+		t.Fatalf("claim = %+v, %v; want writes %v", got, err, want)
+	}
 }
 
 func testClaimEndFirstWins(t *testing.T) {

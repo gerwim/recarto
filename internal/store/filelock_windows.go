@@ -32,6 +32,25 @@ func lockFile(f *os.File, wait, shared bool) (bool, error) {
 	return err == nil, err
 }
 
+// openShared opens the existing file at path for reading, for a probe or a
+// shared lock.
+//
+// A probe or a shared waiter must never keep a liveness file's creator from
+// removing it: Windows refuses a deletion while any handle lacks FILE_SHARE_DELETE.
+func openShared(path string) (*os.File, error) {
+	name, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return nil, &fs.PathError{Op: "open", Path: path, Err: err}
+	}
+	h, err := windows.CreateFile(name, windows.GENERIC_READ,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil,
+		windows.OPEN_EXISTING, windows.FILE_ATTRIBUTE_NORMAL, 0)
+	if err != nil {
+		return nil, &fs.PathError{Op: "open", Path: path, Err: err}
+	}
+	return os.NewFile(uintptr(h), path), nil
+}
+
 // RemoveIf removes the file at path if match, called on that file as opened
 // and before any lock, recognizes it as the file the caller decided to remove.
 // match only recognizes; the decision is the caller's, made beforehand. It
@@ -77,7 +96,7 @@ func RemoveIf(path string, match func(f *os.File, fi fs.FileInfo) bool) (removed
 // LockHeld reports whether an exclusive holder (LockFile, TryLockFile) has the
 // lock on the existing file at path. A missing file fails with fs.ErrNotExist.
 func LockHeld(path string) (held bool, err error) {
-	f, err := os.Open(path)
+	f, err := openShared(path)
 	if errors.Is(err, windows.ERROR_SHARING_VIOLATION) {
 		// Only a deletion opens these files with delete access, and it gets that
 		// open only while no other handle, an exclusive holder's included, has

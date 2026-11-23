@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 // tryLockFile is lockFile without the wait.
@@ -42,13 +43,23 @@ func LockFile(ctx context.Context, path string, waiting func()) (release func(),
 	if waiting != nil {
 		waiting()
 	}
+	if _, err := awaitLock(ctx, f, false, nil); err != nil {
+		return nil, err
+	}
+	return unlock, nil
+}
+
+// awaitLock waits for the lock on f, exclusive or shared, until it is got, ctx
+// is done or timeout fires. ok is false when the wait ended without the lock;
+// f is then closed, at once or, for an abandoned wait, once that wait ends.
+func awaitLock(ctx context.Context, f *os.File, shared bool, timeout <-chan time.Time) (ok bool, err error) {
 	type result struct {
 		ok  bool
 		err error
 	}
 	got := make(chan result, 1)
 	go func() {
-		ok, err := lockFile(f, true, false)
+		ok, err := lockFile(f, true, shared)
 		got <- result{ok, err}
 	}()
 	select {
@@ -57,16 +68,19 @@ func LockFile(ctx context.Context, path string, waiting func()) (release func(),
 			r.err = errors.New("lock wait ended without the lock")
 		}
 		if r.err != nil {
-			unlock()
-			return nil, r.err
+			// Nothing is held, so a close error loses nothing.
+			_ = f.Close()
+			return false, r.err
 		}
-		return unlock, nil
+		return true, nil
 	case <-ctx.Done():
-		// The abandoned wait still holds f; closing it once the wait ends means
-		// it never keeps the lock.
-		go func() { <-got; unlock() }()
-		return nil, ctx.Err()
+		err = ctx.Err()
+	case <-timeout:
 	}
+	// The abandoned wait still holds f; closing it once the wait ends means it
+	// never keeps the lock.
+	go func() { <-got; _ = f.Close() }()
+	return false, err
 }
 
 // TryLockFile is LockFile without the wait: ok is false, with nothing held,
@@ -90,7 +104,7 @@ func TryLockFile(path string) (release func(), ok bool, err error) {
 // while an exclusive holder (LockFile, TryLockFile) has it. Unlike them it
 // never creates the file: a missing file fails with fs.ErrNotExist.
 func TryShareLockFile(path string) (release func(), ok bool, err error) {
-	f, err := os.Open(path)
+	f, err := openShared(path)
 	if err != nil {
 		return nil, false, err
 	}
@@ -101,4 +115,40 @@ func TryShareLockFile(path string) (release func(), ok bool, err error) {
 		return nil, false, err
 	}
 	return func() { _ = f.Close() }, true, nil
+}
+
+// WaitShareLockFile takes a shared lock on the existing file at path, waiting
+// while an exclusive holder has it until ctx is done or ctx's write deadline
+// (WithWriteDeadline) has passed; a deadline already passed gets one try.
+// ok is false, with nothing held, when the wait ended without the lock. A
+// missing file fails with fs.ErrNotExist; the file is never created.
+func WaitShareLockFile(ctx context.Context, path string) (release func(), ok bool, err error) {
+	f, err := openShared(path)
+	if err != nil {
+		return nil, false, err
+	}
+	release = func() { _ = f.Close() }
+	ok, err = lockFile(f, false, true)
+	if err != nil {
+		release()
+		return nil, false, err
+	}
+	if ok {
+		return release, true, nil
+	}
+	var timeout <-chan time.Time
+	if deadline, has := writeDeadline(ctx); has {
+		left := time.Until(deadline)
+		if left <= 0 {
+			release()
+			return nil, false, nil
+		}
+		timer := time.NewTimer(left)
+		defer timer.Stop()
+		timeout = timer.C
+	}
+	if ok, err := awaitLock(ctx, f, true, timeout); !ok {
+		return nil, false, err
+	}
+	return release, true, nil
 }

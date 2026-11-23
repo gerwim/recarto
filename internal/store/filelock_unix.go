@@ -36,6 +36,10 @@ func lockFile(f *os.File, wait, shared bool) (bool, error) {
 	}
 }
 
+// openShared opens the existing file at path for reading, for a probe or a
+// shared lock.
+func openShared(path string) (*os.File, error) { return os.Open(path) }
+
 // RemoveIf removes the file at path if match, called on that file as opened
 // and before any lock, recognizes it as the file the caller decided to remove.
 // match only recognizes; the decision is the caller's, made beforehand. The

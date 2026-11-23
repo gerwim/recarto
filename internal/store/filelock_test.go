@@ -148,3 +148,146 @@ func TestRemoveIfLeavesAReplacement(t *testing.T) {
 		})
 	}
 }
+
+// newLockTarget creates an empty file to lock and returns its path.
+func newLockTarget(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "live")
+	if err := os.WriteFile(path, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+type shareResult struct {
+	release func()
+	ok      bool
+	err     error
+}
+
+// waitShare runs WaitShareLockFile in a goroutine.
+func waitShare(ctx context.Context, path string) <-chan shareResult {
+	got := make(chan shareResult, 1)
+	go func() {
+		release, ok, err := WaitShareLockFile(ctx, path)
+		got <- shareResult{release, ok, err}
+	}()
+	return got
+}
+
+func receiveShare(t *testing.T, got <-chan shareResult) shareResult {
+	t.Helper()
+	select {
+	case r := <-got:
+		return r
+	case <-time.After(time.Minute):
+		t.Fatal("WaitShareLockFile hung")
+		return shareResult{}
+	}
+}
+
+func TestWaitShareLockFile(t *testing.T) {
+	t.Run("waits for the exclusive holder", func(t *testing.T) {
+		path := newLockTarget(t)
+		release, ok, err := TryLockFile(path)
+		if err != nil || !ok {
+			t.Fatalf("TryLockFile = %v, %v", ok, err)
+		}
+		got := waitShare(context.Background(), path)
+		release()
+		r := receiveShare(t, got)
+		if r.err != nil || !r.ok {
+			t.Fatalf("WaitShareLockFile = %v, %v; want the lock", r.ok, r.err)
+		}
+		defer r.release()
+		if held, err := LockHeld(path); err != nil || held {
+			t.Fatalf("LockHeld = %v, %v; a shared holder is no exclusive one", held, err)
+		}
+	})
+	t.Run("a write deadline already passed", func(t *testing.T) {
+		path := newLockTarget(t)
+		release, ok, err := TryLockFile(path)
+		if err != nil || !ok {
+			t.Fatalf("TryLockFile = %v, %v", ok, err)
+		}
+		defer release()
+		ctx := WithWriteDeadline(context.Background(), time.Now().Add(-time.Second))
+		r := receiveShare(t, waitShare(ctx, path))
+		if r.err != nil || r.ok {
+			t.Fatalf("WaitShareLockFile = %v, %v; want no lock and no error", r.ok, r.err)
+		}
+	})
+	t.Run("an abandoned wait keeps nothing", func(t *testing.T) {
+		path := newLockTarget(t)
+		release, ok, err := TryLockFile(path)
+		if err != nil || !ok {
+			t.Fatalf("TryLockFile = %v, %v", ok, err)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		got := waitShare(ctx, path)
+		cancel()
+		if r := receiveShare(t, got); !errors.Is(r.err, context.Canceled) || r.ok {
+			t.Fatalf("WaitShareLockFile = %v, %v; want context.Canceled", r.ok, r.err)
+		}
+		release()
+		deadline := time.Now().Add(time.Minute)
+		for {
+			release, ok, err := TryLockFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if ok {
+				release()
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("the abandoned wait kept the lock")
+			}
+			time.Sleep(time.Millisecond)
+		}
+	})
+	t.Run("a missing file", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "missing")
+		if _, _, err := WaitShareLockFile(context.Background(), path); !errors.Is(err, fs.ErrNotExist) {
+			t.Fatalf("WaitShareLockFile = %v; want fs.ErrNotExist", err)
+		}
+		if _, err := os.Stat(path); !errors.Is(err, fs.ErrNotExist) {
+			t.Fatalf("stat = %v; the file was created", err)
+		}
+	})
+}
+
+func TestSharedHoldersDoNotBlockRemoval(t *testing.T) {
+	removeWhileHeld := func(t *testing.T, path string, release func()) {
+		t.Helper()
+		if err := os.Remove(path); err != nil {
+			t.Fatalf("remove while a shared holder has the file: %v", err)
+		}
+		release()
+		if _, err := os.Stat(path); !errors.Is(err, fs.ErrNotExist) {
+			t.Fatalf("stat after release = %v; want fs.ErrNotExist", err)
+		}
+	}
+	t.Run("a probe's or shared holder's handle", func(t *testing.T) {
+		path := newLockTarget(t)
+		release, ok, err := TryShareLockFile(path)
+		if err != nil || !ok {
+			t.Fatalf("TryShareLockFile = %v, %v", ok, err)
+		}
+		removeWhileHeld(t, path, release)
+	})
+	t.Run("a waiter that got the lock", func(t *testing.T) {
+		path := newLockTarget(t)
+		release, ok, err := TryLockFile(path)
+		if err != nil || !ok {
+			t.Fatalf("TryLockFile = %v, %v", ok, err)
+		}
+		got := waitShare(context.Background(), path)
+		release()
+		r := receiveShare(t, got)
+		if r.err != nil || !r.ok {
+			t.Fatalf("WaitShareLockFile = %v, %v; want the lock", r.ok, r.err)
+		}
+		removeWhileHeld(t, path, r.release)
+	})
+}
