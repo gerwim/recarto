@@ -28,7 +28,8 @@ func (e *Engine) IndexFile(ctx context.Context, worktree, path string, src []byt
 	}
 	g := buildFileGraph(src, res)
 	hash := sha256hex(src)
-	now := e.clk.Now().UnixMilli()
+	t := e.clk.Now()
+	now := t.UnixMilli()
 	edits, err := e.pendingEdits(worktree)
 	if err != nil {
 		return err
@@ -36,7 +37,7 @@ func (e *Engine) IndexFile(ctx context.Context, worktree, path string, src []byt
 	// The hook's own edit is the latest its version includes, so its change
 	// keeps the hook's time; the edits left to another index that this version
 	// includes are part of it.
-	done, _ := creditOf(edits[path], hash, now, now)
+	done, _ := creditOf(edits[path], hash, t.UnixNano(), now)
 	if err := e.st.WriteTx(ctx, func(c store.Conn) error {
 		st, err := prepareWriteStmts(ctx, c)
 		if err != nil {
@@ -73,7 +74,7 @@ func (e *Engine) ReindexFileIncremental(ctx context.Context, worktree, path stri
 		// the edit: leave the edit to that process. Its record comes before
 		// the mark, so the pass the mark starts sees it. A record that fails
 		// still leaves the mark: the edit is indexed, as a version no record names.
-		err = errors.Join(e.recordEdit(worktree, path, src, e.clk.Now().UnixMilli()), e.markDeferred(worktree))
+		err = errors.Join(e.recordEdit(worktree, path, src, e.clk.Now().UnixNano()), e.markDeferred(worktree))
 	}
 	return errors.Join(err, e.takeDeferred(ctx, worktree))
 }

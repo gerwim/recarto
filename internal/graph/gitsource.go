@@ -5,12 +5,14 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/gerwim/recarto/internal/parse"
@@ -86,11 +88,29 @@ func indexable(root, rel string) (FileEntry, bool) {
 	if _, ok := parse.LangForExt(rel); !ok {
 		return FileEntry{}, false
 	}
-	info, err := os.Stat(filepath.Join(root, filepath.FromSlash(rel)))
-	if err != nil || info.IsDir() {
-		return FileEntry{}, false // listed but gone (e.g. deleted but staged)
+	info, err := fileAt(root, rel)
+	if err != nil || info == nil {
+		// Listed but gone (e.g. deleted but staged), or a stat failure: the
+		// index could not read it either.
+		return FileEntry{}, false
 	}
 	return FileEntry{Path: rel, Mtime: info.ModTime().UnixMilli(), Size: info.Size()}, true
+}
+
+// fileAt returns the file at slash-separated rel under root, or nil when the
+// path holds none: it is missing, an ancestor of it is no longer a directory,
+// or it is a directory. Any other failure to stat it is returned.
+func fileAt(root, rel string) (fs.FileInfo, error) {
+	info, err := os.Stat(filepath.Join(root, filepath.FromSlash(rel)))
+	switch {
+	case errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR):
+		return nil, nil
+	case err != nil:
+		return nil, err
+	case info.IsDir():
+		return nil, nil
+	}
+	return info, nil
 }
 
 // inGitRepo reports whether root lies in a git repository.

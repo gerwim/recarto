@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/gerwim/recarto/internal/ids"
 	"github.com/gerwim/recarto/internal/parse"
@@ -100,9 +101,9 @@ func (e *Engine) takeDeferred(ctx context.Context, worktree string) error {
 // worktree's index lock. Its change counts at At once an index reads the
 // version it made.
 type pendingEdit struct {
-	Path string `json:"path"` // worktree-relative, slash-separated: files.path
-	Hash string `json:"hash"` // sha256hex of the bytes the hook read
-	At   int64  `json:"at"`   // the hook's clock, Unix ms
+	Path string `json:"path"`  // worktree-relative, slash-separated: files.path
+	Hash string `json:"hash"`  // sha256hex of the bytes the hook read
+	At   int64  `json:"at_ns"` // the hook's clock, Unix ns
 	name string // the record's file name in editsDir
 }
 
@@ -166,10 +167,11 @@ func (e *Engine) pendingEdits(worktree string) (map[string][]pendingEdit, error)
 			return nil, err
 		}
 		var pe pendingEdit
-		if json.Unmarshal(b, &pe) != nil || pe.Path == "" || pe.Hash == "" {
+		if json.Unmarshal(b, &pe) != nil || pe.Path == "" || pe.Hash == "" || pe.At <= 0 {
 			// A record cut short (a power loss) can only cost its edit's credit:
 			// the edit itself is still indexed through the file's changed stat.
-			// Kept, it would fail every index.
+			// Kept, it would fail every index. A record with no time cannot be
+			// ordered, and one from an earlier build has none under at_ns.
 			if err := os.Remove(p); err != nil && !errors.Is(err, fs.ErrNotExist) {
 				return nil, err
 			}
@@ -194,7 +196,9 @@ func (e *Engine) pendingEdits(worktree string) (map[string][]pendingEdit, error)
 // edits are the file's pending records in (At, name) order. It returns the
 // records the version includes, to remove once its write commits, and the
 // time the change counts at. An absent file's hash is empty, which no record
-// has.
+// has. readAt and the records' times are Unix ns, so a hook, a change after it
+// and a read within one millisecond keep their order; now and the time
+// returned are the journal's Unix ms.
 //
 // L, the last edit recorded before the read, is in what was read; F, the one
 // right after it, is the only later record that may still be in it, its hook
@@ -212,16 +216,19 @@ func creditOf(edits []pendingEdit, hash string, readAt, now int64) (done []pendi
 		}
 	}
 	if l >= 0 && edits[l].Hash == hash {
-		return edits[:l+1], edits[l].At
+		return edits[:l+1], msOf(edits[l].At)
 	}
 	if f := l + 1; f < len(edits) && edits[f].Hash == hash {
-		return edits[:f+1], edits[f].At
+		return edits[:f+1], msOf(edits[f].At)
 	}
 	if l >= 0 {
-		return edits[:l+1], edits[l].At
+		return edits[:l+1], msOf(edits[l].At)
 	}
 	return nil, now
 }
+
+// msOf returns Unix ns time t in the journal's Unix ms.
+func msOf(t int64) int64 { return t / int64(time.Millisecond) }
 
 // creditBatch returns the time each version in batch counts at, and the
 // records the versions include, to remove once the batch commits. now must be

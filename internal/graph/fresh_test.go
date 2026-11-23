@@ -15,15 +15,21 @@ import (
 )
 
 // gatedSource blocks List until its gate closes, simulating a long first index
-// or refresh, and counts List calls to observe singleflight behavior.
+// or refresh, and counts List calls to observe singleflight behavior. A non-nil
+// entered hears of each List as it starts to wait.
 type gatedSource struct {
-	inner Source
-	gate  chan struct{}
-	lists atomic.Int64
+	inner   Source
+	gate    chan struct{}
+	entered chan struct{}
+	lists   atomic.Int64
 }
 
 func (g *gatedSource) List() ([]FileEntry, error) {
 	g.lists.Add(1)
+	select {
+	case g.entered <- struct{}{}:
+	default:
+	}
 	<-g.gate
 	return g.inner.List()
 }

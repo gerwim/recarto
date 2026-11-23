@@ -699,10 +699,93 @@ func TestEditOfAFileGoneBeforeTheReadCreditsNothingLater(t *testing.T) {
 	f.laterChangeCountsInItsSession()
 }
 
+// listingHeld starts an index of f's worktree whose listing waits until the
+// returned gate closes, and returns once the listing has begun.
+func (f *deferFixture) listingHeld() (gate chan struct{}, done chan error) {
+	f.t.Helper()
+	src := &gatedSource{inner: FSSource{Root: f.wt}, gate: make(chan struct{}), entered: make(chan struct{}, 1)}
+	done = make(chan error, 1)
+	go func() { done <- f.idx.ReconcileIfStale(f.ctx, f.wt, src, "") }()
+	select {
+	case <-src.entered:
+	case <-time.After(hangTimeout):
+		f.t.Fatal("the index did not begin listing")
+	}
+	return src.gate, done
+}
+
+func TestDeletionSeenDuringAListingCountsInTheEditingSession(t *testing.T) {
+	f := newDeferFixture(t)
+	gate, done := f.listingHeld()
+	s1 := f.tick()
+	f.edit("a.go", "A", "Foo")
+	f.tick()
+	if err := os.Remove(filepath.Join(f.wt, "a.go")); err != nil { // unreported
+		t.Fatal(err)
+	}
+	addSession(t, f.idx, f.wt, "s1", s1, f.tick())
+	f.tick()
+	close(gate) // the listing finds a.go gone, after S1's hook and the removal
+	awaitErr(t, "index", done)
+
+	f.wantListed(s1, map[string]string{"A": "removed"})
+}
+
+func TestHookAndReadInOneMillisecondKeepTheirOrder(t *testing.T) {
+	f := newDeferFixture(t)
+	writeGo(t, f.wt, "b.go", "B")
+	src, done := f.hold()
+	s1 := f.tick()
+	f.tick()
+	f.edit("a.go", "A", "Foo")
+	f.clk.Advance(200 * time.Microsecond)
+	// A formatter run no hook reports: the same symbols in other bytes.
+	writeSrc(t, f.wt, "a.go", []byte("package p\n\nfunc A() {}\n\nfunc Foo() {\n}\n"))
+	f.clk.Advance(200 * time.Microsecond)
+	addSession(t, f.idx, f.wt, "s1", s1, f.now())
+	f.clk.Advance(200 * time.Microsecond)
+	release(t, src, true) // the drain reads a.go in the hook's millisecond, after it
+	f.tick()
+	release(t, src, false)
+	awaitErr(t, "index", done)
+
+	f.wantListed(s1, map[string]string{"Foo": "added"})
+}
+
+func TestFileWhoseDirectoryBecameAFileDuringAListingCountsInTheEditingSession(t *testing.T) {
+	f := newDeferFixture(t)
+	pkg := filepath.Join(f.wt, "pkg")
+	if err := os.Mkdir(pkg, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeGo(t, f.wt, "pkg/c.go", "C")
+	if err := f.idx.ReconcileIfStale(f.ctx, f.wt, FSSource{Root: f.wt}, ""); err != nil {
+		t.Fatal(err)
+	}
+	f.tick()
+	gate, done := f.listingHeld()
+	s1 := f.tick()
+	f.edit("pkg/c.go", "C", "Foo")
+	f.tick()
+	// A branch switch, unreported: the directory is now a file.
+	if err := os.RemoveAll(pkg); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(pkg, []byte("not a directory\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	addSession(t, f.idx, f.wt, "s1", s1, f.tick())
+	f.tick()
+	close(gate)
+	awaitErr(t, "index", done)
+
+	f.wantListed(s1, map[string]string{"C": "removed"})
+}
+
 func TestUnreadableEditRecordDoesNotFailTheIndex(t *testing.T) {
 	f := newDeferFixture(t)
 	b, _, _ := writeGo(t, f.wt, "a.go", "A", "Foo")
-	if err := f.idx.recordEdit(f.wt, "a.go", b, f.now()); err != nil {
+	if err := f.idx.recordEdit(f.wt, "a.go", b, f.clk.Now().UnixNano()); err != nil {
 		t.Fatal(err)
 	}
 	bad := filepath.Join(f.idx.editsDir(f.wt), "cut-short.json")

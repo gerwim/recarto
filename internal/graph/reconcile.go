@@ -37,7 +37,7 @@ type parsedFile struct {
 	graph       fileGraph
 	hash        string
 	mtime, size int64
-	readAt      int64 // when the version was read, Unix ms
+	readAt      int64 // when the version was read, Unix ns
 }
 
 // Reconcile makes the worktree's graph match src: it (re)indexes new and changed
@@ -167,8 +167,12 @@ func (e *Engine) removeVanished(ctx context.Context, worktree string, have map[s
 		if seen[p] {
 			continue
 		}
-		d, at := creditOf(edits[p], "", listedAt, now)
-		if err := e.deleteFile(ctx, worktree, p, stamp{at: at, seen: listedAt, now: now}); err != nil {
+		absent, err := e.absentAt(worktree, p, edits[p], listedAt)
+		if err != nil {
+			return false, err
+		}
+		d, at := creditOf(edits[p], "", absent, now)
+		if err := e.deleteFile(ctx, worktree, p, stamp{at: at, seen: msOf(absent), now: now}); err != nil {
 			return false, err
 		}
 		done = append(done, d...)
@@ -177,12 +181,39 @@ func (e *Engine) removeVanished(ctx context.Context, worktree string, have map[s
 	// An edit of a path never indexed and gone by the listing: kept, its record
 	// would credit a later re-creation of the path to its old session.
 	for p, pes := range edits {
-		if _, known := have[p]; !known && !seen[p] {
-			d, _ := creditOf(pes, "", listedAt, now)
-			done = append(done, d...)
+		if _, known := have[p]; known || seen[p] {
+			continue
 		}
+		absent, err := e.absentAt(worktree, p, pes, listedAt)
+		if err != nil {
+			return false, err
+		}
+		d, _ := creditOf(pes, "", absent, now)
+		done = append(done, d...)
 	}
 	return removed, e.removeEdits(worktree, done)
+}
+
+// absentAt returns when path, which the listing that started at listedAt did
+// not find, counts as seen absent (Unix ns). A listing takes time: an edit
+// recorded at or after listedAt may come before the listing saw path gone
+// (then the absence includes it) or after (the edit made path again). A
+// fresh check tells them apart: path still absent counts as absent at the
+// check; path present keeps listedAt and leaves the edit to the read its
+// record brings.
+func (e *Engine) absentAt(worktree, path string, edits []pendingEdit, listedAt int64) (int64, error) {
+	if len(edits) == 0 || edits[len(edits)-1].At < listedAt {
+		return listedAt, nil
+	}
+	checked := e.clk.Now().UnixNano()
+	info, err := fileAt(worktree, path)
+	if err != nil {
+		return 0, err
+	}
+	if info == nil {
+		return checked, nil
+	}
+	return listedAt, nil
 }
 
 func (e *Engine) Reconcile(ctx context.Context, worktree string, src Source, opts ...ReconcileOption) error {
@@ -196,7 +227,7 @@ func (e *Engine) Reconcile(ctx context.Context, worktree string, src Source, opt
 	marked := e.resolvePending(ctx, worktree)
 	pending := o.force || marked || e.graphIndexesMissing(ctx)
 
-	listedAt := e.clk.Now().UnixMilli()
+	listedAt := e.clk.Now().UnixNano()
 	entries, err := src.List()
 	if err != nil {
 		return err
@@ -401,7 +432,7 @@ func (e *Engine) indexWorklist(ctx context.Context, worktree string, src Source,
 		err   error
 	}
 	readParse := func(fe FileEntry) outcome {
-		readAt := e.clk.Now().UnixMilli()
+		readAt := e.clk.Now().UnixNano()
 		content, err := src.Read(fe.Path)
 		if err != nil {
 			return outcome{err: err}
@@ -491,7 +522,7 @@ func (e *Engine) indexWorklist(ctx context.Context, worktree string, src Source,
 			defer st.Close()
 			for i, pf := range batch {
 				if err := e.writeFileGraph(ctx, c, st, worktree, pf.path, pf.lang,
-					pf.graph, pf.hash, pf.mtime, pf.size, stamp{at: ats[i], seen: pf.readAt, now: now}); err != nil {
+					pf.graph, pf.hash, pf.mtime, pf.size, stamp{at: ats[i], seen: msOf(pf.readAt), now: now}); err != nil {
 					return err
 				}
 			}
