@@ -1562,6 +1562,31 @@ func TestBorrowedClaimAfterItsCreatorReturned(t *testing.T) {
 	})
 	t.Run("the creator records a time between the borrower's read and its probe", testBorrowedRecordBeforeProbe)
 	t.Run("a busy store does not delay another store's retry", testBorrowedBusyStoreApart)
+	t.Run("the creator records a time and still tries the store at B's deadline", testBorrowedRecordedAtDeadline)
+}
+
+// testBorrowedRecordedAtDeadline lets A publish F and M and write the folder
+// after B's first decisions, while A still holds its repo lock when B's wait
+// for it ends.
+func testBorrowedRecordedAtDeadline(t *testing.T) {
+	c := newBorrowedClaim(t, &borrowedClaim{})
+	gates := c.gateA(c.r)
+	folderTried := c.signalA(c.s.folder)
+	c.bHold = map[string]int{c.s.folder: holdAfter, c.r: holdAfter}
+	c.open(2)
+	c.phase.Store(stopA)
+	close(c.resumeA)
+	if err := <-folderTried; err != nil {
+		t.Fatalf("A's folder write = %v; want nil", err)
+	}
+	<-gates[c.r].at
+	b := c.finishB()
+	requireSessionEnd(t, c.repo, "s", true, c.tA)
+	close(gates[c.r].open)
+	a := <-c.doneA
+	c.aReturned.Store(true)
+	c.requireNamed(t, a, false, false)
+	c.require(t, c.tA, c.tA, b, a)
 }
 
 func testBorrowedNewerStop(t *testing.T) {

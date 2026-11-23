@@ -1388,8 +1388,9 @@ func (c *conversationEnding) writeBorrowed() {
 	c.errs = append(c.errs, c.folderErr)
 }
 
-// runSlot runs one borrowing slot's write, and decides again each time the
-// store it left is no longer tried by the claim's creator; the last outcome holds.
+// runSlot runs one borrowing slot's write, decides again each time the store it
+// left is no longer tried by the claim's creator, and once more when its wait
+// for that ends without the lock; the last outcome holds.
 //
 // A slot can leave its store while the claim's creator still tries it, and the
 // creator can then stop trying it, or return, without writing it. The slot
@@ -1404,7 +1405,7 @@ func (c *conversationEnding) runSlot(i int) {
 		}
 		return w()
 	}
-	for {
+	for final := false; ; {
 		var left bool
 		if i == folderSlot {
 			c.folderBusy, c.folderLeft, c.folderErr = c.writeSlot(c.a.Dir, write, func() error { return nil })
@@ -1414,9 +1415,14 @@ func (c *conversationEnding) runSlot(i int) {
 			s.busy, s.left, s.err = c.writeSlot(c.targets[i].wt, write, func() error { return s.r.remove(pdir) })
 			left = s.left
 		}
-		if !left || !c.awaitCreator(i) {
+		if !left || final {
 			return
 		}
+		// A wait that ends without the lock ended at this Stop's write deadline,
+		// or failed. The creator may have recorded this store's end meanwhile, so
+		// the slot decides once more. A passed deadline gives the store write one
+		// try, so this adds no wait.
+		final = !c.awaitCreator(i)
 	}
 }
 
