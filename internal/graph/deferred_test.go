@@ -488,6 +488,7 @@ func TestLateEditRecordCreditsNothingLater(t *testing.T) {
 	release(t, src, true)     // a.go is written with no record naming it; the drain pass reads b.go
 	f.tick()
 	f.postEdit("a.go", b, mtime, size) // a.go's hook, late
+	release(t, src, true)              // its record makes the next pass read a.go again
 	release(t, src, false)
 	awaitErr(t, "index", done)
 
@@ -509,23 +510,193 @@ func TestRevertedEditCreditsNothingLater(t *testing.T) {
 	f.laterChangeCountsInItsSession()
 }
 
-func TestFileRemovedAndRecreatedDuringAnIndexReadsAsChanged(t *testing.T) {
+func TestFileRecreatedDuringAnIndexCountsInTheRecreatingSession(t *testing.T) {
 	f := newDeferFixture(t)
 	if err := os.Remove(filepath.Join(f.wt, "a.go")); err != nil {
 		t.Fatal(err)
 	}
 	writeGo(t, f.wt, "b.go", "B")
 	src, done := f.hold() // listed without a.go
+	s1 := f.tick()
+	f.edit("a.go", "A", "Extra") // an agent re-creates it
+	addSession(t, f.idx, f.wt, "s1", s1, f.tick())
+	s2 := f.tick()
+	addSession(t, f.idx, f.wt, "s2", s2, f.tick())
 	f.tick()
-	f.edit("a.go", "A") // an agent re-creates it
-	f.tick()
-	release(t, src, true) // the pass deletes a.go's graph after the record; the drain pass reads a.go
+	release(t, src, true) // the pass deletes a.go's graph after S1; the drain pass reads a.go
 	release(t, src, false)
 	awaitErr(t, "index", done)
 
-	if got := changesSince(t, f.idx, f.wt, 0); !maps.Equal(got, map[string]string{"A": "changed"}) {
-		t.Errorf("changes = %v; want A changed", got)
+	f.wantListed(s1, map[string]string{"A": "added", "Extra": "added"})
+}
+
+func TestSameStatEditAfterTheReadIsReadByTheNextPass(t *testing.T) {
+	f := newDeferFixture(t)
+	writeGo(t, f.wt, "b.go", "B")
+	src, done := f.hold()
+	s1 := f.tick()
+	b, mtime, size := writeSrc(t, f.wt, "a.go", []byte("package p\n\nfunc A() {}\n\nfunc Foo() {}\n\n// padding...\n"))
+	f.postEdit("a.go", b, mtime, size)
+	addSession(t, f.idx, f.wt, "s1", s1, f.tick())
+	f.tick()
+	release(t, src, true) // the drain pass reads the padded a.go
+	s2 := f.tick()
+	// Same length, and the mtime set back: the stat the pass stores.
+	b = []byte("package p\n\nfunc A() {}\n\nfunc Foo() {}\n\nfunc Bar() {}\n")
+	if int64(len(b)) != size {
+		t.Fatalf("S2's bytes are %d long; want %d", len(b), size)
 	}
+	p := filepath.Join(f.wt, "a.go")
+	if err := os.WriteFile(p, b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(p, time.UnixMilli(mtime), time.UnixMilli(mtime)); err != nil {
+		t.Fatal(err)
+	}
+	f.postEdit("a.go", b, mtime, size)
+	addSession(t, f.idx, f.wt, "s2", s2, f.tick())
+	f.tick()
+	release(t, src, true) // the next pass reads a.go although its stat is the stored one
+
+	f.wantListed(s1, map[string]string{"Foo": "added"})
+	release(t, src, false)
+	awaitErr(t, "index", done)
+	f.wantListed(s2, map[string]string{"Bar": "added"})
+}
+
+func TestRestoredBytesThenAnUnhookedChangeCountInTheRestoringSession(t *testing.T) {
+	f := newDeferFixture(t)
+	writeGo(t, f.wt, "b.go", "B")
+	src, done := f.hold()
+	s1 := f.tick()
+	f.edit("a.go", "A", "Foo")
+	addSession(t, f.idx, f.wt, "s1", s1, f.tick())
+	f.tick()
+	release(t, src, true) // the drain pass reads S1's a.go
+	s2 := f.tick()
+	f.edit("a.go", "A", "Foo", "Bar")
+	addSession(t, f.idx, f.wt, "s2", s2, f.tick())
+	s3 := f.tick()
+	f.edit("a.go", "A", "Foo") // the bytes the pass read
+	f.tick()
+	// A formatter run no hook reports: the same symbols in other bytes.
+	writeSrc(t, f.wt, "a.go", []byte("package p\n\nfunc A() {}\n\nfunc Foo() {\n}\n"))
+	addSession(t, f.idx, f.wt, "s3", s3, f.tick())
+	f.tick()
+	release(t, src, true) // the next pass reads the formatted a.go
+
+	f.wantListed(s1, map[string]string{"Foo": "added"})
+	release(t, src, false)
+	awaitErr(t, "index", done)
+	f.wantListed(s3, map[string]string{"Foo": "changed"})
+}
+
+// unreportedThenEdit runs a pull that rewrites a.go to pulled, read by a held
+// index; S1, starting gap after that read, edits a.go to edited. The index
+// writes both after S1 ended, while S2 is open. It returns S1's and S2's starts.
+func (f *deferFixture) unreportedThenEdit(pulled, edited string, gap time.Duration) (s1, s2 int64) {
+	f.t.Helper()
+	writeSrc(f.t, f.wt, "a.go", []byte(pulled)) // a pull: no hook reports it
+	src, done := f.hold()
+	f.clk.Advance(gap)
+	s1 = f.now()
+	f.tick()
+	b, mtime, size := writeSrc(f.t, f.wt, "a.go", []byte(edited))
+	f.postEdit("a.go", b, mtime, size)
+	addSession(f.t, f.idx, f.wt, "s1", s1, f.tick())
+	s2 = f.tick()
+	addSession(f.t, f.idx, f.wt, "s2", s2, 0)
+	f.tick()
+	release(f.t, src, true) // the pass writes the pulled a.go; the drain pass reads S1's
+	release(f.t, src, false)
+	awaitErr(f.t, "index", done)
+	return s1, s2
+}
+
+func TestEditOfAnUnreportedChangeListsInItsSession(t *testing.T) {
+	const a = "package p\n\nfunc A() {}\n"
+	const pulled = a + "\nfunc Pulled() {}\n"
+	for _, tc := range []struct {
+		name           string
+		pulled, edited string
+		gap            time.Duration
+		inS2           bool // the listing starts at S2, not S1
+		want           map[string]string
+	}{
+		{name: "removes it", pulled: pulled, edited: a, gap: time.Second,
+			want: map[string]string{"Pulled": "removed"}},
+		{name: "reshapes it", pulled: pulled, edited: a + "\nfunc Pulled() {\n}\n", gap: time.Second,
+			want: map[string]string{"Pulled": "changed"}},
+		// Unrelated comes first so its span does not move: S1 leaves it as pulled.
+		{name: "removes one of two", pulled: a + "\nfunc Unrelated() {}\n" + "\nfunc Pulled() {}\n",
+			edited: a + "\nfunc Unrelated() {}\n", gap: time.Second,
+			want: map[string]string{"Pulled": "removed"}},
+		{name: "starts in the read's millisecond", pulled: pulled, edited: a,
+			want: map[string]string{"Pulled": "removed"}},
+		{name: "changes no symbol", pulled: pulled, edited: pulled + "\n// trailing note\n", gap: time.Second,
+			inS2: true, want: map[string]string{"Pulled": "added"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newDeferFixture(t)
+			s1, s2 := f.unreportedThenEdit(tc.pulled, tc.edited, tc.gap)
+			since := s1
+			if tc.inS2 {
+				since = s2
+			}
+			f.wantListed(since, tc.want)
+			addSession(t, f.idx, f.wt, "s3", f.tick(), 0)
+			if got, ok, err := f.idx.DeltaBaseline(f.ctx, f.wt, f.now()); err != nil || !ok || got != since {
+				t.Errorf("DeltaBaseline = %d, %v, %v; want %d", got, ok, err, since)
+			}
+		})
+	}
+}
+
+func TestEditsRestoringAnUnreportedChangeTheIndexReadTakeNoCredit(t *testing.T) {
+	f := newDeferFixture(t)
+	writeGo(t, f.wt, "a.go", "A", "Pulled") // a pull: no hook reports it
+	src, done := f.hold()
+	s1 := f.tick()
+	f.edit("a.go", "A", "Pulled", "Temp")
+	addSession(t, f.idx, f.wt, "s1", s1, f.tick())
+	s2 := f.tick()
+	f.edit("a.go", "A", "Pulled") // the bytes the pass read
+	e2 := f.tick()
+	addSession(t, f.idx, f.wt, "s2", s2, e2)
+	s3 := f.tick()
+	addSession(t, f.idx, f.wt, "s3", s3, 0)
+	f.tick()
+	release(t, src, true) // the pass writes the pull; the drain pass reads the restored a.go
+	release(t, src, false)
+	awaitErr(t, "index", done)
+
+	f.wantListed(s3, map[string]string{"Pulled": "added"})
+	if n := rowsIn(t, f.idx, f.wt, s1, e2); n != 0 {
+		t.Errorf("S1's and S2's windows hold %d journal rows; want none", n)
+	}
+}
+
+func TestEditOfAFileGoneBeforeTheReadCreditsNothingLater(t *testing.T) {
+	f := newDeferFixture(t)
+	if err := os.Remove(filepath.Join(f.wt, "a.go")); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.idx.ReconcileIfStale(f.ctx, f.wt, FSSource{Root: f.wt}, ""); err != nil {
+		t.Fatal(err)
+	}
+	writeGo(t, f.wt, "b.go", "B")
+	src, done := f.hold()
+	s1 := f.tick()
+	f.edit("a.go", "A", "Foo")
+	if err := os.Remove(filepath.Join(f.wt, "a.go")); err != nil { // gone again, unreported
+		t.Fatal(err)
+	}
+	addSession(t, f.idx, f.wt, "s1", s1, f.tick())
+	f.tick()
+	release(t, src, false) // the drain pass lists no a.go and reads nothing
+	awaitErr(t, "index", done)
+
+	f.laterChangeCountsInItsSession()
 }
 
 func TestUnreadableEditRecordDoesNotFailTheIndex(t *testing.T) {

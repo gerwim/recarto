@@ -6,7 +6,6 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/gerwim/recarto/internal/ids"
 	"github.com/gerwim/recarto/internal/store"
 )
 
@@ -1446,37 +1445,33 @@ SELECT edge_id, dst_node_id, CASE WHEN cnt = 1 THEN 0.45 ELSE 0.2 END, 'name' FR
 
 // deleteFile removes a file's graph rows for the given worktree. nodes/edges
 // cascade via FK; nodes_fts rows are dropped manually (FTS5 is unlinked).
-func (e *Engine) deleteFile(ctx context.Context, worktree, path string) error {
+// Its removed rows count at ts.at (see insertDeltas).
+func (e *Engine) deleteFile(ctx context.Context, worktree, path string, ts stamp) error {
 	return e.st.WriteTx(ctx, func(c store.Conn) error {
 		// A vanished file's symbols journal as removed (same identity rules as
 		// writeFileGraph; the file's id row still exists at this point).
 		{
-			now := e.clk.Now().UnixMilli()
 			rows, err := c.QueryContext(ctx, `
 SELECT n.qualified_name, n.kind FROM nodes n JOIN files f ON f.id = n.file_id
  WHERE f.worktree = ? AND f.path = ?`, worktree, path)
 			if err != nil {
 				return err
 			}
-			var syms [][2]string
+			var removed []deltaRow
 			for rows.Next() {
 				var qn, kind string
 				if err := rows.Scan(&qn, &kind); err != nil {
 					rows.Close()
 					return err
 				}
-				syms = append(syms, [2]string{qn, kind})
+				removed = append(removed, deltaRow{qn: qn, kind: kind, change: "removed"})
 			}
 			rows.Close()
 			if err := rows.Err(); err != nil {
 				return err
 			}
-			for _, s := range syms {
-				if _, err := c.ExecContext(ctx,
-					`INSERT INTO graph_deltas(id, worktree, path, qualified_name, kind, change, at)
-					 VALUES (?,?,?,?,?,?,?)`, ids.New(), worktree, path, s[0], s[1], "removed", now); err != nil {
-					return err
-				}
+			if err := insertDeltas(ctx, c, worktree, path, removed, ts); err != nil {
+				return err
 			}
 		}
 		if _, err := c.ExecContext(ctx, `

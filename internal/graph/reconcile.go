@@ -130,6 +130,61 @@ func (e *Engine) indexedFiles(ctx context.Context, worktree string) (map[string]
 	return have, nil
 }
 
+// worklistOf splits entries into the files that may have changed since they
+// were indexed, and returns the listed paths. A file with a pending edit is
+// read even when its stat matches: the edit may have kept its size and its
+// mtime to the millisecond.
+func worklistOf(entries []FileEntry, have map[string]indexedFile, edits map[string][]pendingEdit) (worklist []FileEntry, seen map[string]bool) {
+	// A cheap mtime/size pre-check: the worklist is reported as the progress
+	// total, and reading + hashing happens in pass 2.
+	seen = map[string]bool{}
+	for _, fe := range entries {
+		seen[fe.Path] = true
+		prev, known := have[fe.Path]
+		if known && prev.mtime == fe.Mtime && prev.size == fe.Size && len(edits[fe.Path]) == 0 {
+			continue
+		}
+		worklist = append(worklist, fe)
+	}
+	return worklist, seen
+}
+
+// removeVanished deletes the graph of the indexed files the listing at
+// listedAt did not find, and takes in the records of the edits that absence
+// includes. It reports whether it deleted any file.
+func (e *Engine) removeVanished(ctx context.Context, worktree string, have map[string]indexedFile, seen map[string]bool, listedAt int64) (bool, error) {
+	// now before the load, as in creditBatch.
+	now := e.clk.Now().UnixMilli()
+	edits, err := e.pendingEdits(worktree)
+	if err != nil {
+		return false, err
+	}
+	var done []pendingEdit
+	removed := false
+	// CASCADE removes a file's nodes/edges; deleteFile drops its FTS rows, as
+	// FTS5 is not linked.
+	for p := range have {
+		if seen[p] {
+			continue
+		}
+		d, at := creditOf(edits[p], "", listedAt, now)
+		if err := e.deleteFile(ctx, worktree, p, stamp{at: at, seen: listedAt, now: now}); err != nil {
+			return false, err
+		}
+		done = append(done, d...)
+		removed = true
+	}
+	// An edit of a path never indexed and gone by the listing: kept, its record
+	// would credit a later re-creation of the path to its old session.
+	for p, pes := range edits {
+		if _, known := have[p]; !known && !seen[p] {
+			d, _ := creditOf(pes, "", listedAt, now)
+			done = append(done, d...)
+		}
+	}
+	return removed, e.removeEdits(worktree, done)
+}
+
 func (e *Engine) Reconcile(ctx context.Context, worktree string, src Source, opts ...ReconcileOption) error {
 	var o reconcileOptions
 	o.resolve(opts)
@@ -151,20 +206,11 @@ func (e *Engine) Reconcile(ctx context.Context, worktree string, src Source, opt
 	if err != nil {
 		return err
 	}
-
-	// Pass 1: a cheap mtime/size pre-check splits source files into those that
-	// may have changed (the worklist, which we report as the progress total) and
-	// those skipped without any IO. Reading + hashing happens in pass 2.
-	seen := map[string]bool{}
-	var worklist []FileEntry
-	for _, fe := range entries {
-		seen[fe.Path] = true
-		prev, known := have[fe.Path]
-		if known && prev.mtime == fe.Mtime && prev.size == fe.Size {
-			continue // cheap pre-check: unchanged
-		}
-		worklist = append(worklist, fe)
+	edits, err := e.pendingEdits(worktree)
+	if err != nil {
+		return err
 	}
+	worklist, seen := worklistOf(entries, have, edits)
 
 	// The dirty set drives incremental resolve: the paths this reconcile rewrites
 	// (worklist) plus the paths it deletes. A reconcile over an already-indexed
@@ -261,17 +307,11 @@ func (e *Engine) Reconcile(ctx context.Context, worktree string, src Source, opt
 		mutated = wrote
 	}
 
-	// Delete files that disappeared (CASCADE removes their nodes/edges; FTS rows
-	// are dropped explicitly since FTS5 is not linked).
-	for p := range have {
-		if seen[p] {
-			continue
-		}
-		if err := e.deleteFile(ctx, worktree, p); err != nil {
-			return err
-		}
-		mutated = true
+	removed, err := e.removeVanished(ctx, worktree, have, seen, listedAt)
+	if err != nil {
+		return err
 	}
+	mutated = mutated || removed
 	// Resolution depends only on the stored nodes/edges. If this reconcile changed
 	// nothing (e.g. the freshness token moved but no source file did), the existing
 	// resolution is still correct — skip the full-worktree re-resolve. A pending
@@ -325,9 +365,6 @@ func (e *Engine) Reconcile(ctx context.Context, worktree string, src Source, opt
 			return err
 		}
 	}
-	if err := e.settleEdits(ctx, worktree, listedAt); err != nil {
-		return err
-	}
 	// Semantic tier (no-op unless an embedder is set): bring the vector index up
 	// to date. Best-effort — a model error must not fail reconciliation, since
 	// the lexical graph is already written and fully usable on its own.
@@ -360,7 +397,7 @@ func (e *Engine) indexWorklist(ctx context.Context, worktree string, src Source,
 	type outcome struct {
 		pf    parsedFile
 		skip  bool
-		touch *FileEntry
+		touch bool
 		err   error
 	}
 	readParse := func(fe FileEntry) outcome {
@@ -371,10 +408,13 @@ func (e *Engine) indexWorklist(ctx context.Context, worktree string, src Source,
 		}
 		hash := sha256hex(content)
 		if prev, known := prevHash(fe.Path); known && prev == hash {
-			// mtime moved but content identical: refresh the stored stat so the
-			// next reconcile's cheap pre-check skips it instead of re-hashing it
-			// (and counting it as dirty).
-			return outcome{skip: true, touch: &fe}
+			// Content identical (the mtime moved, or a pending record forced the
+			// read): refresh the stored stat so the next reconcile's cheap
+			// pre-check skips it instead of re-hashing it (and counting it as
+			// dirty), and take in the records of the edits this version includes.
+			return outcome{skip: true, touch: true, pf: parsedFile{
+				path: fe.Path, hash: hash, mtime: fe.Mtime, size: fe.Size, readAt: readAt,
+			}}
 		}
 		lang, ok := parse.LangForExt(fe.Path)
 		if !ok {
@@ -450,12 +490,8 @@ func (e *Engine) indexWorklist(ctx context.Context, worktree string, src Source,
 			}
 			defer st.Close()
 			for i, pf := range batch {
-				at, err := journalAt(ctx, c, worktree, pf.path, ats[i], now)
-				if err != nil {
-					return err
-				}
 				if err := e.writeFileGraph(ctx, c, st, worktree, pf.path, pf.lang,
-					pf.graph, pf.hash, pf.mtime, pf.size, now, at); err != nil {
+					pf.graph, pf.hash, pf.mtime, pf.size, stamp{at: ats[i], seen: pf.readAt, now: now}); err != nil {
 					return err
 				}
 			}
@@ -477,7 +513,7 @@ func (e *Engine) indexWorklist(ctx context.Context, worktree string, src Source,
 
 	wrote := false
 	var indexErr error
-	var touched []*FileEntry
+	var touched []parsedFile
 	for out := range results {
 		if out.err != nil {
 			if indexErr == nil {
@@ -488,8 +524,8 @@ func (e *Engine) indexWorklist(ctx context.Context, worktree string, src Source,
 		}
 		prog.Inc()
 		if out.skip {
-			if out.touch != nil {
-				touched = append(touched, out.touch)
+			if out.touch {
+				touched = append(touched, out.pf)
 			}
 			continue
 		}
@@ -515,20 +551,23 @@ func (e *Engine) indexWorklist(ctx context.Context, worktree string, src Source,
 }
 
 // touchFiles stores the new stat of files whose content is unchanged.
-func (e *Engine) touchFiles(ctx context.Context, worktree string, touched []*FileEntry) error {
+func (e *Engine) touchFiles(ctx context.Context, worktree string, touched []parsedFile) error {
 	if len(touched) == 0 {
 		return nil
 	}
-	return e.st.WriteTx(ctx, func(c store.Conn) error {
-		for _, fe := range touched {
+	if err := e.st.WriteTx(ctx, func(c store.Conn) error {
+		for _, pf := range touched {
 			if _, err := c.ExecContext(ctx,
 				`UPDATE files SET mtime=?, size=? WHERE worktree=? AND path=?`,
-				fe.Mtime, fe.Size, worktree, fe.Path); err != nil {
+				pf.mtime, pf.size, worktree, pf.path); err != nil {
 				return err
 			}
 		}
 		return nil
-	})
+	}); err != nil {
+		return err
+	}
+	return e.takeInTouched(worktree, touched)
 }
 
 // ReconcileIfStale reconciles only when the worktree's git token differs from the

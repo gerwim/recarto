@@ -2,7 +2,6 @@ package graph
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"io/fs"
@@ -47,7 +46,8 @@ func (e *Engine) clearDeferred(worktree string) error {
 // worktree's index lock: while the mark is set it clears it and reconciles from
 // src. Clearing before the pass means an edit deferred during the pass marks
 // again and gets its own pass; the mtime and size pre-check makes each pass
-// cover only files changed since the last. Only the mark drives the loop: the
+// cover only files changed since the last, and files with a pending edit
+// record. Only the mark drives the loop: the
 // edit records decide whose session a pass's changes count in, and one dated
 // in the future (a clock step) would keep the loop from ending.
 func (e *Engine) drainDeferred(ctx context.Context, worktree string, src Source) error {
@@ -105,16 +105,6 @@ type pendingEdit struct {
 	At   int64  `json:"at"`   // the hook's clock, Unix ms
 	name string // the record's file name in editsDir
 }
-
-// creditCase is how creditOf named the edit a version read counts for.
-type creditCase int
-
-const (
-	madeByL creditCase = iota // the last edit recorded before the read made the version
-	madeByF                   // the first edit recorded after the read made it: its hook ran late
-	afterL                    // an unreported change followed the last edit recorded before the read
-	unnamed                   // no record names the version
-)
 
 // editsDir holds worktree's pending edit records, one file each.
 func (e *Engine) editsDir(worktree string) string { return e.indexFileBase(worktree) + ".edits" }
@@ -200,16 +190,21 @@ func (e *Engine) pendingEdits(worktree string) (map[string][]pendingEdit, error)
 }
 
 // creditOf names the pending edit whose session the version of a file with
-// content hash hash, read at readAt, counts in. edits are the file's pending
-// records in (At, name) order. It returns the records the version includes,
-// to remove once its write commits, and the time the change counts at.
+// content hash hash, observed at readAt by an index writing at now, counts in.
+// edits are the file's pending records in (At, name) order. It returns the
+// records the version includes, to remove once its write commits, and the
+// time the change counts at. An absent file's hash is empty, which no record
+// has.
 //
 // L, the last edit recorded before the read, is in what was read; F, the one
 // right after it, is the only later record that may still be in it, its hook
 // having run after the read. An agent edits one change at a time, so every
 // record after F is an edit made after the read, and matching stops at F even
-// when a later edit restores the bytes read.
-func creditOf(edits []pendingEdit, hash string, readAt int64) (done []pendingEdit, at int64, how creditCase) {
+// when a later edit restores the bytes read. A version matching neither L nor
+// F had a change no hook reported after L, and counts with L. A version no
+// record names counts at now, as an unreported change always has: edits
+// recorded after the read are not in it.
+func creditOf(edits []pendingEdit, hash string, readAt, now int64) (done []pendingEdit, at int64) {
 	l := -1
 	for i, pe := range edits {
 		if pe.At < readAt {
@@ -217,17 +212,15 @@ func creditOf(edits []pendingEdit, hash string, readAt int64) (done []pendingEdi
 		}
 	}
 	if l >= 0 && edits[l].Hash == hash {
-		return edits[:l+1], edits[l].At, madeByL
+		return edits[:l+1], edits[l].At
 	}
 	if f := l + 1; f < len(edits) && edits[f].Hash == hash {
-		return edits[:f+1], edits[f].At, madeByF
+		return edits[:f+1], edits[f].At
 	}
 	if l >= 0 {
-		// A change no hook reported (a formatter) followed L; it counts with
-		// the latest edit the version includes.
-		return edits[:l+1], edits[l].At, afterL
+		return edits[:l+1], edits[l].At
 	}
-	return nil, 0, unnamed
+	return nil, now
 }
 
 // creditBatch returns the time each version in batch counts at, and the
@@ -243,29 +236,31 @@ func (e *Engine) creditBatch(worktree string, batch []parsedFile, now int64) ([]
 	ats := make([]int64, len(batch))
 	var done []pendingEdit
 	for i, pf := range batch {
-		d, at, how := creditOf(edits[pf.path], pf.hash, pf.readAt)
-		if how == unnamed {
-			at = now
-		}
+		d, at := creditOf(edits[pf.path], pf.hash, pf.readAt, now)
 		ats[i] = at
 		done = append(done, d...)
 	}
 	return ats, done, nil
 }
 
-// journalAt returns the time path's change, credited at at by an index
-// writing at now, is journaled at on c. DeltasSince folds a path's rows in at
-// order, so a change credited to an earlier edit never sorts before one
-// written earlier.
-func journalAt(ctx context.Context, c store.Conn, worktree, path string, at, now int64) (int64, error) {
-	if at >= now {
-		return at, nil
+// takeInTouched removes the records of the edits that touched includes:
+// worklist files whose content read equals the stored version, so a pass
+// writes nothing for them.
+func (e *Engine) takeInTouched(worktree string, touched []parsedFile) error {
+	if len(touched) == 0 {
+		return nil
 	}
-	latest, ok, err := latestChangeAt(ctx, c, worktree, path)
-	if err != nil || !ok {
-		return at, err
+	edits, err := e.pendingEdits(worktree)
+	if err != nil {
+		return err
 	}
-	return max(at, latest), nil
+	var done []pendingEdit
+	for _, pf := range touched {
+		// The time is unused: a touched file journals nothing.
+		d, _ := creditOf(edits[pf.path], pf.hash, pf.readAt, pf.readAt)
+		done = append(done, d...)
+	}
+	return e.removeEdits(worktree, done)
 }
 
 // removeEdits removes worktree's records of edits.
@@ -278,32 +273,4 @@ func (e *Engine) removeEdits(worktree string, edits []pendingEdit) error {
 		}
 	}
 	return errors.Join(errs...)
-}
-
-// settleEdits ends a successful Reconcile pass whose listing started at
-// listedAt. It drops the records whose version the store already holds (a
-// record that came after its version was written, or an edit that restored the
-// stored bytes) and those this pass took in, having made the store match a
-// version that includes them. Kept, either would credit a later, unrelated
-// change to an old session.
-func (e *Engine) settleEdits(ctx context.Context, worktree string, listedAt int64) error {
-	edits, err := e.pendingEdits(worktree)
-	if err != nil || len(edits) == 0 {
-		return err
-	}
-	var settled []pendingEdit
-	for path, pes := range edits {
-		var stored string
-		err := e.st.DB.QueryRowContext(ctx,
-			`SELECT content_hash FROM files WHERE worktree=? AND path=?`, worktree, path).Scan(&stored)
-		if err != nil && !errors.Is(err, sql.ErrNoRows) {
-			return err
-		}
-		for _, pe := range pes {
-			if pe.Hash == stored || pe.At < listedAt {
-				settled = append(settled, pe)
-			}
-		}
-	}
-	return e.removeEdits(worktree, settled)
 }

@@ -8,7 +8,7 @@ import (
 )
 
 // schemaVersion is the number of applied migrations.
-const schemaVersion = 27
+const schemaVersion = 28
 
 // migration is one schema step. sql runs first; run, when set, then runs Go
 // code on the same connection, for a step SQL alone cannot express (see
@@ -617,6 +617,19 @@ DELETE FROM edge_candidates WHERE method = 'ctor' AND edge_id IN (SELECT edge_id
 UPDATE edges SET dst_node_id = NULL WHERE id IN (SELECT edge_id FROM _v27);
 DROP TABLE _v27;
 `},
+	// v28: graph_deltas.seen_at is when the index saw the version a row's change
+	// comes from. A change credited to an earlier edit moves its file's
+	// later-counting rows back to just before then, so they fold before the edit
+	// (see graph.insertDeltas). Rows written before stay NULL.
+	{run: func(ctx context.Context, c Conn) error {
+		var n int
+		if err := c.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM pragma_table_info('graph_deltas') WHERE name = 'seen_at'`).Scan(&n); err != nil || n > 0 {
+			return err
+		}
+		_, err := c.ExecContext(ctx, `ALTER TABLE graph_deltas ADD COLUMN seen_at INTEGER`)
+		return err
+	}},
 }
 
 // wipeCodeGraph runs inside the migration's transaction, rebuilding the code

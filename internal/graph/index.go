@@ -36,14 +36,14 @@ func (e *Engine) IndexFile(ctx context.Context, worktree, path string, src []byt
 	// The hook's own edit is the latest its version includes, so its change
 	// keeps the hook's time; the edits left to another index that this version
 	// includes are part of it.
-	done, _, _ := creditOf(edits[path], hash, now)
+	done, _ := creditOf(edits[path], hash, now, now)
 	if err := e.st.WriteTx(ctx, func(c store.Conn) error {
 		st, err := prepareWriteStmts(ctx, c)
 		if err != nil {
 			return err
 		}
 		defer st.Close()
-		return e.writeFileGraph(ctx, c, st, worktree, path, lang, g, hash, mtime, size, now, now)
+		return e.writeFileGraph(ctx, c, st, worktree, path, lang, g, hash, mtime, size, stamp{at: now, seen: now, now: now})
 	}); err != nil {
 		return err
 	}
@@ -366,9 +366,10 @@ func buildFileGraph(src []byte, res parse.Result) fileGraph {
 // happened in buildFileGraph — so the writer is no longer the place the index
 // spends CPU. A node whose identity and ordinal survived the edit keeps its id
 // and gets its position and signature refreshed; only the rest are replaced.
-// now is the files row's index time, at the time its journal rows count at.
+// ts.now is the files row's index time; its journal rows count at ts.at (see
+// insertDeltas).
 func (e *Engine) writeFileGraph(ctx context.Context, c store.Conn, st *writeStmts, worktree, path, lang string,
-	g fileGraph, hash string, mtime, size, now, at int64) error {
+	g fileGraph, hash string, mtime, size int64, ts stamp) error {
 	var kept map[string]bool
 	// Upsert the files row and obtain its id.
 	var fileID string
@@ -380,14 +381,14 @@ func (e *Engine) writeFileGraph(ctx context.Context, c store.Conn, st *writeStmt
 		if _, err := c.ExecContext(ctx,
 			`INSERT INTO files(id,worktree,path,language,content_hash,mtime,size,last_indexed_at)
 			 VALUES (?,?,?,?,?,?,?,?)`,
-			fileID, worktree, path, lang, hash, mtime, size, now); err != nil {
+			fileID, worktree, path, lang, hash, mtime, size, ts.now); err != nil {
 			return err
 		}
 		// A first index normally journals nothing (fresh-clone flood guard), but
 		// a path with earlier journal rows is a delete-then-recreate (branch
 		// switch, stash pop): journal its symbols as added so the prior
 		// "removed" folds to a present disposition instead of standing as false.
-		if err := journalRecreatedFileDeltas(ctx, c, worktree, path, g.nodes, at); err != nil {
+		if err := journalRecreatedFileDeltas(ctx, c, worktree, path, g.nodes, ts); err != nil {
 			return err
 		}
 	case err != nil:
@@ -396,7 +397,7 @@ func (e *Engine) writeFileGraph(ctx context.Context, c store.Conn, st *writeStmt
 		// Journal symbol-level deltas before the old rows are replaced — this is
 		// the only moment both node sets exist. Genuinely new files journal
 		// nothing (see the ErrNoRows recreate carve-out above).
-		if err := journalFileDeltas(ctx, c, worktree, path, fileID, g.nodes, at); err != nil {
+		if err := journalFileDeltas(ctx, c, worktree, path, fileID, g.nodes, ts); err != nil {
 			return err
 		}
 		// Keep the ids of nodes whose identity survived the edit, so edges and
@@ -435,7 +436,7 @@ func (e *Engine) writeFileGraph(ctx context.Context, c store.Conn, st *writeStmt
 		}
 		if _, err := c.ExecContext(ctx,
 			`UPDATE files SET language=?,content_hash=?,mtime=?,size=?,last_indexed_at=? WHERE id=?`,
-			lang, hash, mtime, size, now, fileID); err != nil {
+			lang, hash, mtime, size, ts.now, fileID); err != nil {
 			return err
 		}
 	}
