@@ -166,10 +166,10 @@ type shareResult struct {
 }
 
 // waitShare runs WaitShareLockFile in a goroutine.
-func waitShare(ctx context.Context, path string) <-chan shareResult {
+func waitShare(ctx context.Context, path string, waiting func()) <-chan shareResult {
 	got := make(chan shareResult, 1)
 	go func() {
-		release, ok, err := WaitShareLockFile(ctx, path)
+		release, ok, err := WaitShareLockFile(ctx, path, waiting)
 		got <- shareResult{release, ok, err}
 	}()
 	return got
@@ -186,6 +186,16 @@ func receiveShare(t *testing.T, got <-chan shareResult) shareResult {
 	}
 }
 
+// requireWaiting returns once WaitShareLockFile has called its waiting callback.
+func requireWaiting(t *testing.T, waiting <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-waiting:
+	case <-time.After(time.Minute):
+		t.Fatal("WaitShareLockFile never waited")
+	}
+}
+
 func TestWaitShareLockFile(t *testing.T) {
 	t.Run("waits for the exclusive holder", func(t *testing.T) {
 		path := newLockTarget(t)
@@ -193,7 +203,9 @@ func TestWaitShareLockFile(t *testing.T) {
 		if err != nil || !ok {
 			t.Fatalf("TryLockFile = %v, %v", ok, err)
 		}
-		got := waitShare(context.Background(), path)
+		waiting := make(chan struct{})
+		got := waitShare(context.Background(), path, func() { close(waiting) })
+		requireWaiting(t, waiting)
 		release()
 		r := receiveShare(t, got)
 		if r.err != nil || !r.ok {
@@ -212,7 +224,7 @@ func TestWaitShareLockFile(t *testing.T) {
 		}
 		defer release()
 		ctx := WithWriteDeadline(context.Background(), time.Now().Add(-time.Second))
-		r := receiveShare(t, waitShare(ctx, path))
+		r := receiveShare(t, waitShare(ctx, path, func() { t.Error("WaitShareLockFile waited past its write deadline") }))
 		if r.err != nil || r.ok {
 			t.Fatalf("WaitShareLockFile = %v, %v; want no lock and no error", r.ok, r.err)
 		}
@@ -224,7 +236,9 @@ func TestWaitShareLockFile(t *testing.T) {
 			t.Fatalf("TryLockFile = %v, %v", ok, err)
 		}
 		ctx, cancel := context.WithCancel(context.Background())
-		got := waitShare(ctx, path)
+		waiting := make(chan struct{})
+		got := waitShare(ctx, path, func() { close(waiting) })
+		requireWaiting(t, waiting)
 		cancel()
 		if r := receiveShare(t, got); !errors.Is(r.err, context.Canceled) || r.ok {
 			t.Fatalf("WaitShareLockFile = %v, %v; want context.Canceled", r.ok, r.err)
@@ -248,7 +262,7 @@ func TestWaitShareLockFile(t *testing.T) {
 	})
 	t.Run("a missing file", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "missing")
-		if _, _, err := WaitShareLockFile(context.Background(), path); !errors.Is(err, fs.ErrNotExist) {
+		if _, _, err := WaitShareLockFile(context.Background(), path, nil); !errors.Is(err, fs.ErrNotExist) {
 			t.Fatalf("WaitShareLockFile = %v; want fs.ErrNotExist", err)
 		}
 		if _, err := os.Stat(path); !errors.Is(err, fs.ErrNotExist) {
@@ -282,7 +296,9 @@ func TestSharedHoldersDoNotBlockRemoval(t *testing.T) {
 		if err != nil || !ok {
 			t.Fatalf("TryLockFile = %v, %v", ok, err)
 		}
-		got := waitShare(context.Background(), path)
+		waiting := make(chan struct{})
+		got := waitShare(context.Background(), path, func() { close(waiting) })
+		requireWaiting(t, waiting)
 		release()
 		r := receiveShare(t, got)
 		if r.err != nil || !r.ok {

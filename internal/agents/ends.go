@@ -1042,6 +1042,11 @@ func (c *conversationEnding) guard(needFolder bool) (seen []int, guarding bool) 
 
 // claimStop claims now, covering the seen guards, as the conversation's Stop
 // claim F°, or adopts the claim of a Stop that still runs.
+//
+// When F° cannot be created, as in a cache on a filesystem without hard links,
+// this Stop has no claim and writes its own time; a Stop of the conversation
+// that overlaps it may then write another. A conversation's Stops rarely
+// overlap: a host runs them at the end of turns.
 func (c *conversationEnding) claimStop(now int64, seen []int) {
 	rec := folderEndRecord{Session: c.sessionID, Dir: c.a.Dir, EndedAt: now}
 	for _, i := range seen {
@@ -1436,7 +1441,7 @@ func (c *conversationEnding) awaitCreator(i int) bool {
 	} else {
 		path = c.ts[i].leftLock
 	}
-	release, ok, err := store.WaitShareLockFile(c.ctx, path)
+	release, ok, err := store.WaitShareLockFile(c.ctx, path, nil)
 	if errors.Is(err, fs.ErrNotExist) {
 		// The creator removes the file only after releasing it.
 		return true

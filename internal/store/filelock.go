@@ -120,9 +120,10 @@ func TryShareLockFile(path string) (release func(), ok bool, err error) {
 // WaitShareLockFile takes a shared lock on the existing file at path, waiting
 // while an exclusive holder has it until ctx is done or ctx's write deadline
 // (WithWriteDeadline) has passed; a deadline already passed gets one try.
-// ok is false, with nothing held, when the wait ended without the lock. A
-// missing file fails with fs.ErrNotExist; the file is never created.
-func WaitShareLockFile(ctx context.Context, path string) (release func(), ok bool, err error) {
+// Before it waits it calls waiting (when not nil) once, as LockFile does. ok is
+// false, with nothing held, when the wait ended without the lock. A missing
+// file fails with fs.ErrNotExist; the file is never created.
+func WaitShareLockFile(ctx context.Context, path string, waiting func()) (release func(), ok bool, err error) {
 	f, err := openShared(path)
 	if err != nil {
 		return nil, false, err
@@ -146,6 +147,9 @@ func WaitShareLockFile(ctx context.Context, path string) (release func(), ok boo
 		timer := time.NewTimer(left)
 		defer timer.Stop()
 		timeout = timer.C
+	}
+	if waiting != nil {
+		waiting()
 	}
 	if ok, err := awaitLock(ctx, f, true, timeout); !ok {
 		return nil, false, err
