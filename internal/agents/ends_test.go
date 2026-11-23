@@ -2,6 +2,7 @@ package agents
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -44,26 +45,38 @@ func folderRC(a *app.App) *app.RepoContext { return a.AllRepos()[0] }
 // pendingDir is the pending-ends folder beside rc's store.
 func pendingDir(rc *app.RepoContext) string { return repoEndsDir(storeDir(rc.Store)) }
 
-// requireNoPendingFiles fails when the cache's shared pending-ends folder, or
-// the pending-ends folder beside any of repos' stores, holds any file.
+// requireNoPendingFiles fails when the cache's shared pending-ends folder, a's
+// Stop claims folder, or the pending-ends folder beside any of repos' stores,
+// holds any file but a stale-removal lock.
 func requireNoPendingFiles(t *testing.T, a *app.App, repos ...*app.RepoContext) {
 	t.Helper()
-	dirs := []string{folderEndsDir(a.Store)}
+	dirs := []string{folderEndsDir(a.Store), stopClaimsDir(a.Store)}
 	for _, rc := range repos {
 		dirs = append(dirs, pendingDir(rc))
 	}
 	for _, dir := range dirs {
-		entries, err := os.ReadDir(dir)
-		if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		requireEmpty(t, dir)
+	}
+}
+
+// requireEmpty fails when dir holds any file but a stale-removal lock. A
+// regular file at dir's path (unwritable) holds nothing.
+func requireEmpty(t *testing.T, dir string) {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		if fi, serr := os.Stat(dir); serr != nil || fi.IsDir() {
 			t.Fatal(err)
 		}
-		if len(entries) != 0 {
-			var names []string
-			for _, e := range entries {
-				names = append(names, e.Name())
-			}
-			t.Fatalf("%s holds %v", dir, names)
+	}
+	var names []string
+	for _, e := range entries {
+		if e.Name() != staleLockName {
+			names = append(names, e.Name())
 		}
+	}
+	if len(names) != 0 {
+		t.Fatalf("%s holds %v", dir, names)
 	}
 }
 
@@ -95,9 +108,12 @@ func onPublish(t *testing.T, f func(dir, name string, data []byte) ([]byte, bool
 	t.Cleanup(func() { publishEnd = prev })
 }
 
-func isGuard(name string) bool      { return strings.HasSuffix(name, guardSuffix) }
-func isFolder(dir string) bool      { return filepath.Base(dir) == "pending-ends" }
-func isFinal(dir, name string) bool { return !isFolder(dir) && !isGuard(name) }
+func isGuard(name string) bool { return strings.HasSuffix(name, guardSuffix) }
+func isFolder(dir string) bool { return filepath.Base(dir) == "pending-ends" }
+func isClaim(dir string) bool  { return filepath.Base(dir) == "stop-claims" }
+func isFinal(dir, name string) bool {
+	return filepath.Base(dir) == "pending-repo-ends" && !isGuard(name)
+}
 
 // age sets path's modification time d before the fake clock's now.
 func age(t *testing.T, s *scratch, path string, d time.Duration) {
@@ -119,6 +135,7 @@ func TestEndRecordFiles(t *testing.T) {
 	t.Run("read under a regular file", testReadEndUnderAFile)
 	t.Run("list and sweep", testListAndRemoveStaleEnds)
 	t.Run("folder end and its creator", testClaimFolderEnd)
+	t.Run("spellings of a record's name", testListSpellings)
 }
 
 func testClaimEndFirstWins(t *testing.T) {
@@ -262,6 +279,87 @@ func testClaimFolderEnd(t *testing.T) {
 	}
 }
 
+// putRecord writes rec at dir/name as is, whatever the name.
+func putRecord(t *testing.T, dir, name string, rec repoEndRecord) {
+	t.Helper()
+	data, err := json.Marshal(rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, name), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func testListSpellings(t *testing.T) {
+	dir := t.TempDir()
+	g := testGuard("g", "/wt", "/folder")
+	if _, _, err := claimEnd(dir, guardName("g"), g); err != nil {
+		t.Fatal(err)
+	}
+	upperG, upperH := strings.ToUpper(guardName("g")), strings.ToUpper(guardName("h"))
+	_, err := os.Stat(filepath.Join(dir, upperG))
+	insensitive := err == nil
+	if !insensitive {
+		// Two names of one file, as a case-insensitive volume shows every spelling.
+		if err := os.Link(filepath.Join(dir, guardName("g")), filepath.Join(dir, upperG)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	h := testGuard("h", "/wt", "/folder")
+	putRecord(t, dir, upperH, h)
+	recs, other, err := listEnds[repoEndRecord](dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, r := range recs {
+		names = append(names, r.name+" "+r.rec.Session)
+	}
+	slices.Sort(names)
+	var otherNames []string
+	for _, e := range other {
+		otherNames = append(otherNames, e.name)
+	}
+	want, wantOther := []string{guardName("g") + " g", guardName("g") + " g"}, []string{upperH}
+	if insensitive {
+		want, wantOther = []string{guardName("g") + " g", guardName("h") + " h"}, nil
+		slices.Sort(want)
+		if got, ok, err := readEnd[repoEndRecord](dir, guardName("h")); err != nil || !ok || got != h {
+			t.Fatalf("read under the lower-case name = %+v, %v, %v", got, ok, err)
+		}
+	}
+	if !slices.Equal(names, want) || !slices.Equal(otherNames, wantOther) {
+		t.Fatalf("list = %v, other %v; want %v, other %v", names, otherNames, want, wantOther)
+	}
+	now := time.Now()
+	old := now.Add(-EndRunLimit - time.Minute)
+	for _, name := range []string{guardName("g"), upperH} {
+		if err := os.Chtimes(filepath.Join(dir, name), old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, other, _ = listEnds[repoEndRecord](dir)
+	if err := removeStaleEnds[repoEndRecord](dir, other, now); err != nil {
+		t.Fatal(err)
+	}
+	wantLeft := []string{guardName("g"), upperG}
+	if insensitive {
+		wantLeft = []string{guardName("g"), upperH}
+	}
+	for _, name := range wantLeft {
+		if _, err := os.Lstat(filepath.Join(dir, name)); err != nil {
+			t.Fatalf("%s removed: %v", name, err)
+		}
+	}
+	if _, err := os.Lstat(filepath.Join(dir, upperH)); !insensitive && !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("the distinct file at another spelling stays: %v", err)
+	}
+}
+
 func TestEndsHoldItsOwnWorktreeAndRepository(t *testing.T) {
 	s := newScratch(t)
 	r := s.goRepo("repo")
@@ -325,6 +423,11 @@ func TestEndsHoldItsOwnWorktreeAndRepository(t *testing.T) {
 	theirs.Root = "theirs"
 	put(guardName("open"), theirs)
 	check(r, false)
+	clear()
+	// Another spelling holds only where it is the very file readers open.
+	putRecord(t, dir, strings.ToUpper(guardName("open")), plain)
+	_, err := os.Stat(filepath.Join(dir, guardName("open")))
+	check(r, err == nil)
 	clear()
 	put(guardName("open"), plain)
 	if _, err := st.DB.Exec(`UPDATE sessions SET ended_at=2 WHERE id='open'`); err != nil {

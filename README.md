@@ -677,7 +677,7 @@ A pending end is recorded before its time is taken, so journal pruning in the re
 
 **When the pending records cannot be created**, for example on a filesystem without hard links or in a cache folder that cannot be written: the Stop still writes the end in every store that is free within the 0.5 s. The hook's error output names the failure and each store that stayed busy; the conversation's next Stop writes those ends with its own time.
 
-A file in the cache's `pending-ends` folder that cannot be read is ignored, and removed once it is older than the background run's 30-minute limit.
+A file in the cache's `pending-ends` folder that cannot be read is ignored, and removed once it is older than the background run's 30-minute limit. On Windows, a file there whose permissions forbid Recarto to read it stays until you delete it.
 
 ## Sharing memory across machines (HTTP sync)
 

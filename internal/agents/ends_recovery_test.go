@@ -2,14 +2,17 @@ package agents
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -459,6 +462,7 @@ func TestRecordsCannotBeCreatedStoresFree(t *testing.T) {
 	res, at := stopScratch(t, s, f, "s")
 	requireSessionEnd(t, folderRC(f), "s", true, at)
 	requireSessionEnd(t, rc(t, f, r), "s", true, at)
+	requireEmpty(t, stopClaimsDir(f.Store))
 	if !strings.Contains(failure(res), folderEndsDir(f.Store)) || launches != 0 {
 		t.Fatalf("failure = %q, launches %d; want the path named and no run", failure(res), launches)
 	}
@@ -476,12 +480,14 @@ func TestRecordsCannotBeCreatedStoreBusy(t *testing.T) {
 		release()
 		requireSessionEnd(t, rc(t, f, r), "s", true, at)
 		requireSessionEnd(t, folderRC(f), "s", false, 0)
+		requireEmpty(t, stopClaimsDir(f.Store))
 		if !strings.Contains(failure(res), "session end not recorded in "+s.folder) {
 			t.Fatalf("failure = %q; want the folder's store named", failure(res))
 		}
 		_, at2 := stopScratch(t, s, f, "s")
 		requireSessionEnd(t, folderRC(f), "s", true, at2)
 		requireSessionEnd(t, rc(t, f, r), "s", true, at)
+		requireEmpty(t, stopClaimsDir(f.Store))
 	})
 	t.Run("repo", func(t *testing.T) {
 		s := newScratch(t)
@@ -494,6 +500,7 @@ func TestRecordsCannotBeCreatedStoreBusy(t *testing.T) {
 		release()
 		requireSessionEnd(t, folderRC(f), "s", true, at)
 		requireSessionEnd(t, rc(t, f, r), "s", false, 0)
+		requireEmpty(t, stopClaimsDir(f.Store))
 		if !strings.Contains(failure(res), "session end not recorded in "+r) {
 			t.Fatalf("failure = %q; want the repo named", failure(res))
 		}
@@ -547,7 +554,7 @@ func testDirectWriteTwoOverlappingFirstStops(t *testing.T) {
 	inner := false
 	var t2 int64
 	onPublish(t, func(dir, name string, data []byte) ([]byte, bool, error) {
-		if isFolder(dir) && !inner {
+		if isClaim(dir) && !inner {
 			inner = true
 			_, t2 = stopScratch(t, s, f, "s")
 			inner = false
@@ -974,14 +981,272 @@ func TestOverlappingStopsRecordOneTime(t *testing.T) {
 	}
 }
 
-func TestFailedGuardLinkNeverTakesAnEarlierTime(t *testing.T) {
-	s := newScratch(t)
-	r := s.goRepo("repo")
-	f := s.open(s.folder, r)
-	start(t, f, "s", "startup")
+func TestOverlappingStopsShareTheStopClaim(t *testing.T) {
+	t.Run("stores free", func(t *testing.T) { testStopClaimOverlap(t, false) })
+	t.Run("folder store busy", func(t *testing.T) { testStopClaimOverlap(t, true) })
+	t.Run("the shared folder takes F only from the later Stop", testStopClaimSharedFolderFromTheLaterStop)
+	t.Run("a holder that dies before publishing F", testStopClaimHolderDiesBeforeF)
+	t.Run("the holder links F after B read the claims", func(t *testing.T) {
+		t.Run("B's link then runs", func(t *testing.T) { testStopClaimHolderLinksFLate(t, false) })
+		t.Run("B's publication then fails", func(t *testing.T) { testStopClaimHolderLinksFLate(t, true) })
+	})
+	t.Run("a dead claim", testStopClaimDead)
+}
+
+// runStop runs a Stop of conversation s in a and sends its result.
+func runStop(a *app.App, done chan<- startResult) {
+	res, err := Handle(context.Background(), a, Event{Kind: KindStop, SessionID: "s", StopActive: true})
+	done <- startResult{res, err}
+}
+
+// testStopClaimOverlap runs Stop A to its M link, then Stop B to its store
+// writes, then A to its end, then B, while the shared folder takes no F.
+func testStopClaimOverlap(t *testing.T, folderBusy bool) {
+	s, f, r := directWriteSetup(t)
+	unwritable(t, folderEndsDir(f.Store))
+	releaseFolder := func() {}
+	if folderBusy {
+		releaseFolder = holdWriter(t, f.Store)
+	}
+	firstM, resumeA := make(chan struct{}), make(chan struct{})
+	var claimed atomic.Bool
+	onPublish(t, func(dir, name string, data []byte) ([]byte, bool, error) {
+		if isFinal(dir, name) && claimed.CompareAndSwap(false, true) {
+			close(firstM)
+			<-resumeA
+		}
+		return linkEnd(dir, name, data)
+	})
+	beforeWritesB, resumeB := make(chan string, 2), make(chan struct{})
+	var mu sync.Mutex
+	entered := map[string]bool{}
+	prev := endWrite
+	t.Cleanup(func() { endWrite = prev })
+	endWrite = func(slot string, write func() error) error {
+		mu.Lock()
+		first := !entered[slot]
+		entered[slot] = true
+		mu.Unlock()
+		if first {
+			beforeWritesB <- slot
+			<-resumeB
+		}
+		return write()
+	}
+	s.clk.Advance(time.Second)
+	at := s.clk.Now().UnixMilli()
+	doneA, doneB := make(chan startResult, 1), make(chan startResult, 1)
+	go runStop(f, doneA)
+	<-firstM
+	s.clk.Advance(time.Second)
+	go runStop(f, doneB)
+	<-beforeWritesB
+	<-beforeWritesB
+	close(resumeA)
+	a := <-doneA
+	close(resumeB)
+	b := <-doneB
+	if err := errors.Join(a.err, b.err); err != nil {
+		t.Fatal(err)
+	}
+	repo := rc(t, f, r)
+	requireSessionEnd(t, repo, "s", true, at)
+	requireEmpty(t, stopClaimsDir(f.Store))
+	requireEmpty(t, pendingDir(repo))
+	if !folderBusy {
+		requireSessionEnd(t, folderRC(f), "s", true, at)
+		return
+	}
+	for _, res := range []startResult{a, b} {
+		if !strings.Contains(failure(res.res), "session end not recorded in "+s.folder) {
+			t.Fatalf("failure = %q; want the folder named", failure(res.res))
+		}
+	}
+	requireSessionEnd(t, folderRC(f), "s", false, 0)
+	releaseFolder()
+	endWrite = prev
+	s.clk.Advance(time.Second)
+	t3 := s.clk.Now().UnixMilli()
+	if _, err := Handle(context.Background(), f, Event{Kind: KindStop, SessionID: "s", StopActive: true}); err != nil {
+		t.Fatal(err)
+	}
+	requireSessionEnd(t, folderRC(f), "s", true, t3)
+}
+
+// testStopClaimSharedFolderFromTheLaterStop pauses Stop B before its claim's
+// link, runs Stop A, whose F is refused, to its M link, then lets B publish F.
+func testStopClaimSharedFolderFromTheLaterStop(t *testing.T) {
+	s, f, r := directWriteSetup(t)
+	bAtClaim, resumeB := make(chan struct{}), make(chan struct{})
+	aAtM, resumeA := make(chan struct{}), make(chan struct{})
+	var mu sync.Mutex
+	counts := map[string]int{}
+	var folderTimes []int64
+	onPublish(t, func(dir, name string, data []byte) ([]byte, bool, error) {
+		kind := filepath.Base(dir)
+		if isFinal(dir, name) {
+			kind = "M"
+		}
+		mu.Lock()
+		counts[kind]++
+		n := counts[kind]
+		if isFolder(dir) {
+			var rec folderEndRecord
+			if err := json.Unmarshal(data, &rec); err != nil {
+				t.Error(err)
+			}
+			folderTimes = append(folderTimes, rec.EndedAt)
+		}
+		mu.Unlock()
+		switch {
+		case isClaim(dir) && n == 1:
+			close(bAtClaim)
+			<-resumeB
+		case isFolder(dir) && n == 1:
+			return nil, false, errors.New("injected")
+		case kind == "M" && n == 1:
+			close(aAtM)
+			<-resumeA
+		}
+		return linkEnd(dir, name, data)
+	})
+	s.clk.Advance(time.Second)
+	doneA, doneB := make(chan startResult, 1), make(chan startResult, 1)
+	go runStop(f, doneB)
+	<-bAtClaim
+	s.clk.Advance(time.Second)
+	at := s.clk.Now().UnixMilli()
+	go runStop(f, doneA)
+	<-aAtM
+	close(resumeB)
+	b := <-doneB
+	close(resumeA)
+	a := <-doneA
+	for _, res := range []startResult{a, b} {
+		if res.err != nil || strings.Contains(failure(res.res), "not recorded") {
+			t.Fatalf("Stop = %v, %v", res.err, res.res.Failure)
+		}
+	}
+	requireSessionEnd(t, folderRC(f), "s", true, at)
+	requireSessionEnd(t, rc(t, f, r), "s", true, at)
+	if len(folderTimes) != 2 || folderTimes[0] != at || folderTimes[1] != at {
+		t.Fatalf("F publications carried %v; want both at %d", folderTimes, at)
+	}
+	requireNoPendingFiles(t, f, rc(t, f, r))
+}
+
+// stopClaimHolder makes the fixture of a Stop A that claimed its time and has
+// not linked F yet: a guard of s covering the repo and A's held claim. It
+// returns that claim and the function that releases its lock.
+func stopClaimHolder(t *testing.T, s *scratch, f *app.App, r string) (folderEndRecord, func()) {
+	t.Helper()
+	repo := rc(t, f, r)
+	row, _, err := folderSession(context.Background(), f.Store, "s")
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := repoEndRecord{Session: "s", Agent: row.agent, Worktree: r, StartedAt: row.startedAt,
+		Root: repo.Git.RootCommit, Dir: s.folder, Nonce: newNonce()}
+	if _, _, err := claimEnd(pendingDir(repo), guardName("s"), g); err != nil {
+		t.Fatal(err)
+	}
+	s.clk.Advance(time.Second)
+	claim, created, release, err := claimFolderEnd(stopClaimsDir(f.Store), folderEndRecord{Session: "s", Dir: s.folder,
+		EndedAt: s.clk.Now().UnixMilli(), Covered: []string{repo.Git.RepoID}})
+	if err != nil || !created {
+		t.Fatalf("claim: %v %v", created, err)
+	}
+	return claim, release
+}
+
+// requireFolderPendingThenEnded checks a Stop that left the folder's end pending
+// at at, then lets the held claim's holder die, frees the folder's store and
+// runs the background run and a session start in the folder.
+func requireFolderPendingThenEnded(t *testing.T, f *app.App, r string, res Result, launches int, at int64, die ...func()) {
+	t.Helper()
+	if failure(res) != "" || launches != 1 {
+		t.Fatalf("Stop failure = %q, launches %d; want none and one", failure(res), launches)
+	}
+	repo := rc(t, f, r)
+	requireSessionEnd(t, repo, "s", true, at)
+	requireSessionEnd(t, folderRC(f), "s", false, 0)
+	for _, d := range die {
+		d()
+	}
+	if err := EndRosterSessions(context.Background(), f, "s"); err != nil {
+		t.Fatal(err)
+	}
+	requireSessionEnd(t, folderRC(f), "s", true, at)
+	start(t, f, "next", "startup")
+	requireNoPendingFiles(t, f, repo)
+}
+
+func testStopClaimHolderDiesBeforeF(t *testing.T) {
+	s, f, r := directWriteSetup(t)
+	launches := 0
+	f.EndLater = func(string) { launches++ }
+	claim, releaseClaim := stopClaimHolder(t, s, f, r)
+	releaseFolder := holdWriter(t, f.Store)
+	res, _ := stopScratch(t, s, f, "s")
+	requireFolderPendingThenEnded(t, f, r, res, launches, claim.EndedAt, releaseClaim, releaseFolder)
+}
+
+func testStopClaimHolderLinksFLate(t *testing.T, fail bool) {
+	s, f, r := directWriteSetup(t)
+	launches := 0
+	f.EndLater = func(string) { launches++ }
+	claim, releaseClaim := stopClaimHolder(t, s, f, r)
+	releaseFolder := holdWriter(t, f.Store)
+	linked := false
+	releaseF := func() {}
+	onPublish(t, func(dir, name string, data []byte) ([]byte, bool, error) {
+		if isFolder(dir) && !linked {
+			linked = true
+			_, created, release, err := claimFolderEnd(dir, claim)
+			if err != nil || !created {
+				t.Fatalf("the holder's F: %v %v", created, err)
+			}
+			releaseF = release
+			if fail {
+				return nil, false, errors.New("injected")
+			}
+		}
+		return linkEnd(dir, name, data)
+	})
+	res, _ := stopScratch(t, s, f, "s")
+	requireFolderPendingThenEnded(t, f, r, res, launches, claim.EndedAt, releaseF, releaseClaim, releaseFolder)
+}
+
+func testStopClaimDead(t *testing.T) {
+	s, f, r := directWriteSetup(t)
+	cdir := stopClaimsDir(f.Store)
+	s.clk.Advance(time.Second)
+	dead := folderEndRecord{Session: "s", Dir: s.folder, EndedAt: s.clk.Now().UnixMilli()}
+	deadFolderEnd(t, cdir, dead)
+	start(t, f, "other", "startup")
+	requireEmpty(t, cdir)
+	requireSessionEnd(t, folderRC(f), "s", false, 0)
+	deadFolderEnd(t, cdir, dead)
+	_, at := stopScratch(t, s, f, "s")
+	requireSessionEnd(t, folderRC(f), "s", true, at)
+	requireSessionEnd(t, rc(t, f, r), "s", true, at)
+	requireNoPendingFiles(t, f, rc(t, f, r))
+}
+
+func TestLateGuardGetsTheRunningStopsTime(t *testing.T) {
+	t.Run("stores free", func(t *testing.T) { testLateGuard(t, false) })
+	t.Run("repo store held through both Stops", func(t *testing.T) { testLateGuard(t, true) })
+}
+
+// testLateGuard runs Stop B inside Stop A's publication of F, after A's guard
+// link failed and a prune ran: B links the guard A's claim does not cover.
+func testLateGuard(t *testing.T, held bool) {
+	s, f, r := directWriteSetup(t)
 	in := s.open(r)
 	inner := false
 	var t2, pruneAt int64
+	var b Result
+	release := func() {}
 	onPublish(t, func(dir, name string, data []byte) ([]byte, bool, error) {
 		if isGuard(name) && !inner {
 			return nil, false, errors.New("injected")
@@ -992,17 +1257,40 @@ func TestFailedGuardLinkNeverTakesAnEarlierTime(t *testing.T) {
 			s.clk.Advance(time.Second)
 			pruneAt = s.clk.Now().UnixMilli()
 			start(t, in, "p", "startup")
-			_, t2 = stopScratch(t, s, f, "s")
+			if held {
+				release = holdWriter(t, rc(t, f, r).Store)
+			}
+			b, t2 = stopScratch(t, s, f, "s")
 			inner = false
 		}
 		return existing, created, err
 	})
-	_, t1 := stopScratch(t, s, f, "s")
-	if !(t1 < pruneAt && pruneAt < t2) {
+	a, t1 := stopScratch(t, s, f, "s")
+	if t1 >= pruneAt || pruneAt >= t2 {
 		t.Fatalf("fixture times %d, %d, %d", t1, pruneAt, t2)
 	}
 	requireSessionEnd(t, folderRC(f), "s", true, t1)
-	requireSessionEnd(t, rc(t, f, r), "s", true, t2)
+	repo := rc(t, f, r)
+	if !held {
+		requireSessionEnd(t, repo, "s", true, t1)
+		requireNoPendingFiles(t, f, repo)
+		return
+	}
+	for _, res := range []Result{a, b} {
+		if !strings.Contains(failure(res), "session end not recorded in "+r) {
+			t.Fatalf("failure = %q; want the repo named", failure(res))
+		}
+	}
+	requireEmpty(t, folderEndsDir(f.Store))
+	g, gok, gerr := readEnd[repoEndRecord](pendingDir(repo), guardName("s"))
+	_, mok, merr := readEnd[repoEndRecord](pendingDir(repo), endName("s"))
+	if gerr != nil || merr != nil || !gok || g.EndedAt != 0 || mok {
+		t.Fatalf("guard = %+v, %v, %v; M %v, %v; want B's guard alone, with no time", g, gok, gerr, mok, merr)
+	}
+	release()
+	_, t3 := stopScratch(t, s, f, "s")
+	requireSessionEnd(t, repo, "s", true, t3)
+	requireNoPendingFiles(t, f, repo)
 }
 
 func TestRecoveryFinishesARecordedTime(t *testing.T) {
@@ -1070,25 +1358,7 @@ func TestRecoveryFinishesARecordedTime(t *testing.T) {
 		requireSessionEnd(t, rc(t, f, r), "s", true, t2)
 	})
 
-	// publish writes a plain guard of s and an F covering it, as a Stop that
-	// died after publishing F leaves them, and returns F.
-	publish := func(t *testing.T, s *scratch, f *app.App, r string) folderEndRecord {
-		t.Helper()
-		row, _, err := folderSession(context.Background(), f.Store, "s")
-		if err != nil {
-			t.Fatal(err)
-		}
-		repo := rc(t, f, r)
-		g := repoEndRecord{Session: "s", Agent: row.agent, Worktree: r, StartedAt: row.startedAt,
-			Root: repo.Git.RootCommit, Dir: s.folder, Nonce: newNonce()}
-		if _, _, err := claimEnd(pendingDir(repo), guardName("s"), g); err != nil {
-			t.Fatal(err)
-		}
-		s.clk.Advance(time.Second)
-		return deadFolderEnd(t, folderEndsDir(f.Store), folderEndRecord{Session: "s", Dir: s.folder,
-			EndedAt: s.clk.Now().UnixMilli(), Covered: []string{repo.Git.RepoID}})
-	}
-
+	publish := publishDeadEnd
 	t.Run("a publisher that died after F", func(t *testing.T) {
 		s, f, r := setup(t)
 		fe := publish(t, s, f, r)
@@ -1131,6 +1401,128 @@ func TestRecoveryFinishesARecordedTime(t *testing.T) {
 		start(t, ua, "old", "startup")
 		requireSessionEnd(t, folderRC(f), "s", true, fe.EndedAt)
 		requireNoPendingFiles(t, f)
+	})
+
+	t.Run("a covered guard whose time cannot be copied", testCoveredGuardTimeNotCopied)
+}
+
+// publishDeadEnd writes a plain guard of s and an F covering it, as a Stop that
+// died after publishing F leaves them, and returns F.
+func publishDeadEnd(t *testing.T, s *scratch, f *app.App, r string) folderEndRecord {
+	t.Helper()
+	row, _, err := folderSession(context.Background(), f.Store, "s")
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo := rc(t, f, r)
+	g := repoEndRecord{Session: "s", Agent: row.agent, Worktree: r, StartedAt: row.startedAt,
+		Root: repo.Git.RootCommit, Dir: s.folder, Nonce: newNonce()}
+	if _, _, err := claimEnd(pendingDir(repo), guardName("s"), g); err != nil {
+		t.Fatal(err)
+	}
+	s.clk.Advance(time.Second)
+	return deadFolderEnd(t, folderEndsDir(f.Store), folderEndRecord{Session: "s", Dir: s.folder,
+		EndedAt: s.clk.Now().UnixMilli(), Covered: []string{repo.Git.RepoID}})
+}
+
+// failCopies makes every copy of a time into pdir fail, as a folder that takes
+// no file would, even for root: the M link puts a regular file in the folder's
+// place, so the stamp fails too. restore puts the folder back.
+func failCopies(t *testing.T, pdir string) (restore func()) {
+	t.Helper()
+	aside := pdir + "-aside"
+	onPublish(t, func(dir, name string, data []byte) ([]byte, bool, error) {
+		if dir == pdir && isFinal(dir, name) {
+			if fi, err := os.Stat(pdir); err == nil && fi.IsDir() {
+				if err := os.Rename(pdir, aside); err != nil {
+					t.Fatal(err)
+				}
+				unwritable(t, pdir)
+			}
+			return nil, false, errors.New("injected")
+		}
+		return linkEnd(dir, name, data)
+	})
+	return func() {
+		t.Helper()
+		if err := os.Remove(pdir); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(aside, pdir); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// requireCopyFailure fails unless failure names the failed copy for worktree r.
+func requireCopyFailure(t *testing.T, failure, r string) {
+	t.Helper()
+	if !strings.Contains(failure, "record the pending session end for "+r) {
+		t.Fatalf("failure = %q; want the failed copy for %s named", failure, r)
+	}
+}
+
+func testCoveredGuardTimeNotCopied(t *testing.T) {
+	ctx := context.Background()
+	t.Run("in-repo start", func(t *testing.T) {
+		s, f, r := directWriteSetup(t)
+		fe := publishDeadEnd(t, s, f, r)
+		repo := rc(t, f, r)
+		restore := failCopies(t, pendingDir(repo))
+		in := s.open(r)
+		res, err := Handle(ctx, in, Event{Kind: KindSessionStart, SessionID: "in", Source: "startup"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		requireCopyFailure(t, failure(res), r)
+		requireSessionEnd(t, repo, "s", true, fe.EndedAt)
+		restore()
+		start(t, in, "in2", "startup")
+		requireEmpty(t, pendingDir(repo))
+	})
+	t.Run("background run", func(t *testing.T) {
+		if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+			t.Skip("needs a folder its user may not write")
+		}
+		s, f, r := directWriteSetup(t)
+		fe := publishDeadEnd(t, s, f, r)
+		repo := rc(t, f, r)
+		pdir := pendingDir(repo)
+		if err := os.Chmod(pdir, 0o555); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(pdir, 0o755) })
+		err := EndRosterSessions(ctx, f, "s")
+		requireCopyFailure(t, fmt.Sprint(err), r)
+		requireSessionEnd(t, repo, "s", true, fe.EndedAt)
+		requireSessionEnd(t, folderRC(f), "s", true, fe.EndedAt)
+		requireEmpty(t, folderEndsDir(f.Store))
+		if _, ok, err := readEnd[repoEndRecord](pdir, guardName("s")); err != nil || !ok {
+			t.Fatalf("guard = %v, %v; want it kept until the folder is writable", ok, err)
+		}
+		if err := os.Chmod(pdir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		start(t, s.open(r), "in", "startup")
+		requireNoPendingFiles(t, f, repo)
+	})
+	t.Run("abandoned F swept elsewhere", func(t *testing.T) {
+		s, f, r := directWriteSetup(t)
+		fe := publishDeadEnd(t, s, f, r)
+		repo := rc(t, f, r)
+		restore := failCopies(t, pendingDir(repo))
+		age(t, s, folderEndPath(f, s.folder, "s"), EndRunLimit+time.Second)
+		res, err := Handle(ctx, s.open(s.goRepo("unrelated")), Event{Kind: KindSessionStart, SessionID: "u", Source: "startup"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		requireCopyFailure(t, failure(res), r)
+		requireSessionEnd(t, folderRC(f), "s", true, fe.EndedAt)
+		requireEmpty(t, folderEndsDir(f.Store))
+		restore()
+		_, at := stopScratch(t, s, f, "s")
+		requireSessionEnd(t, repo, "s", true, at)
+		requireNoPendingFiles(t, f, repo)
 	})
 }
 
@@ -1232,4 +1624,197 @@ func TestLaterStopRecordsNothingAndStartsNoRun(t *testing.T) {
 	}
 	requireSessionEnd(t, rc(t, f, r), "s", true, t1)
 	requireNoPendingFiles(t, f, rc(t, f, r))
+}
+
+func TestStaleFilesWithoutReadPermission(t *testing.T) {
+	t.Run("removed", testStaleUnreadableRemoved)
+	t.Run("young", testStaleUnreadableYoung)
+	t.Run("not empty, not a record's name", func(t *testing.T) { testStaleUnreadableContent(t, "garbage", "not json") })
+	t.Run("not empty, at a record's name", func(t *testing.T) {
+		testStaleUnreadableContent(t, folderEndName(gitctx.NonGitID("/gone"), "x"), "not json"+strings.Repeat(" ", 100))
+	})
+	t.Run("readable, but its removal is refused", testStaleReadableRemovalRefused)
+	t.Run("a file that takes the name in the gap", func(t *testing.T) {
+		t.Run("a valid F", func(t *testing.T) { testStaleNameTakenInTheGap(t, false) })
+		t.Run("a symlink", func(t *testing.T) { testStaleNameTakenInTheGap(t, true) })
+	})
+	t.Run("a liveness file", func(t *testing.T) { testStaleUnreadableContent(t, ".live-x", "") })
+	t.Run("lock held elsewhere", testStaleUnreadableLockHeld)
+}
+
+// staleSetup opens a repo whose session starts sweep the shared pending-ends
+// folder, and returns that folder.
+func staleSetup(t *testing.T, unreadable bool) (*scratch, *app.App, string) {
+	t.Helper()
+	if unreadable && (runtime.GOOS == "windows" || os.Geteuid() == 0) {
+		t.Skip("needs a file its owner may not read")
+	}
+	s := newScratch(t)
+	a := s.open(s.goRepo("repo"))
+	d := folderEndsDir(a.Store)
+	if err := os.MkdirAll(d, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return s, a, d
+}
+
+// putStale writes data at path with mode, d old by the fake clock.
+func putStale(t *testing.T, s *scratch, path, data string, mode fs.FileMode, d time.Duration) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, mode); err != nil {
+		t.Fatal(err)
+	}
+	age(t, s, path, d)
+}
+
+// sweepStart runs a session start in a and returns its failure.
+func sweepStart(t *testing.T, a *app.App, id string) string {
+	t.Helper()
+	res, err := Handle(context.Background(), a, Event{Kind: KindSessionStart, SessionID: id, Source: "startup"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return failure(res)
+}
+
+// present reports whether path names a file, a symlink included.
+func present(t *testing.T, path string) bool {
+	t.Helper()
+	_, err := os.Lstat(path)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		t.Fatal(err)
+	}
+	return err == nil
+}
+
+const stale = EndRunLimit + time.Second
+
+func testStaleUnreadableRemoved(t *testing.T) {
+	s, a, d := staleSetup(t, true)
+	p := filepath.Join(d, "unreadable")
+	putStale(t, s, p, "", 0, stale)
+	if f := sweepStart(t, a, "next"); f != "" || present(t, p) {
+		t.Fatalf("failure %q, file present %v", f, present(t, p))
+	}
+	entries, err := os.ReadDir(d)
+	if err != nil || len(entries) != 1 || entries[0].Name() != staleLockName {
+		t.Fatalf("folder holds %v, %v; want the stale-removal lock alone", entries, err)
+	}
+	if recs, other, err := listEnds[folderEndRecord](d); err != nil || len(recs)+len(other) != 0 {
+		t.Fatalf("listing = %v, %v, %v; want nothing", recs, other, err)
+	}
+}
+
+func testStaleUnreadableYoung(t *testing.T) {
+	s, a, d := staleSetup(t, true)
+	p := filepath.Join(d, "unreadable")
+	putStale(t, s, p, "", 0, EndRunLimit-time.Second)
+	if f := sweepStart(t, a, "next"); f != "" || !present(t, p) {
+		t.Fatalf("failure %q, file present %v", f, present(t, p))
+	}
+}
+
+func testStaleUnreadableContent(t *testing.T, name, data string) {
+	s, a, d := staleSetup(t, true)
+	p := filepath.Join(d, name)
+	putStale(t, s, p, data, 0, stale)
+	if f := sweepStart(t, a, "next"); f != "" || present(t, p) {
+		t.Fatalf("failure %q, file present %v", f, present(t, p))
+	}
+}
+
+func testStaleReadableRemovalRefused(t *testing.T) {
+	s, a, d := staleSetup(t, false)
+	refused, other := filepath.Join(d, "refused"), filepath.Join(d, "other")
+	for _, p := range []string{refused, other} {
+		putStale(t, s, p, "not json", 0o644, stale)
+	}
+	prev := removeFile
+	t.Cleanup(func() { removeFile = prev })
+	removeFile = func(path string, match func(f *os.File, fi fs.FileInfo) bool) (bool, error) {
+		if path == refused {
+			return false, &fs.PathError{Op: "remove", Path: path, Err: fs.ErrPermission}
+		}
+		return prev(path, match)
+	}
+	f := sweepStart(t, a, "next")
+	if !strings.Contains(f, refused) || present(t, other) {
+		t.Fatalf("failure %q, other present %v; want refused named and other removed", f, present(t, other))
+	}
+	if data, err := os.ReadFile(refused); err != nil || string(data) != "not json" {
+		t.Fatalf("refused = %q, %v; want it kept unchanged", data, err)
+	}
+	removeFile = prev
+	if f := sweepStart(t, a, "again"); f != "" || present(t, refused) {
+		t.Fatalf("failure %q, refused present %v", f, present(t, refused))
+	}
+}
+
+func testStaleNameTakenInTheGap(t *testing.T, symlink bool) {
+	s, a, d := staleSetup(t, true)
+	gone := filepath.Join(s.base, "gone")
+	p := filepath.Join(d, folderEndName(gitctx.NonGitID(gone), "x"))
+	putStale(t, s, p, "", 0, stale)
+	target := filepath.Join(t.TempDir(), "target")
+	valid := fmt.Sprintf(`{"session":"x","dir":%q,"ended_at":5,"live":".live-k"}`, gone)
+	prev := removeFile
+	t.Cleanup(func() { removeFile = prev })
+	replaced := false
+	removeFile = func(path string, match func(f *os.File, fi fs.FileInfo) bool) (bool, error) {
+		removed, err := prev(path, match)
+		if path != p || replaced {
+			return removed, err
+		}
+		replaced = true
+		// Moved aside, not removed, so its file ID stays taken and the new file gets another.
+		if rerr := os.Rename(p, filepath.Join(t.TempDir(), "listed")); rerr != nil {
+			t.Fatal(rerr)
+		}
+		if symlink {
+			putStale(t, s, target, "", 0, stale)
+			if lerr := os.Symlink(target, p); lerr != nil {
+				t.Fatal(lerr)
+			}
+		} else if werr := os.WriteFile(p, []byte(valid), 0o600); werr != nil {
+			t.Fatal(werr)
+		}
+		return removed, err
+	}
+	if f := sweepStart(t, a, "next"); f != "" || !replaced {
+		t.Fatalf("failure %q, replaced %v", f, replaced)
+	}
+	fi, err := os.Lstat(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if symlink {
+		ti, err := os.Stat(target)
+		if err != nil || fi.Mode()&fs.ModeSymlink == 0 || ti.Mode().Perm() != 0 {
+			t.Fatalf("symlink %v, target %v, %v; want both kept", fi.Mode(), ti, err)
+		}
+		return
+	}
+	if data, err := os.ReadFile(p); err != nil || string(data) != valid || fi.Mode().Perm() != 0o600 {
+		t.Fatalf("F = %q, %v, mode %v; want it kept unchanged", data, err, fi.Mode())
+	}
+}
+
+func testStaleUnreadableLockHeld(t *testing.T) {
+	s, a, d := staleSetup(t, true)
+	p := filepath.Join(d, "unreadable")
+	putStale(t, s, p, "", 0, stale)
+	release, ok, err := store.TryLockFile(filepath.Join(d, staleLockName))
+	if err != nil || !ok {
+		t.Fatalf("lock: %v %v", ok, err)
+	}
+	if f := sweepStart(t, a, "next"); f != "" || !present(t, p) {
+		t.Fatalf("failure %q, file present %v", f, present(t, p))
+	}
+	release()
+	if f := sweepStart(t, a, "again"); f != "" || present(t, p) {
+		t.Fatalf("failure %q, file present %v", f, present(t, p))
+	}
 }

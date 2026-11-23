@@ -95,3 +95,13 @@ func LockHeld(path string) (held bool, err error) {
 	}
 	return !ok, nil
 }
+
+// RemoveUnreadable would remove the regular file listed at path, which the
+// caller could not open to read, when no process of the user could read it.
+// It removes nothing: Windows grants each process rights from its own token, so
+// a file this process may not read may still be a record another Recarto
+// process of the user reads. Nothing here can tell the two apart, so such a
+// file stays until the user deletes it.
+func RemoveUnreadable(path string, listed fs.FileInfo, lockPath string) (removed bool, err error) {
+	return false, nil
+}

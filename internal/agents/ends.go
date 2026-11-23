@@ -26,13 +26,16 @@ import (
 // A Stop of a conversation started in a folder without code leaves each session
 // end that does not fit its wait pending, in records later writers finish:
 //
-//   - F, the folder's pending end and the conversation's one claim on its end
-//     time, in the cache's shared pending-ends folder;
+//   - F°, the claim of a running Stop on the conversation's end time, in the
+//     folder store's own stop-claims folder: the one claim point of running Stops;
+//   - F, the folder's pending end, in the cache's shared pending-ends folder,
+//     published only with a running F°'s record;
 //   - G, a repo's guard, beside the repository's store: the session row the Stop
 //     would have written, linked before the Stop takes its time, so pruning waits
 //     for it; a stamped G also carries its time;
 //   - M, a repo's final pending end, beside the repository's store, with its time;
-//   - K, F's creator's liveness file beside F, locked while the creator runs.
+//   - K, the liveness file of F's or F°'s creator beside it, locked while the
+//     creator runs.
 //
 // Every record is a fully written file linked or renamed into its name, never
 // changed in place, and every removal of one goes through store.RemoveIf.
@@ -48,8 +51,9 @@ const (
 	EndRunLimit = WarmLimit + 2*EndRunGrace
 )
 
-// folderEndRecord is a folder's pending session end, in the cache's shared
-// pending-ends folder, and the conversation's one claim on its end time.
+// folderEndRecord is a conversation's claim on its end time. In the folder
+// store's stop-claims folder it is the claim of a running Stop (F°); in the
+// cache's shared pending-ends folder it is the folder's pending session end (F).
 type folderEndRecord struct {
 	Session string   `json:"session"`
 	Dir     string   `json:"dir"`               // the folder the conversation started in (App.Dir)
@@ -84,10 +88,11 @@ type repoEndRecord struct {
 	Nonce     string `json:"nonce"` // unique to this file, so a removal can tell it from a later file at the same name
 }
 
-// valid checks r at name: a guard may wait for its time, a final end carries it.
+// valid checks r at name: a guard may wait for its time, a final end carries
+// it. A record counts only at the name its readers open.
 func (r repoEndRecord) valid(name string) bool {
 	return r.Session != "" && r.Agent != "" && r.Worktree != "" && r.Dir != "" && r.Nonce != "" &&
-		r.StartedAt > 0 && (strings.HasSuffix(name, guardSuffix) || r.EndedAt > 0)
+		r.StartedAt > 0 && (name == guardName(r.Session) || (name == endName(r.Session) && r.EndedAt > 0))
 }
 
 // endRecordT is a pending-end record kind.
@@ -100,6 +105,9 @@ const (
 	guardSuffix     = "-guard"
 	claimFilePrefix = ".claim-"
 	liveFilePrefix  = ".live-"
+	// staleLockName is a pending-ends folder's lock for removing files their
+	// owner may not read; it is never removed, as no lock file is.
+	staleLockName = ".stale.lock"
 )
 
 func folderEndsDir(st *store.Store) string {
@@ -108,6 +116,9 @@ func folderEndsDir(st *store.Store) string {
 
 // storeDir is st's directory in the cache, named by its repository's cache id.
 func storeDir(st *store.Store) string { return filepath.Dir(st.Path()) }
+
+// stopClaimsDir holds the claims of the running Stops of the folder whose store is st.
+func stopClaimsDir(st *store.Store) string { return filepath.Join(storeDir(st), "stop-claims") }
 
 // repoEndsDir holds the pending ends of the repository whose store is in storeDir.
 func repoEndsDir(storeDir string) string { return filepath.Join(storeDir, "pending-repo-ends") }
@@ -278,6 +289,9 @@ func listEnds[T endRecordT](dir string) (recs []namedEnd[T], other []endEntry, e
 		return nil, nil, err
 	}
 	for _, entry := range entries {
+		if entry.Name() == staleLockName {
+			continue
+		}
 		info, err := entry.Info()
 		if err != nil {
 			// The entry went since the listing: nothing is left to read or remove.
@@ -287,6 +301,16 @@ func listEnds[T endRecordT](dir string) (recs []namedEnd[T], other []endEntry, e
 		if strings.HasPrefix(e.name, claimFilePrefix) || strings.HasPrefix(e.name, liveFilePrefix) {
 			other = append(other, e)
 			continue
+		}
+		// Recarto creates every name in lower case, and its readers and writers
+		// open those names. On a case-insensitive volume another spelling opens
+		// the same file, so it is that record. On a case-sensitive volume it is a
+		// distinct file no reader opens, so it is no record; a failed Lstat leaves
+		// it under its own name, where the exact name check decides the same.
+		if lower := strings.ToLower(e.name); lower != e.name {
+			if li, err := os.Lstat(filepath.Join(dir, lower)); err == nil && os.SameFile(li, info) {
+				e.name = lower
+			}
 		}
 		rec, ok, err := readEnd[T](dir, e.name)
 		switch {
@@ -330,32 +354,94 @@ func removeStaleEnds[T endRecordT](dir string, entries []endEntry, now time.Time
 		if !older(e.info, now) {
 			continue
 		}
-		path := filepath.Join(dir, e.name)
 		switch {
 		case strings.HasPrefix(e.name, claimFilePrefix):
-			if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			if err := os.Remove(filepath.Join(dir, e.name)); err != nil && !errors.Is(err, fs.ErrNotExist) {
 				errs = append(errs, err)
 			}
 		case strings.HasPrefix(e.name, liveFilePrefix):
-			errs = append(errs, removeLiveFile(dir, e.name))
-		default:
-			// Only a file that is still unreadable and old goes: one that took the
-			// name since may be a valid or young record.
-			_, err := removeFile(path, func(f *os.File, fi fs.FileInfo) bool {
-				if !older(fi, now) {
-					return false
-				}
-				data, err := io.ReadAll(f)
-				if err != nil {
-					return true
-				}
-				_, err = decodeEnd[T](e.name, data)
-				return err != nil
-			})
+			// A process holds a liveness file's lock only through an open of it,
+			// which none can make once its owner bits deny the user reading it.
+			err := removeLiveFile(dir, e.name)
+			if errors.Is(err, fs.ErrPermission) {
+				err = removeDenied(dir, e, err)
+			}
 			errs = append(errs, err)
+		default:
+			errs = append(errs, removeStaleRecord[T](dir, e, now))
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// removeStaleRecord removes the old entry e that cannot be read as a record.
+func removeStaleRecord[T endRecordT](dir string, e endEntry, now time.Time) error {
+	path := filepath.Join(dir, e.name)
+	// Only a file that is still unreadable and old goes: one that took the name
+	// since may be a valid or young record.
+	_, err := removeFile(path, func(f *os.File, fi fs.FileInfo) bool {
+		if !older(fi, now) {
+			return false
+		}
+		data, err := io.ReadAll(f)
+		if err != nil {
+			return true
+		}
+		_, err = decodeEnd[T](e.name, data)
+		return err != nil
+	})
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, fs.ErrPermission):
+		return removeDenied(dir, e, err)
+	default:
+		return fmt.Errorf("remove stale pending end %s: %w", path, err)
+	}
+}
+
+// removeDenied decides on the old entry e whose removal failed with the
+// permission error removeErr.
+//
+// A permission error from the removal does not say what was refused: Windows
+// asks for reading and deleting in one open, and a folder can refuse the
+// unlink. Only a file this process cannot read goes to removeUnreadable; a
+// readable file whose removal was refused is reported.
+func removeDenied(dir string, e endEntry, removeErr error) error {
+	path := filepath.Join(dir, e.name)
+	f, err := os.Open(path)
+	switch {
+	case errors.Is(err, fs.ErrPermission):
+		return removeUnreadable(dir, e)
+	case errors.Is(err, fs.ErrNotExist):
+		return nil
+	case err != nil:
+		return fmt.Errorf("remove stale pending end %s: %w", path, err)
+	}
+	fi, err := f.Stat()
+	// Nothing was written through f, so a close error loses nothing.
+	_ = f.Close()
+	if err != nil {
+		return fmt.Errorf("remove stale pending end %s: %w", path, err)
+	}
+	if os.SameFile(fi, e.info) {
+		return fmt.Errorf("remove stale pending end %s: %w", path, removeErr)
+	}
+	// The listed entry has left the path, and the file now there is not the one
+	// this sweep decided on; the next session start looks at it.
+	return nil
+}
+
+// removeUnreadable removes the old entry e, which this process cannot read,
+// when no process of the user can.
+func removeUnreadable(dir string, e endEntry) error {
+	path := filepath.Join(dir, e.name)
+	// A file it leaves without an error is one store.RemoveUnreadable must not
+	// remove, or one another sweep is removing; that is final for this sweep.
+	if _, err := store.RemoveUnreadable(path, e.info, filepath.Join(dir, staleLockName)); err != nil {
+		return fmt.Errorf("remove stale pending end %s: %w", path, err)
+	}
+	return nil
 }
 
 // removeLiveFile removes a liveness file unless its creator still holds its
@@ -658,6 +744,7 @@ type targetEnd struct {
 	recErr error         // the guard could not be created: the target is unguarded
 	finErr error         // the guard's time could be recorded neither as M nor as a stamp
 	finG   repoEndRecord // that guard, with the time it was to get
+	direct bool          // a guard the live claim does not cover: written only directly, at tc
 	busy   bool
 	err    error
 }
@@ -667,31 +754,41 @@ type targetEnd struct {
 var endWrite = func(slot string, write func() error) error { return write() }
 
 // conversationEnding is the state of one endConversation call.
+//
+// A Stop claims its time first as F°, in the folder store's own stop-claims
+// folder: it gives overlapping Stops of the conversation one first-wins claim
+// in a folder the conversation's own store needs anyway, also when the shared
+// folder takes no F. F is published only with a running F°'s record, so two
+// running Stops never hold claims with different times.
 type conversationEnding struct {
 	ctx          context.Context
 	a            *app.App
 	sessionID    string
 	targets      []endTarget
 	fdir, fname  string
+	cdir         string // the folder store's Stop claims
 	row          folderRow
 	ts           []targetEnd
-	fin          *folderEndRecord // the live F, if any
-	release      func()           // drops this call's creator lock on F; nil when it holds none
-	createdAny   bool             // this call created a record
-	folderRecErr error            // F could not be created
-	tc           int64            // the common time of a direct write without a record
+	fin          *folderEndRecord // the live claim, if any: F, or a running Stop's F°
+	finDir       string           // the folder holding fin: fdir for F, cdir for F°
+	ownClaim     *folderEndRecord // the F° this call created and still holds
+	ownF         *folderEndRecord // the F this call published and still holds
+	releases     []func()         // the creator locks this call holds
+	createdAny   bool             // this call created a G, an F or an M
+	folderRecErr error            // the folder's end could not be recorded
+	tc           int64            // the common time of a direct write
 	folderBusy   bool
 	errs         []error
 }
 
 // endConversation writes sessionID's folder and repo session ends. With stop it
-// also records the ends not yet recorded: guards first, then the time, then F,
-// then each guard's time. Store writes use ctx's write deadline. Without stop it
-// gives covered guards F's time and writes what is recorded.
+// also records the ends not yet recorded: guards first, then the time, then the
+// claim and F, then each guard's time. Store writes use ctx's write deadline.
+// Without stop it gives covered guards F's time and writes what is recorded.
 func endConversation(ctx context.Context, a *app.App, sessionID string, targets []endTarget, stop bool) (conversationEnd, error) {
 	c := &conversationEnding{ctx: ctx, a: a, sessionID: sessionID, targets: targets,
-		fdir: folderEndsDir(a.Store), fname: folderEndName(folderID(a.Store), sessionID)}
-	if found, err := c.read(); err != nil || !found {
+		fdir: folderEndsDir(a.Store), cdir: stopClaimsDir(a.Store), fname: folderEndName(folderID(a.Store), sessionID)}
+	if found, err := c.read(stop); err != nil || !found {
 		return conversationEnd{}, errors.Join(append(c.errs, err)...)
 	}
 	if stop {
@@ -703,21 +800,47 @@ func endConversation(ctx context.Context, a *app.App, sessionID string, targets 
 		c.ts[i].r = readRepoRecords(repoEndsDir(t.dir), sessionID)
 	}
 	c.writeStores(stop)
-	// Every write attempt of this call is over, so another Stop that finds the
-	// lock free can treat this one as finished.
-	if c.release != nil {
-		c.release()
-	}
+	// Every write attempt of this call is over, so another Stop that finds a
+	// lock free, or its file gone, can treat this one as finished.
+	c.release()
 	e := conversationEnd{pending: c.finishFolder()}
 	e.pending = c.finishRepos() || e.pending
 	e.launch = stop && e.pending && c.createdAny
 	return e, errors.Join(c.errs...)
 }
 
+// release drops the creator locks this call holds.
+func (c *conversationEnding) release() {
+	for _, r := range c.releases {
+		r()
+	}
+	c.releases = nil
+}
+
+// ownsFin reports whether fin is a file this call created: its F°, or its F.
+func (c *conversationEnding) ownsFin() bool {
+	return c.fin != nil && (c.fin == c.ownClaim || c.fin == c.ownF)
+}
+
+// transient reports whether fin is a Stop claim F°, not the durable F.
+func (c *conversationEnding) transient() bool { return c.fin != nil && c.finDir == c.cdir }
+
+// live reports whether f's time can still be the folder's end.
+func (c *conversationEnding) live(f folderEndRecord) bool {
+	return !c.row.ended.Valid || c.row.ended.Int64 == f.EndedAt
+}
+
 // read reads the records, then the rows: a row read open after its record was
 // read means no writer had settled that end yet. found is false when the
-// folder holds no row of the conversation.
-func (c *conversationEnding) read() (found bool, err error) {
+// folder holds no row of the conversation. A Stop also reads the claim of a
+// running Stop.
+func (c *conversationEnding) read(stop bool) (found bool, err error) {
+	var claim *folderEndRecord
+	if stop {
+		// F° is read before F: a Stop links F° before F and removes F° only after
+		// its last write, so a reader that finds neither has missed no running claim.
+		claim = c.readClaim()
+	}
 	f, fok, err := readEnd[folderEndRecord](c.fdir, c.fname)
 	c.errs = append(c.errs, err)
 	c.row, found, err = folderSession(c.ctx, c.a.Store, c.sessionID)
@@ -730,13 +853,22 @@ func (c *conversationEnding) read() (found bool, err error) {
 		}
 		return false, nil
 	}
-	if fok && c.row.ended.Valid && c.row.ended.Int64 != f.EndedAt {
+	if fok && !c.live(f) {
 		// The stale claim of a Stop that resumed after another settled the folder.
 		c.errs = append(c.errs, removeFolderEnd(c.fdir, c.fname, f))
 		fok = false
 	}
-	if fok {
-		c.fin = &f
+	if claim != nil && !c.live(*claim) {
+		c.errs = append(c.errs, removeFolderEnd(c.cdir, c.fname, *claim))
+		claim = nil
+	}
+	switch {
+	case fok:
+		// A live F wins: it differs from a running F° only when its Stop finished
+		// between the two reads, and its time is in that Stop's records.
+		c.fin, c.finDir = &f, c.fdir
+	case claim != nil:
+		c.fin, c.finDir = claim, c.cdir
 	}
 	c.ts = make([]targetEnd, len(c.targets))
 	for i, t := range c.targets {
@@ -749,8 +881,29 @@ func (c *conversationEnding) read() (found bool, err error) {
 	return true, nil
 }
 
-// publish records the ends not yet recorded: the guards, then the time, then F,
-// then each guard's time.
+// readClaim returns the claim F° of a Stop of this conversation that still
+// runs. One whose creator no longer runs is a dead Stop's leftover, removed here.
+func (c *conversationEnding) readClaim() *folderEndRecord {
+	f, ok, err := readEnd[folderEndRecord](c.cdir, c.fname)
+	if err != nil || !ok {
+		c.errs = append(c.errs, err)
+		return nil
+	}
+	running, err := fCreatorRunning(c.cdir, f)
+	if err != nil {
+		// Taken as finished: this Stop's own time is the safe side for the journal.
+		c.errs = append(c.errs, err)
+		return nil
+	}
+	if !running {
+		c.errs = append(c.errs, removeFolderEnd(c.cdir, c.fname, f))
+		return nil
+	}
+	return &f
+}
+
+// publish records the ends not yet recorded: the guards, then the time, then
+// the claim and F, then each guard's time.
 func (c *conversationEnding) publish() {
 	needFolder := !c.row.ended.Valid && c.fin == nil
 	var seen []int
@@ -767,20 +920,20 @@ func (c *conversationEnding) publish() {
 	if guarding || needFolder || len(seen) > 0 {
 		now = c.a.Clock.Now().UnixMilli()
 	}
-	createdF := needFolder && c.claimFolder(now, seen)
-	c.tc = c.commonTime(now, createdF)
+	if needFolder {
+		c.claimStop(now, seen)
+	}
+	if c.transient() && !c.row.ended.Valid {
+		c.publishFolderEnd()
+	}
+	c.dropStaleClaim()
+	joined := c.joined(seen)
+	c.tc = now
+	if joined {
+		c.tc = c.fin.EndedAt
+	}
 	for _, i := range seen {
-		at := now
-		if c.fin != nil && c.fin.covers(repoID(c.targets[i].dir)) {
-			at = c.fin.EndedAt
-		}
-		_, created, err := finalizeGuard(c.targets[i], c.ts[i].r.g, at)
-		c.createdAny = c.createdAny || created
-		if err != nil {
-			c.ts[i].finErr = fmt.Errorf("record the pending session end for %s: %w", c.targets[i].wt, err)
-			c.ts[i].finG = c.ts[i].r.g
-			c.ts[i].finG.EndedAt = at
-		}
+		c.guardTime(i, now, joined)
 	}
 }
 
@@ -789,7 +942,8 @@ func (c *conversationEnding) publish() {
 func (c *conversationEnding) guard(needFolder bool) (seen []int, guarding bool) {
 	for i, t := range c.targets {
 		s := &c.ts[i]
-		if s.r.mok || s.r.gok || !((t.rc != nil && !s.ended) || (t.rc == nil && needFolder)) {
+		needed := (t.rc != nil && !s.ended) || (t.rc == nil && needFolder)
+		if s.r.mok || s.r.gok || !needed {
 			continue
 		}
 		guarding = true
@@ -812,54 +966,129 @@ func (c *conversationEnding) guard(needFolder bool) (seen []int, guarding bool) 
 	return seen, guarding
 }
 
-// claimFolder claims F at now, covering the seen guards, and reports whether
-// this call created it and it holds.
-func (c *conversationEnding) claimFolder(now int64, seen []int) bool {
+// claimStop claims now, covering the seen guards, as the conversation's Stop
+// claim F°, or adopts the claim of a Stop that still runs.
+func (c *conversationEnding) claimStop(now int64, seen []int) {
 	rec := folderEndRecord{Session: c.sessionID, Dir: c.a.Dir, EndedAt: now}
 	for _, i := range seen {
 		rec.Covered = append(rec.Covered, repoID(c.targets[i].dir))
 	}
-	got, created, release, err := claimFolderEnd(c.fdir, rec)
-	if err != nil {
-		c.folderRecErr = fmt.Errorf("record the pending session end for %s: %w", c.a.Dir, err)
-		return false
+	for try := 0; try < 2; try++ {
+		got, created, release, err := claimFolderEnd(c.cdir, rec)
+		if err != nil {
+			c.folderRecErr = fmt.Errorf("record the pending session end for %s: %w", c.a.Dir, err)
+			return
+		}
+		if created {
+			c.ownClaim, c.fin, c.finDir = &got, &got, c.cdir
+			c.releases = append(c.releases, release)
+			return
+		}
+		running, err := fCreatorRunning(c.cdir, got)
+		c.errs = append(c.errs, err)
+		if running {
+			c.fin, c.finDir = &got, c.cdir
+			return
+		}
+		if try == 0 {
+			// A dead Stop's leftover, which never affects a time once its creator stopped.
+			c.errs = append(c.errs, removeFolderEnd(c.cdir, c.fname, got))
+		}
 	}
-	c.fin = &got
-	if !created {
-		return false
-	}
-	c.createdAny = true
-	again, _, err := folderSession(c.ctx, c.a.Store, c.sessionID)
-	c.errs = append(c.errs, err)
-	if err == nil && again.ended.Valid && again.ended.Int64 != got.EndedAt {
-		release()
-		c.errs = append(c.errs, removeFolderEnd(c.fdir, c.fname, got))
-		c.fin = nil
-		return false
-	}
-	c.release = release
-	return true
+	c.folderRecErr = fmt.Errorf("record the pending session end for %s: the claim of a Stop that no longer runs is still in %s", c.a.Dir, c.cdir)
 }
 
-// commonTime is the time of a direct write without a record: F's while its
-// creator still runs, since that creator writes F's time everywhere it can;
-// otherwise this Stop's own, now.
-func (c *conversationEnding) commonTime(now int64, createdF bool) int64 {
+// publishFolderEnd publishes F, the folder's pending end, with the running
+// claim fin's record, so that end survives a claim holder that dies before
+// linking F.
+func (c *conversationEnding) publishFolderEnd() {
+	got, created, release, err := claimFolderEnd(c.fdir, *c.fin)
+	if err != nil {
+		// The claim lives only as F°; finishFolder decides from F as it is on disk then.
+		c.folderRecErr = fmt.Errorf("record the pending session end for %s: %w", c.a.Dir, err)
+		return
+	}
+	c.fin, c.finDir = &got, c.fdir
+	if created {
+		c.ownF = c.fin
+		c.createdAny = true
+		c.releases = append(c.releases, release)
+		return
+	}
+	// The existing F carries the same claim, or the time of a Stop that has
+	// finished, which is in that Stop's records.
+	if c.ownClaim != nil {
+		c.release()
+		c.errs = append(c.errs, removeFolderEnd(c.cdir, c.fname, *c.ownClaim))
+		c.ownClaim = nil
+	}
+}
+
+// dropStaleClaim drops the claim and F this call made once the folder's row was
+// ended at another time meanwhile, by a Stop that resumed after it.
+func (c *conversationEnding) dropStaleClaim() {
+	if !c.ownsFin() {
+		return
+	}
+	again, _, err := folderSession(c.ctx, c.a.Store, c.sessionID)
+	if err != nil {
+		c.errs = append(c.errs, err)
+		return
+	}
+	if !again.ended.Valid || again.ended.Int64 == c.fin.EndedAt {
+		return
+	}
+	c.release()
+	if c.ownF != nil {
+		c.errs = append(c.errs, removeFolderEnd(c.fdir, c.fname, *c.ownF))
+	}
+	if c.ownClaim != nil {
+		c.errs = append(c.errs, removeFolderEnd(c.cdir, c.fname, *c.ownClaim))
+	}
+	c.fin, c.ownF, c.ownClaim = nil, nil, nil
+}
+
+// joined reports whether this call writes directly with the claim's time: it
+// holds the claim, or the claim's creator still runs and writes that time
+// wherever it can. The creator is asked only when a direct write needs it.
+func (c *conversationEnding) joined(seen []int) bool {
 	if c.fin == nil {
-		return now
+		return false
 	}
-	if createdF {
-		return c.fin.EndedAt
+	if c.ownsFin() {
+		return true
 	}
-	if !slices.ContainsFunc(c.ts, func(s targetEnd) bool { return s.recErr != nil }) {
-		return now
+	needed := slices.ContainsFunc(c.ts, func(s targetEnd) bool { return s.recErr != nil }) ||
+		slices.ContainsFunc(seen, func(i int) bool { return !c.fin.covers(repoID(c.targets[i].dir)) })
+	if !needed {
+		return false
 	}
-	running, err := fCreatorRunning(c.fdir, *c.fin)
+	running, err := fCreatorRunning(c.finDir, *c.fin)
 	c.errs = append(c.errs, err)
-	if running {
-		return c.fin.EndedAt
+	return running
+}
+
+// guardTime gives the seen guard of target i its time: the claim's when the
+// claim covers it, else this Stop's own, taken after it saw the guard. A guard
+// the running claim does not cover gets no recorded time: the claim's time
+// predates the guard, so it is only written directly, while that claim's
+// creator still runs.
+func (c *conversationEnding) guardTime(i int, now int64, joined bool) {
+	at := now
+	switch {
+	case c.fin != nil && c.fin.covers(repoID(c.targets[i].dir)):
+		at = c.fin.EndedAt
+	case joined:
+		c.ts[i].direct = true
+		return
 	}
-	return now
+	_, created, err := finalizeGuard(c.targets[i], c.ts[i].r.g, at)
+	c.createdAny = c.createdAny || created
+	if err != nil {
+		c.ts[i].finErr = fmt.Errorf("record the pending session end for %s: %w", c.targets[i].wt, err)
+		c.ts[i].finG = c.ts[i].r.g
+		c.ts[i].finG.EndedAt = at
+	}
 }
 
 // repoRecord returns what target i's store gets written, if anything.
@@ -867,6 +1096,18 @@ func (c *conversationEnding) repoRecord(i int, stop bool) (repoEndRecord, bool) 
 	s, t := &c.ts[i], c.targets[i]
 	if rec, ok := s.r.recorded(); ok {
 		return rec, true
+	}
+	if s.r.plain() {
+		g := s.r.g
+		switch {
+		case c.fin != nil && g.Dir == c.fin.Dir && c.fin.covers(repoID(t.dir)):
+			// The claim holds its time, whether or not its copy beside the repository succeeded.
+			g.EndedAt = c.fin.EndedAt
+			return g, true
+		case s.direct:
+			g.EndedAt = c.tc
+			return g, true
+		}
 	}
 	if s.finErr != nil {
 		return s.finG, true
@@ -920,7 +1161,7 @@ func (c *conversationEnding) writeStores(stop bool) {
 		})
 	}
 	wg.Wait()
-	c.errs = append(c.errs, c.folderRecErr, folderErr)
+	c.errs = append(c.errs, folderErr)
 }
 
 // writeSlot runs one store's write and, once it succeeded, done. A panicking
@@ -941,15 +1182,43 @@ func (c *conversationEnding) writeSlot(slot string, write, done func() error) (b
 	}
 }
 
-// finishFolder settles and removes F once the folder's row is ended, and
-// reports whether the folder's end is still pending.
+// finishFolder removes this call's claim, settles and removes F once the
+// folder's row is ended, and reports whether the folder's end is still pending.
 func (c *conversationEnding) finishFolder() bool {
-	if c.fin == nil {
-		if c.folderBusy {
-			c.errs = append(c.errs, fmt.Errorf("session end not recorded in %s: its store stayed busy; the conversation's next Stop writes it", c.a.Dir))
-		}
-		return false
+	if c.ownClaim != nil {
+		// Its lock is released, so it goes whatever happens to F.
+		c.errs = append(c.errs, removeFolderEnd(c.cdir, c.fname, *c.ownClaim))
 	}
+	if c.fin != nil && !c.transient() {
+		return c.finishF()
+	}
+	// No F was known: the claim's holder may have linked one meanwhile, so the
+	// folder's outcome is decided from F as it is on disk now. An unreadable F
+	// was reported when read, and records nothing.
+	if f, ok, _ := readEnd[folderEndRecord](c.fdir, c.fname); ok {
+		row, found, err := folderSession(c.ctx, c.a.Store, c.sessionID)
+		c.errs = append(c.errs, err)
+		if found && (!row.ended.Valid || row.ended.Int64 == f.EndedAt) {
+			// The folder's end is recorded in that F.
+			c.folderRecErr = nil
+			c.fin, c.finDir = &f, c.fdir
+			return c.finishF()
+		}
+	}
+	c.errs = append(c.errs, c.folderRecErr)
+	if c.folderBusy {
+		c.errs = append(c.errs, fmt.Errorf("session end not recorded in %s: its store stayed busy; the conversation's next Stop writes it", c.a.Dir))
+	}
+	if c.fin != nil && c.fin != c.ownClaim {
+		// Another Stop's claim; it stays while that Stop still holds it.
+		c.errs = append(c.errs, removeFolderEnd(c.cdir, c.fname, *c.fin))
+	}
+	return false
+}
+
+// finishF settles and removes F, fin, once the folder's row is ended, and
+// reports whether the folder's end is still pending.
+func (c *conversationEnding) finishF() bool {
 	again, found, err := folderSession(c.ctx, c.a.Store, c.sessionID)
 	switch {
 	case err != nil:
@@ -1004,7 +1273,6 @@ func (c *conversationEnding) finishRepos() (pending bool) {
 // blocks, so an end it writes no longer holds back this start's journal pruning.
 func endPendingRepoEnds(ctx context.Context, a *app.App) error {
 	var errs []error
-	fdir := folderEndsDir(a.Store)
 	now := a.Clock.Now()
 	var dirs []string
 	for _, rc := range a.AllRepos() {
@@ -1041,56 +1309,60 @@ func endPendingRepoEnds(ctx context.Context, a *app.App) error {
 			if !r.mok && !r.gok {
 				continue
 			}
-			ended, err := rowEnded(ctx, rc.Store.DB, session)
-			if err != nil {
-				errs = append(errs, err)
-				continue
-			}
-			if ended {
-				errs = append(errs, r.remove(pdir))
-				continue
-			}
-			root := r.g.Root
-			if r.mok {
-				root = r.m.Root
-			}
-			if !isRepo(root) {
-				// The records belong to another repository at this store path.
-				continue
-			}
-			if r.plain() {
-				g := r.g
-				f, ok, err := readEnd[folderEndRecord](fdir, folderEndName(gitctx.NonGitID(g.Dir), session))
-				if err != nil {
-					errs = append(errs, err)
-				}
-				if !ok || !f.covers(repoID(dir)) {
-					// A guard no folder end covers waits for the conversation's next
-					// Stop until its Stop and background run are surely gone.
-					if info := infos[guardName(session)]; info != nil && older(info, now) {
-						errs = append(errs, removeEnd(pdir, guardName(session), g))
-					}
-					continue
-				}
-				if _, _, err := finalizeGuard(endTarget{dir: dir}, g, f.EndedAt); err != nil {
-					errs = append(errs, fmt.Errorf("record the pending session end for %s: %w", g.Worktree, err))
-					continue
-				}
-				r = readRepoRecords(pdir, session)
-			}
-			rec, ok := r.recorded()
-			if !ok {
-				continue
-			}
-			err = writeRepoEnd(store.WithWriteDeadline(ctx, a.Clock.Now()), rc.Store, rec)
-			switch {
-			case err == nil:
-				errs = append(errs, r.remove(pdir))
-			case !store.IsBusy(err):
-				errs = append(errs, fmt.Errorf("end the session in %s: %w", rc.Git.Worktree, err))
-			}
+			errs = append(errs, endRepoSession(ctx, a, rc, dir, r, infos[guardName(session)], isRepo, now))
 		}
 		errs = append(errs, removeStaleEnds[repoEndRecord](pdir, other, now))
+	}
+	return errors.Join(errs...)
+}
+
+// endRepoSession writes one session's pending end r recorded beside the store
+// in dir, which rc serves, and removes its records once the row is ended.
+// guardInfo is the guard's listing, for its age.
+func endRepoSession(ctx context.Context, a *app.App, rc *app.RepoContext, dir string, r repoRecords,
+	guardInfo fs.FileInfo, isRepo func(root string) bool, now time.Time) error {
+	pdir := repoEndsDir(dir)
+	rec, recorded := r.recorded()
+	if !recorded {
+		rec = r.g
+	}
+	ended, err := rowEnded(ctx, rc.Store.DB, rec.Session)
+	if err != nil {
+		return err
+	}
+	if ended {
+		return r.remove(pdir)
+	}
+	if !isRepo(rec.Root) {
+		// The records belong to another repository at this store path.
+		return nil
+	}
+	var errs []error
+	if !recorded {
+		f, ok, err := readEnd[folderEndRecord](folderEndsDir(a.Store), folderEndName(gitctx.NonGitID(rec.Dir), rec.Session))
+		errs = append(errs, err)
+		if !ok || !f.covers(repoID(dir)) {
+			// A guard no folder end covers waits for the conversation's next
+			// Stop until its Stop and background run are surely gone.
+			if guardInfo != nil && older(guardInfo, now) {
+				errs = append(errs, removeEnd(pdir, guardName(rec.Session), r.g))
+			}
+			return errors.Join(errs...)
+		}
+		rec.EndedAt = f.EndedAt
+		if at, _, err := finalizeGuard(endTarget{dir: dir}, r.g, f.EndedAt); err != nil {
+			// F still holds the time, so the end is written at it all the same.
+			errs = append(errs, fmt.Errorf("record the pending session end for %s: %w", r.g.Worktree, err))
+		} else {
+			rec.EndedAt = at
+		}
+	}
+	err = writeRepoEnd(store.WithWriteDeadline(ctx, a.Clock.Now()), rc.Store, rec)
+	switch {
+	case err == nil:
+		errs = append(errs, readRepoRecords(pdir, rec.Session).remove(pdir))
+	case !store.IsBusy(err):
+		errs = append(errs, fmt.Errorf("end the session in %s: %w", rc.Git.Worktree, err))
 	}
 	return errors.Join(errs...)
 }
@@ -1129,6 +1401,7 @@ func endPendingFolderEnds(ctx context.Context, a *app.App, inFolder bool) error 
 	}
 	errs = append(errs, removeStaleEnds[folderEndRecord](fdir, other, now))
 	if inFolder {
+		errs = append(errs, sweepStopClaims(stopClaimsDir(a.Store), now))
 		ids, err := folderRepoIDs(ctx, a.Ledger)
 		errs = append(errs, err)
 		for _, id := range ids {
@@ -1173,6 +1446,20 @@ func endPendingFolderEnds(ctx context.Context, a *app.App, inFolder bool) error 
 	return errors.Join(errs...)
 }
 
+// sweepStopClaims removes the Stop claims in dir whose creator no longer runs,
+// and old entries there that cannot be read.
+func sweepStopClaims(dir string, now time.Time) error {
+	recs, other, err := listEnds[folderEndRecord](dir)
+	if err != nil {
+		return err
+	}
+	var errs []error
+	for _, r := range recs {
+		errs = append(errs, removeFolderEnd(dir, r.name, r.rec))
+	}
+	return errors.Join(append(errs, removeStaleEnds[folderEndRecord](dir, other, now))...)
+}
+
 // settleOtherFolderEnd handles F of a folder this start is not in, aged age.
 // It opens that folder's store, reads F's row and closes the store.
 func settleOtherFolderEnd(ctx context.Context, a *app.App, f folderEndRecord, age time.Duration) (err error) {
@@ -1202,20 +1489,19 @@ func settleOtherFolderEnd(ctx context.Context, a *app.App, f folderEndRecord, ag
 		// Its conversation's own writers still may finish it.
 		return nil
 	}
-	// Its Stop and background run are gone.
-	if err := settleFolderEnd(f); err != nil {
-		return err
-	}
+	// Its Stop and background run are gone. The folder's end does not depend on
+	// the copy of its time to the covered guards.
+	settleErr := settleFolderEnd(f)
 	fa := *a
 	fa.Store = st
 	_, busy, err := writeFolderEnd(store.WithWriteDeadline(ctx, a.Clock.Now()), &fa, f.Session, f.EndedAt)
 	if busy {
-		return nil
+		return settleErr
 	}
 	if err != nil {
-		return fmt.Errorf("end the session in %s: %w", f.Dir, err)
+		return errors.Join(settleErr, fmt.Errorf("end the session in %s: %w", f.Dir, err))
 	}
-	return removeFolderEnd(fdir, fname, f)
+	return errors.Join(settleErr, removeFolderEnd(fdir, fname, f))
 }
 
 // EndRosterSessions writes the session ends a Stop of conversation sessionID

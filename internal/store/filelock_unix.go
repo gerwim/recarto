@@ -107,3 +107,62 @@ func LockHeld(path string) (held bool, err error) {
 	release()
 	return false, nil
 }
+
+// RemoveUnreadable removes the regular file listed at path, which the caller
+// could not open to read, when the file's owner bits deny its owner, this
+// user, reading it: no process of the user that honors them can read it then,
+// so none can hold it as a record. It never waits. removed is false, with no
+// error, when the file is gone or is no longer the listed one, when another
+// process of the user may read it, or when another removal holds lockPath.
+// It removes only the listed file, never a symlink's target, and changes no
+// permission. On Windows it removes nothing.
+func RemoveUnreadable(path string, listed fs.FileInfo, lockPath string) (removed bool, err error) {
+	// Checked before the lock, so a file this call leaves never creates the lock file.
+	if ok, err := unreadableListed(path, listed); err != nil || !ok {
+		return false, err
+	}
+	release, ok, err := TryLockFile(lockPath)
+	if err != nil || !ok {
+		// Another removal of an unreadable file in this folder holds the lock;
+		// the next session start tries again.
+		return false, err
+	}
+	defer release()
+	if ok, err := unreadableListed(path, listed); err != nil || !ok {
+		return false, err
+	}
+	// No process of the user that honors file permissions can read this file, so
+	// none takes it for a record: a record removal cannot open it, a stamp
+	// replaces only a guard it read, and a link needs a free name. Only
+	// RemoveUnreadable unlinks it, each call under lockPath, so it stays at the
+	// path until the removal below.
+	if err := os.Remove(path); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
+// unreadableListed reports whether path still holds the listed regular file,
+// owned by this user with its owner read bit clear.
+func unreadableListed(path string, listed fs.FileInfo) (bool, error) {
+	fi, err := os.Lstat(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if !fi.Mode().IsRegular() || !os.SameFile(fi, listed) ||
+		!fi.ModTime().Equal(listed.ModTime()) || fi.Size() != listed.Size() {
+		return false, nil
+	}
+	// A file whose owner bits let its owner read it was denied to this process
+	// alone, by a sandbox such as Landlock. Another Recarto process of the user
+	// may read it as a record and stamp or remove it, so it is left to a process
+	// that can read it.
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	return ok && int(st.Uid) == os.Geteuid() && fi.Mode().Perm()&0o400 == 0, nil
+}
