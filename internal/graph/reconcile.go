@@ -102,6 +102,34 @@ func (e *Engine) clearResolvePending(ctx context.Context, worktree string) error
 	})
 }
 
+// indexedFile is a file's stored content hash and stat.
+type indexedFile struct {
+	hash        string
+	mtime, size int64
+}
+
+// indexedFiles returns worktree's indexed files by path.
+func (e *Engine) indexedFiles(ctx context.Context, worktree string) (map[string]indexedFile, error) {
+	have := map[string]indexedFile{}
+	rows, err := e.st.DB.QueryContext(ctx,
+		`SELECT path, content_hash, mtime, size FROM files WHERE worktree=?`, worktree)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var p string
+		var r indexedFile
+		if err := rows.Scan(&p, &r.hash, &r.mtime, &r.size); err != nil {
+			return nil, errors.Join(err, rows.Close())
+		}
+		have[p] = r
+	}
+	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
+		return nil, err
+	}
+	return have, nil
+}
+
 func (e *Engine) Reconcile(ctx context.Context, worktree string, src Source, opts ...ReconcileOption) error {
 	var o reconcileOptions
 	o.resolve(opts)
@@ -119,31 +147,10 @@ func (e *Engine) Reconcile(ctx context.Context, worktree string, src Source, opt
 		return err
 	}
 
-	// Load current index state for this worktree.
-	type rec struct {
-		hash        string
-		mtime, size int64
-	}
-	have := map[string]rec{}
-	rows, err := e.st.DB.QueryContext(ctx,
-		`SELECT path, content_hash, mtime, size FROM files WHERE worktree=?`, worktree)
+	have, err := e.indexedFiles(ctx, worktree)
 	if err != nil {
 		return err
 	}
-	for rows.Next() {
-		var p string
-		var r rec
-		if err := rows.Scan(&p, &r.hash, &r.mtime, &r.size); err != nil {
-			rows.Close()
-			return err
-		}
-		have[p] = r
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return err
-	}
-	rows.Close()
 
 	// Pass 1: a cheap mtime/size pre-check splits source files into those that
 	// may have changed (the worklist, which we report as the progress total) and
@@ -385,13 +392,7 @@ func (e *Engine) indexWorklist(ctx context.Context, worktree string, src Source,
 		}}
 	}
 
-	nworkers := runtime.NumCPU()
-	if nworkers > len(worklist) {
-		nworkers = len(worklist)
-	}
-	if nworkers < 1 {
-		nworkers = 1
-	}
+	nworkers := max(1, min(runtime.NumCPU(), len(worklist)))
 
 	wctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -402,11 +403,7 @@ func (e *Engine) indexWorklist(ctx context.Context, worktree string, src Source,
 	// that idled the parse cores ~50% of wall. Buffer several batches so the workers
 	// keep parsing the next batches ahead while the writer flushes the current one;
 	// the pool then runs continuously and the serial writer becomes the sole floor.
-	resultsBuf := 4 * indexBatchSize
-	if resultsBuf > len(worklist) {
-		resultsBuf = len(worklist)
-	}
-	results := make(chan outcome, resultsBuf)
+	results := make(chan outcome, min(4*indexBatchSize, len(worklist)))
 	var wg sync.WaitGroup
 	for range nworkers {
 		wg.Add(1)
@@ -514,21 +511,24 @@ func (e *Engine) indexWorklist(ctx context.Context, worktree string, src Source,
 	if err := flush(); err != nil {
 		return false, err
 	}
-	if len(touched) > 0 {
-		if err := e.st.WriteTx(ctx, func(c store.Conn) error {
-			for _, fe := range touched {
-				if _, err := c.ExecContext(ctx,
-					`UPDATE files SET mtime=?, size=? WHERE worktree=? AND path=?`,
-					fe.Mtime, fe.Size, worktree, fe.Path); err != nil {
-					return err
-				}
-			}
-			return nil
-		}); err != nil {
-			return false, err
-		}
+	return wrote, e.touchFiles(ctx, worktree, touched)
+}
+
+// touchFiles stores the new stat of files whose content is unchanged.
+func (e *Engine) touchFiles(ctx context.Context, worktree string, touched []*FileEntry) error {
+	if len(touched) == 0 {
+		return nil
 	}
-	return wrote, nil
+	return e.st.WriteTx(ctx, func(c store.Conn) error {
+		for _, fe := range touched {
+			if _, err := c.ExecContext(ctx,
+				`UPDATE files SET mtime=?, size=? WHERE worktree=? AND path=?`,
+				fe.Mtime, fe.Size, worktree, fe.Path); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 // ReconcileIfStale reconciles only when the worktree's git token differs from the
