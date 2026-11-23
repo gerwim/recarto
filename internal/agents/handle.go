@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"maps"
 	"os"
 	"path/filepath"
@@ -39,18 +40,13 @@ func Handle(ctx context.Context, a *app.App, ev Event) (Result, error) {
 	// re-indexes it. So a session start does not wait for it behind another
 	// process's writer, such as an index finishing.
 	usedCtx := ctx
-	var roster []string
+	var roster []rosterRepo
 	var rosterErr error
-	var stopLockCtx context.Context
 	switch ev.Kind {
 	case KindSessionStart:
 		usedCtx = store.WithWriteDeadline(ctx, time.Now().Add(writeGrace))
 	case KindStop:
-		deadline := a.Clock.Now().Add(stopLockBudget)
-		var cancel context.CancelFunc
-		stopLockCtx, cancel = context.WithDeadline(ctx, deadline)
-		defer cancel()
-		usedCtx, roster, rosterErr = stopWrites(ctx, a, ev, deadline)
+		usedCtx, roster, rosterErr = stopWrites(ctx, a, ev, a.Clock.Now().Add(stopLockBudget))
 	}
 	_ = a.Graph.NoteUsed(usedCtx, a.Git.Worktree)
 	switch ev.Kind {
@@ -63,7 +59,7 @@ func Handle(ctx context.Context, a *app.App, ev Event) (Result, error) {
 	case KindAugment:
 		return handleAugment(ctx, a, ev)
 	case KindStop:
-		return handleStop(ctx, usedCtx, stopLockCtx, a, ev, roster, rosterErr)
+		return handleStop(ctx, usedCtx, a, ev, roster, rosterErr)
 	case KindShell:
 		return handleShell(ctx, a, ev)
 	}
@@ -80,15 +76,14 @@ var syncPushBudget = 5 * time.Second
 
 // stopLockBudget bounds how long a Stop of a conversation started in a folder
 // without code waits, in total over all its stores, for writers other processes
-// hold, including repo-retention coordination. Its sync pushes are outside it
-// and keep syncPushBudget each.
+// hold. Its sync pushes are outside it and keep syncPushBudget each.
 const stopLockBudget = 500 * time.Millisecond
 
 // stopWrites reads the roster of ev's conversation and returns the context of
-// its Stop's writes. With a roster, the write deadline and coordination-lock
-// wait use the same instant across all stores. Without one, or when the roster
-// cannot be read, writes wait as every write does.
-func stopWrites(ctx context.Context, a *app.App, ev Event, deadline time.Time) (writes context.Context, roster []string, err error) {
+// its Stop's writes. With a roster, the write deadline is the same instant
+// across all stores. Without one, or when the roster cannot be read, writes
+// wait as every write does.
+func stopWrites(ctx context.Context, a *app.App, ev Event, deadline time.Time) (writes context.Context, roster []rosterRepo, err error) {
 	if ev.SessionID == "" {
 		return ctx, nil, nil
 	}
@@ -277,28 +272,29 @@ func conversation(ev Event) string {
 func handleSessionStart(ctx context.Context, a *app.App, ev Event) (res Result, err error) {
 	now := a.Clock.Now().UnixMilli()
 	skip := store.WithWriteDeadline(ctx, time.Now().Add(writeGrace))
+	// Before the blocks, so an end it writes no longer holds back this start's pruning.
+	repoEndErr := endPendingRepoEnds(ctx, a)
 	wait := &startWait{parent: ctx}
 	defer wait.close()
 	conv, err := startConversation(ctx, a, ev, now, wait)
 	if err != nil {
-		return Result{}, err
+		return Result{}, errors.Join(err, repoEndErr)
 	}
-	if a.Git.NonGit || conv.roster != nil {
-		var ends sync.WaitGroup
-		var endErr error
-		ends.Go(func() {
-			defer recoverHook()
-			endErr = endPendingConversations(ctx, a)
-		})
-		defer func() {
-			ends.Wait()
-			if err != nil {
-				err = errors.Join(err, endErr)
-			} else {
-				res.Failure = errors.Join(res.Failure, endErr)
-			}
-		}()
-	}
+	var ends sync.WaitGroup
+	var endErr error
+	ends.Go(func() {
+		defer recoverInto(&endErr, "write pending session ends")
+		endErr = endPendingFolderEnds(ctx, a, a.Git.NonGit || conv.roster != nil)
+	})
+	defer func() {
+		ends.Wait()
+		endErr = errors.Join(repoEndErr, endErr)
+		if err != nil {
+			err = errors.Join(err, endErr)
+		} else {
+			res.Failure = errors.Join(res.Failure, endErr)
+		}
+	}()
 	_ = a.Ledger.Incr(skip, "lifetime", "sessions", 1)
 	scope := conversation(ev)
 	// Forget before the upkeep, so a hook the host kills mid-upkeep still leaves a
@@ -472,10 +468,7 @@ func recentChanges(ctx, skip context.Context, a *app.App, rc *app.RepoContext, i
 		}
 	}
 	// A pending end can change which session span reaches a delta.
-	_ = rc.Graph.PruneUnreachableDeltas(skip, rc.Git.Worktree, id, since, now,
-		func(c store.Conn) (bool, error) {
-			return endsHold(ctx, c, repoEndsDir(rc.Store), folderEndsDir(rc.Store), rc.Git.Worktree)
-		})
+	_ = rc.Graph.PruneUnreachableDeltas(skip, rc.Git.Worktree, id, since, now, endsHoldFor(ctx, rc))
 	return deltas, deltaTotal, deltaBaseline
 }
 
@@ -844,7 +837,7 @@ const stopCaptureReminder = "recarto: before ending, record any new learnings, b
 // stopIssueReminder follows stopCaptureReminder while issue reports are on.
 const stopIssueReminder = " And if Recarto itself errored, ranked the wrong result first, confused you, or lacked a capability you needed this session, call the recarto MCP tool `report_recarto_issue` so it can be fixed."
 
-func endStopSession(ctx, writes, lockCtx context.Context, a *app.App, ev Event, roster []string, now int64) (conversationEnd, error) {
+func endStopSession(ctx, writes context.Context, a *app.App, ev Event, roster []rosterRepo, now int64) (conversationEnd, error) {
 	if len(roster) == 0 {
 		err := a.Store.WriteTx(ctx, func(c store.Conn) error {
 			_, err := c.ExecContext(ctx,
@@ -855,7 +848,9 @@ func endStopSession(ctx, writes, lockCtx context.Context, a *app.App, ev Event, 
 	}
 	covered, _, done := cover(a, roster)
 	defer done()
-	return endConversation(writes, lockCtx, a, ev.SessionID, covered, true, false)
+	targets, err := endTargets(roster, covered)
+	e, endErr := endConversation(writes, a, ev.SessionID, targets, true)
+	return e, errors.Join(err, endErr)
 }
 
 func pushStopSync(ctx context.Context, a *app.App) {
@@ -880,23 +875,23 @@ func pushStopSync(ctx context.Context, a *app.App) {
 // Code re-invokes Stop after our block, always pass through. Every fault in the
 // nudge decision degrades to the static reminder — never to silence, and never
 // to a false block.
-func handleStop(ctx context.Context, writes, lockCtx context.Context, a *app.App, ev Event, roster []string, rosterErr error) (res Result, err error) {
+func handleStop(ctx context.Context, writes context.Context, a *app.App, ev Event, roster []rosterRepo, rosterErr error) (res Result, err error) {
 	if ev.SessionID == "" {
 		return Result{}, nil
 	}
 	now := a.Clock.Now().UnixMilli()
-	e, endErr := endStopSession(ctx, writes, lockCtx, a, ev, roster, now)
+	e, endErr := endStopSession(ctx, writes, a, ev, roster, now)
 	if len(roster) == 0 {
 		if endErr != nil {
 			return Result{}, endErr
 		}
 	} else {
 		rosterErr = endErr
-		if e.pending && e.first && a.EndLater != nil {
+		if e.launch && a.EndLater != nil {
 			a.EndLater(ev.SessionID)
 		}
 	}
-	defer func() { res.Failure = rosterErr }()
+	defer func() { res.Failure = errors.Join(rosterErr, res.Failure) }()
 	// Turn boundary: the agent is idle, so a TRUNCATE checkpoint can actually
 	// win the WAL (mid-session it silently yields to concurrent readers).
 	_ = a.Store.Checkpoint(ctx)
@@ -925,11 +920,11 @@ func handleStop(ctx context.Context, writes, lockCtx context.Context, a *app.App
 	if err != nil || edits < stopNudgeEditThreshold || !a.Features.On(features.StopNudge) {
 		return Result{SystemMessage: reminder}, nil
 	}
-	nudged, err := a.Ledger.Get(ctx, ev.SessionID, "stop_nudged")
+	nudged, err := conversationNudged(ctx, a, ev.SessionID)
 	if err != nil {
 		return Result{SystemMessage: reminder}, nil
 	}
-	if nudged > 0 {
+	if nudged {
 		// The model just saw the block reason; re-showing the reminder is noise.
 		return Result{}, nil
 	}
@@ -971,10 +966,49 @@ func handleStop(ctx context.Context, writes, lockCtx context.Context, a *app.App
 			return Result{SystemMessage: reminder}, nil
 		}
 	}
-	_ = a.Ledger.Incr(writes, ev.SessionID, "stop_nudged", 1)
+	markErr := markNudged(writes, a, ev.SessionID)
 	reason := fmt.Sprintf("recarto: you made %d edits this session and recorded nothing. Record learnings, preferences (especially if the user corrected your approach), or bug fixes now with the recarto MCP tools `record_memory` and `record_bug`", edits)
 	if f.On(features.IssueReports) {
 		reason += " — and `report_recarto_issue` if Recarto itself misbehaved"
 	}
-	return Result{Block: true, Reason: reason + ". Or finish if there's genuinely nothing to keep."}, nil
+	return Result{Block: true, Reason: reason + ". Or finish if there's genuinely nothing to keep.", Failure: markErr}, nil
+}
+
+// conversationNudged reports whether sessionID's conversation already got the
+// capture nudge: its ledger counter is set or its mark file exists.
+func conversationNudged(ctx context.Context, a *app.App, sessionID string) (bool, error) {
+	nudged, err := a.Ledger.Get(ctx, sessionID, "stop_nudged")
+	if err != nil || nudged > 0 {
+		return nudged > 0, err
+	}
+	_, err = os.Stat(nudgeMarkPath(a.Store, sessionID))
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
+// markNudged records that sessionID's conversation got the capture nudge.
+func markNudged(writes context.Context, a *app.App, sessionID string) error {
+	err := a.Ledger.Incr(writes, sessionID, "stop_nudged", 1)
+	if err == nil {
+		return nil
+	}
+	var markErr error
+	// A Stop of a folder conversation gives a busy store no more than its write
+	// deadline: the mark file then keeps the nudge once per conversation.
+	if !store.IsBusy(err) {
+		markErr = fmt.Errorf("record the capture nudge: %w", err)
+	}
+	mark := nudgeMarkPath(a.Store, sessionID)
+	if err := os.MkdirAll(filepath.Dir(mark), 0o755); err != nil {
+		return errors.Join(markErr, err)
+	}
+	return errors.Join(markErr, os.WriteFile(mark, nil, 0o644))
+}
+
+// nudgeMarkPath marks a conversation nudged when its ledger counter could not
+// be written. It is never removed.
+func nudgeMarkPath(st *store.Store, sessionID string) string {
+	return filepath.Join(storeDir(st), "stop-nudged", endName(sessionID))
 }

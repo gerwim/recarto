@@ -100,13 +100,28 @@ func Resolve(r Runner, cwd string) (Context, error) {
 		ctx.Branch = branch
 	}
 
-	if root, err := r.Run("rev-list", "--max-parents=0", "HEAD"); err == nil {
-		// A repo can have multiple root commits; take the first line.
-		if i := strings.IndexByte(root, '\n'); i >= 0 {
-			root = root[:i]
-		}
-		ctx.RootCommit = strings.TrimSpace(root)
-	}
+	ctx.RootCommit = RootCommit(r)
 
 	return ctx, nil
+}
+
+// RootCommit returns the first root commit HEAD reaches, "" when there is none.
+func RootCommit(r Runner) string {
+	root, err := r.Run("rev-list", "--max-parents=0", "HEAD")
+	if err != nil {
+		return ""
+	}
+	// A repo can have multiple root commits; take the first line.
+	if i := strings.IndexByte(root, '\n'); i >= 0 {
+		root = root[:i]
+	}
+	return strings.TrimSpace(root)
+}
+
+// HasCommit reports whether the repository r runs in holds commit sha, asking git
+// now, never the identity cache. A failing git call reports false: the caller
+// then treats the checkout as another repository and leaves its records alone.
+func HasCommit(r Runner, sha string) bool {
+	_, err := r.Run("cat-file", "-e", sha+"^{commit}")
+	return err == nil
 }

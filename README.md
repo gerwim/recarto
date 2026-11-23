@@ -665,9 +665,19 @@ When a conversation starts in a folder outside git that holds no file Recarto in
 
 ### Stop in a folder without code
 
-In a conversation started in such a folder, a Stop ends the conversation's session in each of its repos. It waits at most 0.5 s in total, over all repos, for a store another process is writing to, for example during an index. The memory sync push is outside that limit and keeps its own 5-second limit per store.
+In a conversation started in such a folder, a Stop ends the conversation's session in the folder's store and in each of its repos. It waits at most 0.5 s in total for stores other processes are writing to, for example during an index, and a busy store does not hold up the end of a free one. The memory sync push is outside that limit and keeps its own 5-second limit per store.
 
-A session end that does not fit is written later by whichever first finds the repo's store free: a background `recarto warm` the Stop starts (it stops after 30 minutes), the conversation's next Stop, or the next session start in the folder. Its recorded time follows any retention pass already in progress, so reports keep the deltas that end makes reachable. Until then, that repo's recent changes count the conversation as still open.
+An end that does not fit is left pending with the Stop's time, and whoever writes it later writes that time:
+- **The folder's end:** a background `recarto warm` the Stop starts (it stops after 30 minutes), the conversation's next Stop, or the next session start in the folder.
+- **A repo's end:** the same, also for a repo the folder no longer serves, or any later session start that serves the repository, in any of its worktrees or in another folder that serves it.
+
+A pending end is recorded before its time is taken, so journal pruning in the repo never drops the changes it makes reachable. Until a repo's end is written, recent changes in that worktree count the conversation as still open and its journal is not pruned; nothing outside that repository is affected.
+
+**When a folder or checkout disappears:** the next session start in any repo or folder drops the pending end of a folder that no longer exists. A repo's pending end stays with its repository: if the conversation's checkout is deleted, or its path now holds another repository, the next session start that serves the original repository writes it. It is never written into another repository.
+
+**When the pending records cannot be created**, for example on a filesystem without hard links or in a cache folder that cannot be written: the Stop still writes the end in every store that is free within the 0.5 s. The hook's error output names the failure and each store that stayed busy; the conversation's next Stop writes those ends with its own time.
+
+A file in the cache's `pending-ends` folder that cannot be read is ignored, and removed once it is older than the background run's 30-minute limit. On Windows, a file there whose permissions forbid Recarto to read it stays until you delete it.
 
 ## Sharing memory across machines (HTTP sync)
 

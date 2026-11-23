@@ -2,6 +2,8 @@ package gitctx
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -163,5 +165,62 @@ func TestLiveWorktrees(t *testing.T) {
 		if got[i] != want[i] {
 			t.Fatalf("LiveWorktrees[%d] = %q, want %q", i, got[i], want[i])
 		}
+	}
+}
+
+// commitFile makes a repo at dir whose first commit adds a file holding content,
+// so repos with different content have different root commits.
+func commitFile(t *testing.T, dir, content string) string {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	git(t, dir, "init", "-q", "-b", "main")
+	if err := os.WriteFile(filepath.Join(dir, "f"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	git(t, dir, "add", "f")
+	git(t, dir, "commit", "-q", "-m", "init")
+	return RootCommit(Real{Dir: dir})
+}
+
+func TestHasCommit(t *testing.T) {
+	base := t.TempDir()
+	r, q := filepath.Join(base, "r"), filepath.Join(base, "q")
+	rootR, rootQ := commitFile(t, r, "r"), commitFile(t, q, "q")
+	if rootR == "" || rootR == rootQ {
+		t.Fatalf("fixture roots %q, %q", rootR, rootQ)
+	}
+	git(t, r, "checkout", "-q", "--orphan", "other")
+	git(t, r, "commit", "-q", "--allow-empty", "-m", "other root")
+	rootOther := RootCommit(Real{Dir: r})
+	if rootOther == rootR {
+		t.Fatal("fixture: the orphan branch kept the root")
+	}
+	for _, tc := range []struct {
+		sha  string
+		want bool
+	}{{rootR, true}, {rootOther, true}, {rootQ, false}} {
+		if got := HasCommit(Real{Dir: r}, tc.sha); got != tc.want {
+			t.Errorf("HasCommit(%s) = %v, want %v", tc.sha, got, tc.want)
+		}
+	}
+}
+
+func TestRootCommit(t *testing.T) {
+	base := t.TempDir()
+	r := filepath.Join(base, "r")
+	root := commitFile(t, r, "r")
+	git(t, r, "commit", "-q", "--allow-empty", "-m", "second")
+	if got := RootCommit(Real{Dir: r}); got != root || len(got) != 40 {
+		t.Fatalf("RootCommit = %q, want %q", got, root)
+	}
+	unborn := filepath.Join(base, "unborn")
+	if err := os.MkdirAll(unborn, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	git(t, unborn, "init", "-q")
+	if got := RootCommit(Real{Dir: unborn}); got != "" {
+		t.Fatalf("unborn RootCommit = %q, want empty", got)
 	}
 }
