@@ -866,6 +866,60 @@ func TestSessionStartShowsDeltaSinceLastWorkingSession(t *testing.T) {
 	}
 }
 
+func TestEditDuringAnotherIndexShowsInTheNextSessionStart(t *testing.T) {
+	a := newTestApp(t, "main")
+	ctx := context.Background()
+	wt := t.TempDir()
+	a.Git.Worktree = wt
+	clk := a.Clock.(*clock.Fake)
+	w := filepath.Join(wt, "w.go")
+	if err := os.WriteFile(w, []byte("package p\nfunc Work() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	finishIndex(t, a, wt)
+	clk.Advance(time.Second)
+
+	// Another index of the worktree holds its index lock through S1 and S2.
+	gated := newGated(graph.FSSource{Root: wt}, false)
+	indexed := make(chan error, 1)
+	go func() { indexed <- a.Graph.ReconcileIfStale(ctx, wt, gated, "other-token") }()
+	await(t, "index", gated.entered)
+
+	hook := func(kind EventKind, session string) Result {
+		t.Helper()
+		res, err := Handle(ctx, a, Event{Kind: kind, SessionID: session, Agent: "claude-code", FilePath: w})
+		if err != nil {
+			t.Fatal(err)
+		}
+		clk.Advance(time.Second)
+		return res
+	}
+	hook(KindSessionStart, "s1")
+	if err := os.WriteFile(w, []byte("package p\nfunc Work() {}\nfunc Extra() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	hook(KindPostEdit, "s1")
+	hook(KindStop, "s1")
+	hook(KindSessionStart, "s2")
+	hook(KindStop, "s2")
+	close(gated.gate)
+	if err := await(t, "index", indexed); err != nil {
+		t.Fatal(err)
+	}
+
+	res := hook(KindSessionStart, "s3")
+	if !strings.Contains(res.Context, "Changed since your last working session here") || !strings.Contains(res.Context, "Extra") {
+		t.Errorf("S3's start does not list S1's edit:\n%s", res.Context)
+	}
+	var s1 int64
+	if err := a.Store.DB.QueryRow(`SELECT started_at FROM sessions WHERE id='s1'`).Scan(&s1); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok, err := a.Graph.DeltaBaseline(ctx, wt, clk.Now().UnixMilli()); err != nil || !ok || got != s1 {
+		t.Errorf("get_graph_delta baseline = %d, %v, %v; want S1's start %d", got, ok, err, s1)
+	}
+}
+
 func TestDeltaTierSurvivesManyNoOpSessions(t *testing.T) {
 	a := newTestApp(t, "main")
 	ctx := context.Background()

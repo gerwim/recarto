@@ -19,6 +19,13 @@ const hangTimeout = time.Minute
 // sharing the store. flock and LockFileEx exclude separate opens in one process.
 func twoEngines(t *testing.T) (*Engine, *Engine) {
 	t.Helper()
+	return twoEnginesOn(t, clock.NewFake(time.UnixMilli(1_700_000_000_000)))
+}
+
+// twoEnginesOn is twoEngines on clk, which both engines share as two processes
+// on one machine share its clock.
+func twoEnginesOn(t *testing.T, clk *clock.Fake) (*Engine, *Engine) {
+	t.Helper()
 	path := filepath.Join(t.TempDir(), "store.db")
 	open := func() *Engine {
 		st, err := store.Open(path)
@@ -26,7 +33,7 @@ func twoEngines(t *testing.T) (*Engine, *Engine) {
 			t.Fatal(err)
 		}
 		t.Cleanup(func() { _ = st.Close() })
-		e, err := New(st, ledger.New(st), clock.NewFake(time.UnixMilli(1_700_000_000_000)))
+		e, err := New(st, ledger.New(st), clk)
 		if err != nil {
 			t.Fatal(err)
 		}

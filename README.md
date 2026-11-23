@@ -465,7 +465,9 @@ Measure-Command { recarto recall "auth flow" }
 - **No daemon.** Hooks are pure exit-0 CLI invocations; the code graph reconciles
   in a background process that session start starts (`recarto warm`), on a graph
   query, and incrementally on each edit. One process at a time indexes a worktree.
-  `recarto index`, `recarto graph` and the MCP server wait for it; `recarto warm`
+  An edit made while another process indexes the worktree is left to that
+  process; once indexed, its change counts in the recent changes of the session
+  that made the edit. `recarto index`, `recarto graph` and the MCP server wait for it; `recarto warm`
   leaves the worktree to it. A `recarto warm` run stops after 30 minutes, and the
   next session start continues its work. A session start in a worktree whose index
   never finished waits up to 2 s for it.

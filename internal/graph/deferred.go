@@ -110,10 +110,10 @@ type pendingEdit struct {
 type creditCase int
 
 const (
-	madeByL  creditCase = iota // the last edit recorded before the read made the version
-	madeByF                    // the first edit recorded after the read made it: its hook ran late
-	afterL                     // an unreported change followed the last edit recorded before the read
-	unnamed                    // no record names the version
+	madeByL creditCase = iota // the last edit recorded before the read made the version
+	madeByF                   // the first edit recorded after the read made it: its hook ran late
+	afterL                    // an unreported change followed the last edit recorded before the read
+	unnamed                   // no record names the version
 )
 
 // editsDir holds worktree's pending edit records, one file each.
