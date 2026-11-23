@@ -138,16 +138,16 @@ func (e *Engine) recordEdit(worktree, path string, src []byte, at int64) error {
 	if err != nil {
 		return err
 	}
-	defer os.Remove(tmp.Name()) // fails harmlessly once renamed
-	if _, err := tmp.Write(b); err != nil {
-		tmp.Close()
-		return err
+	_, err = tmp.Write(b)
+	err = errors.Join(err, tmp.Close())
+	if err == nil {
+		// The rename publishes the record whole: a reader never sees half of it.
+		err = os.Rename(tmp.Name(), filepath.Join(dir, ids.New()+".json"))
 	}
-	if err := tmp.Close(); err != nil {
-		return err
+	if err != nil {
+		return errors.Join(err, os.Remove(tmp.Name()))
 	}
-	// The rename publishes the record whole: a reader never sees half of it.
-	return os.Rename(tmp.Name(), filepath.Join(dir, ids.New()+".json"))
+	return nil
 }
 
 // pendingEdits returns worktree's pending edit records by path, each path's
@@ -228,6 +228,44 @@ func creditOf(edits []pendingEdit, hash string, readAt int64) (done []pendingEdi
 		return edits[:l+1], edits[l].At, afterL
 	}
 	return nil, 0, unnamed
+}
+
+// creditBatch returns the time each version in batch counts at, and the
+// records the versions include, to remove once the batch commits. now must be
+// read before the call: a version no record names counts at now, and an edit
+// whose hook records it after this load came before the read, so before now,
+// while its hook comes after now, so now lies in its session.
+func (e *Engine) creditBatch(worktree string, batch []parsedFile, now int64) ([]int64, []pendingEdit, error) {
+	edits, err := e.pendingEdits(worktree)
+	if err != nil {
+		return nil, nil, err
+	}
+	ats := make([]int64, len(batch))
+	var done []pendingEdit
+	for i, pf := range batch {
+		d, at, how := creditOf(edits[pf.path], pf.hash, pf.readAt)
+		if how == unnamed {
+			at = now
+		}
+		ats[i] = at
+		done = append(done, d...)
+	}
+	return ats, done, nil
+}
+
+// journalAt returns the time path's change, credited at at by an index
+// writing at now, is journaled at on c. DeltasSince folds a path's rows in at
+// order, so a change credited to an earlier edit never sorts before one
+// written earlier.
+func journalAt(ctx context.Context, c store.Conn, worktree, path string, at, now int64) (int64, error) {
+	if at >= now {
+		return at, nil
+	}
+	latest, ok, err := latestChangeAt(ctx, c, worktree, path)
+	if err != nil || !ok {
+		return at, err
+	}
+	return max(at, latest), nil
 }
 
 // removeEdits removes worktree's records of edits.

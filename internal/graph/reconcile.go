@@ -441,23 +441,10 @@ func (e *Engine) indexWorklist(ctx context.Context, worktree string, src Source,
 		if len(batch) == 0 {
 			return nil
 		}
-		// A version no record names counts at now, read before the records: an
-		// edit whose hook records it after this load came before the read, so
-		// before now, and its hook comes after now, so now lies in its session.
 		now := e.clk.Now().UnixMilli()
-		edits, err := e.pendingEdits(worktree)
+		ats, done, err := e.creditBatch(worktree, batch, now)
 		if err != nil {
 			return err
-		}
-		ats := make([]int64, len(batch))
-		var done []pendingEdit
-		for i, pf := range batch {
-			d, at, how := creditOf(edits[pf.path], pf.hash, pf.readAt)
-			if how == unnamed {
-				at = now
-			}
-			ats[i] = at
-			done = append(done, d...)
 		}
 		if err := e.st.WriteTx(ctx, func(c store.Conn) error {
 			st, err := prepareWriteStmts(ctx, c)
@@ -466,18 +453,9 @@ func (e *Engine) indexWorklist(ctx context.Context, worktree string, src Source,
 			}
 			defer st.Close()
 			for i, pf := range batch {
-				at := ats[i]
-				if at < now {
-					// DeltasSince folds a path's rows in at order, so a change
-					// credited to an earlier edit never sorts before one written
-					// earlier.
-					latest, ok, err := latestChangeAt(ctx, c, worktree, pf.path)
-					if err != nil {
-						return err
-					}
-					if ok {
-						at = max(at, latest)
-					}
+				at, err := journalAt(ctx, c, worktree, pf.path, ats[i], now)
+				if err != nil {
+					return err
 				}
 				if err := e.writeFileGraph(ctx, c, st, worktree, pf.path, pf.lang,
 					pf.graph, pf.hash, pf.mtime, pf.size, now, at); err != nil {
