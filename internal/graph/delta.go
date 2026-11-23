@@ -22,7 +22,7 @@ type Delta struct {
 
 // journalFileDeltas diffs a file's stored node set against the replacement and
 // inserts one graph_deltas row per difference, on the caller's transaction.
-// Identity is (qualified_name, kind); a span or signature difference is
+// The rows count at at. Identity is (qualified_name, kind); a span or signature difference is
 // "changed". Called only when the file already had rows (first index of a file
 // journals nothing — fresh clones and wipe-migration rebuilds must not flood
 // the journal).
@@ -32,7 +32,7 @@ type Delta struct {
 // side as a sorted multiset of "startByte:endByte:signature" strings and diff
 // the multisets, so an unchanged overload set never emits a spurious "changed".
 func journalFileDeltas(ctx context.Context, c store.Conn, worktree, path, fileID string,
-	newNodes []nodeRow, now int64) error {
+	newNodes []nodeRow, at int64) error {
 
 	// oldMulti maps key → sorted slice of "sb:eb:sig" fingerprints.
 	oldMulti := map[string][]string{}
@@ -75,7 +75,7 @@ func journalFileDeltas(ctx context.Context, c store.Conn, worktree, path, fileID
 	emit := func(qn, kind, change string) error {
 		_, err := c.ExecContext(ctx,
 			`INSERT INTO graph_deltas(id, worktree, path, qualified_name, kind, change, at)
-			 VALUES (?,?,?,?,?,?,?)`, ids.New(), worktree, path, qn, kind, change, now)
+			 VALUES (?,?,?,?,?,?,?)`, ids.New(), worktree, path, qn, kind, change, at)
 		return err
 	}
 
@@ -107,7 +107,7 @@ func journalFileDeltas(ctx context.Context, c store.Conn, worktree, path, fileID
 	return nil
 }
 
-// journalRecreatedFileDeltas journals "added" for every node of a file whose
+// journalRecreatedFileDeltas journals "added", at at, for every node of a file whose
 // first index follows earlier journal rows at the same path — the
 // delete-then-recreate shape (branch switches, stash pops). Without it the
 // recreation is invisible (a first index journals nothing) and the earlier
@@ -117,7 +117,7 @@ func journalFileDeltas(ctx context.Context, c store.Conn, worktree, path, fileID
 // session-pruned graph_deltas table, so it costs nothing on the fresh-clone
 // path where it runs once per file.
 func journalRecreatedFileDeltas(ctx context.Context, c store.Conn, worktree, path string,
-	newNodes []nodeRow, now int64) error {
+	newNodes []nodeRow, at int64) error {
 	var seen bool
 	if err := c.QueryRowContext(ctx,
 		`SELECT EXISTS(SELECT 1 FROM graph_deltas WHERE worktree = ? AND path = ?)`,
@@ -130,11 +130,20 @@ func journalRecreatedFileDeltas(ctx context.Context, c store.Conn, worktree, pat
 	for _, n := range newNodes {
 		if _, err := c.ExecContext(ctx,
 			`INSERT INTO graph_deltas(id, worktree, path, qualified_name, kind, change, at)
-			 VALUES (?,?,?,?,?,?,?)`, ids.New(), worktree, path, n.qn, n.kind, "added", now); err != nil {
+			 VALUES (?,?,?,?,?,?,?)`, ids.New(), worktree, path, n.qn, n.kind, "added", at); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// latestChangeAt returns when path's last journaled change counts, ok=false
+// when it has none.
+func latestChangeAt(ctx context.Context, c store.Conn, worktree, path string) (int64, bool, error) {
+	var at sql.NullInt64
+	err := c.QueryRowContext(ctx,
+		`SELECT MAX(at) FROM graph_deltas WHERE worktree=? AND path=?`, worktree, path).Scan(&at)
+	return at.Int64, at.Valid, err
 }
 
 // multisetEqual reports whether two sorted string slices are identical.

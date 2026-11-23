@@ -29,14 +29,25 @@ func (e *Engine) IndexFile(ctx context.Context, worktree, path string, src []byt
 	g := buildFileGraph(src, res)
 	hash := sha256hex(src)
 	now := e.clk.Now().UnixMilli()
-	return e.st.WriteTx(ctx, func(c store.Conn) error {
+	edits, err := e.pendingEdits(worktree)
+	if err != nil {
+		return err
+	}
+	// The hook's own edit is the latest its version includes, so its change
+	// keeps the hook's time; the edits left to another index that this version
+	// includes are part of it.
+	done, _, _ := creditOf(edits[path], hash, now)
+	if err := e.st.WriteTx(ctx, func(c store.Conn) error {
 		st, err := prepareWriteStmts(ctx, c)
 		if err != nil {
 			return err
 		}
 		defer st.Close()
-		return e.writeFileGraph(ctx, c, st, worktree, path, lang, g, hash, mtime, size, now)
-	})
+		return e.writeFileGraph(ctx, c, st, worktree, path, lang, g, hash, mtime, size, now, now)
+	}); err != nil {
+		return err
+	}
+	return e.removeEdits(worktree, done)
 }
 
 // ReindexFileIncremental rewrites one file's graph and re-resolves only what
@@ -46,8 +57,8 @@ func (e *Engine) IndexFile(ctx context.Context, worktree, path string, src []byt
 // interface dispatch in OTHER files reads them (structureChanged). Only a
 // Python base change resolves fully. This is the post-edit hook path — a full
 // Resolve per keystroke cost ~14s on a large repo for a one-file change.
-// While another process indexes the worktree, the method leaves the edit to
-// that process.
+// While another process indexes the worktree, the method leaves the edit, with
+// the time it counts at, to that process.
 func (e *Engine) ReindexFileIncremental(ctx context.Context, worktree, path string, src []byte, mtime, size int64) error {
 	release, ok, err := store.TryLockFile(e.indexLockPath(worktree))
 	if err != nil {
@@ -59,8 +70,10 @@ func (e *Engine) ReindexFileIncremental(ctx context.Context, worktree, path stri
 	} else {
 		// Another process indexes the worktree. The hook must not wait, and
 		// writing beside it could let its older parse of this file overwrite
-		// the edit: leave the edit to that process.
-		err = e.markDeferred(worktree)
+		// the edit: leave the edit to that process. Its record comes before
+		// the mark, so the pass the mark starts sees it. A record that fails
+		// still leaves the mark: the edit is indexed, as a version no record names.
+		err = errors.Join(e.recordEdit(worktree, path, src, e.clk.Now().UnixMilli()), e.markDeferred(worktree))
 	}
 	return errors.Join(err, e.takeDeferred(ctx, worktree))
 }
@@ -353,8 +366,9 @@ func buildFileGraph(src []byte, res parse.Result) fileGraph {
 // happened in buildFileGraph — so the writer is no longer the place the index
 // spends CPU. A node whose identity and ordinal survived the edit keeps its id
 // and gets its position and signature refreshed; only the rest are replaced.
+// now is the files row's index time, at the time its journal rows count at.
 func (e *Engine) writeFileGraph(ctx context.Context, c store.Conn, st *writeStmts, worktree, path, lang string,
-	g fileGraph, hash string, mtime, size, now int64) error {
+	g fileGraph, hash string, mtime, size, now, at int64) error {
 	var kept map[string]bool
 	// Upsert the files row and obtain its id.
 	var fileID string
@@ -373,7 +387,7 @@ func (e *Engine) writeFileGraph(ctx context.Context, c store.Conn, st *writeStmt
 		// a path with earlier journal rows is a delete-then-recreate (branch
 		// switch, stash pop): journal its symbols as added so the prior
 		// "removed" folds to a present disposition instead of standing as false.
-		if err := journalRecreatedFileDeltas(ctx, c, worktree, path, g.nodes, now); err != nil {
+		if err := journalRecreatedFileDeltas(ctx, c, worktree, path, g.nodes, at); err != nil {
 			return err
 		}
 	case err != nil:
@@ -382,7 +396,7 @@ func (e *Engine) writeFileGraph(ctx context.Context, c store.Conn, st *writeStmt
 		// Journal symbol-level deltas before the old rows are replaced — this is
 		// the only moment both node sets exist. Genuinely new files journal
 		// nothing (see the ErrNoRows recreate carve-out above).
-		if err := journalFileDeltas(ctx, c, worktree, path, fileID, g.nodes, now); err != nil {
+		if err := journalFileDeltas(ctx, c, worktree, path, fileID, g.nodes, at); err != nil {
 			return err
 		}
 		// Keep the ids of nodes whose identity survived the edit, so edges and

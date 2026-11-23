@@ -37,6 +37,7 @@ type parsedFile struct {
 	graph       fileGraph
 	hash        string
 	mtime, size int64
+	readAt      int64 // when the version was read, Unix ms
 }
 
 // Reconcile makes the worktree's graph match src: it (re)indexes new and changed
@@ -112,6 +113,7 @@ func (e *Engine) Reconcile(ctx context.Context, worktree string, src Source, opt
 	marked := e.resolvePending(ctx, worktree)
 	pending := o.force || marked || e.graphIndexesMissing(ctx)
 
+	listedAt := e.clk.Now().UnixMilli()
 	entries, err := src.List()
 	if err != nil {
 		return err
@@ -316,6 +318,9 @@ func (e *Engine) Reconcile(ctx context.Context, worktree string, src Source, opt
 			return err
 		}
 	}
+	if err := e.settleEdits(ctx, worktree, listedAt); err != nil {
+		return err
+	}
 	// Semantic tier (no-op unless an embedder is set): bring the vector index up
 	// to date. Best-effort — a model error must not fail reconciliation, since
 	// the lexical graph is already written and fully usable on its own.
@@ -352,6 +357,7 @@ func (e *Engine) indexWorklist(ctx context.Context, worktree string, src Source,
 		err   error
 	}
 	readParse := func(fe FileEntry) outcome {
+		readAt := e.clk.Now().UnixMilli()
 		content, err := src.Read(fe.Path)
 		if err != nil {
 			return outcome{err: err}
@@ -375,7 +381,7 @@ func (e *Engine) indexWorklist(ctx context.Context, worktree string, src Source,
 		// binds and inserts (graph construction is otherwise the writer's CPU floor).
 		return outcome{pf: parsedFile{
 			path: fe.Path, lang: lang, graph: buildFileGraph(content, res),
-			hash: hash, mtime: fe.Mtime, size: fe.Size,
+			hash: hash, mtime: fe.Mtime, size: fe.Size, readAt: readAt,
 		}}
 	}
 
@@ -435,21 +441,54 @@ func (e *Engine) indexWorklist(ctx context.Context, worktree string, src Source,
 		if len(batch) == 0 {
 			return nil
 		}
+		// A version no record names counts at now, read before the records: an
+		// edit whose hook records it after this load came before the read, so
+		// before now, and its hook comes after now, so now lies in its session.
 		now := e.clk.Now().UnixMilli()
+		edits, err := e.pendingEdits(worktree)
+		if err != nil {
+			return err
+		}
+		ats := make([]int64, len(batch))
+		var done []pendingEdit
+		for i, pf := range batch {
+			d, at, how := creditOf(edits[pf.path], pf.hash, pf.readAt)
+			if how == unnamed {
+				at = now
+			}
+			ats[i] = at
+			done = append(done, d...)
+		}
 		if err := e.st.WriteTx(ctx, func(c store.Conn) error {
 			st, err := prepareWriteStmts(ctx, c)
 			if err != nil {
 				return err
 			}
 			defer st.Close()
-			for _, pf := range batch {
+			for i, pf := range batch {
+				at := ats[i]
+				if at < now {
+					// DeltasSince folds a path's rows in at order, so a change
+					// credited to an earlier edit never sorts before one written
+					// earlier.
+					latest, ok, err := latestChangeAt(ctx, c, worktree, pf.path)
+					if err != nil {
+						return err
+					}
+					if ok {
+						at = max(at, latest)
+					}
+				}
 				if err := e.writeFileGraph(ctx, c, st, worktree, pf.path, pf.lang,
-					pf.graph, pf.hash, pf.mtime, pf.size, now); err != nil {
+					pf.graph, pf.hash, pf.mtime, pf.size, now, at); err != nil {
 					return err
 				}
 			}
 			return nil
 		}); err != nil {
+			return err
+		}
+		if err := e.removeEdits(worktree, done); err != nil {
 			return err
 		}
 		sinceCheckpoint += len(batch)
@@ -528,7 +567,8 @@ func (e *Engine) indexWorklist(ctx context.Context, worktree string, src Source,
 //
 // While another process indexes the worktree it waits for that process, then
 // re-checks freshness, so the work is done once. Before it returns it takes in
-// the edits the post-edit hook left to it (see ReindexFileIncremental).
+// the edits the post-edit hook left to it, each with the time its change counts
+// at (see ReindexFileIncremental).
 func (e *Engine) ReconcileIfStale(ctx context.Context, worktree string, src Source, token string, opts ...ReconcileOption) error {
 	// The mark comes before the freshness check and the reconcile's reads, so a
 	// sweep pruning this worktree concurrently sees it and stops (see PruneWorktree).
