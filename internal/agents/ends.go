@@ -739,15 +739,21 @@ type conversationEnd struct {
 
 // targetEnd is endConversation's state of one target.
 type targetEnd struct {
-	r      repoRecords
-	ended  bool
-	recErr error         // the guard could not be created: the target is unguarded
-	finErr error         // the guard's time could be recorded neither as M nor as a stamp
-	finG   repoEndRecord // that guard, with the time it was to get
-	direct bool          // a guard the live claim does not cover: written only directly, at tc
-	busy   bool
-	err    error
+	r       repoRecords
+	ended   bool
+	recErr  error         // the guard could not be created: the target is unguarded
+	finErr  error         // the guard's time could be recorded neither as M nor as a stamp
+	finG    repoEndRecord // that guard, with the time it was to get
+	direct  bool          // a guard the live claim does not cover: written only directly, at tc
+	decided bool          // a slot of this call decided to write this store
+	left    bool          // left to the borrowed claim's creator
+	busy    bool
+	err     error
 }
+
+// errLeftToCreator is a borrowing slot's outcome for a store it leaves to the
+// Stop that claimed the time it borrowed.
+var errLeftToCreator = errors.New("left to the Stop that claimed its time")
 
 // endWrite runs one store write of endConversation. A var so a test can pause
 // or order one store's worker.
@@ -777,8 +783,15 @@ type conversationEnding struct {
 	createdAny   bool             // this call created a G, an F or an M
 	folderRecErr error            // the folder's end could not be recorded
 	tc           int64            // the common time of a direct write
+	now          int64            // this Stop's own time
+	seen         []int            // the targets whose plain guard this Stop saw before taking now
 	folderBusy   bool
+	folderLeft   bool // the folder was left to the borrowed claim's creator
+	folderErr    error
 	errs         []error
+
+	mu       sync.Mutex // serializes the slots' write-time decisions and the takeover
+	tookOver bool
 }
 
 // endConversation writes sessionID's folder and repo session ends. With stop it
@@ -824,6 +837,9 @@ func (c *conversationEnding) ownsFin() bool {
 
 // transient reports whether fin is a Stop claim F°, not the durable F.
 func (c *conversationEnding) transient() bool { return c.fin != nil && c.finDir == c.cdir }
+
+// borrowed reports whether fin is another running Stop's F° that no F carries yet.
+func (c *conversationEnding) borrowed() bool { return c.fin != nil && c.transient() && !c.ownsFin() }
 
 // live reports whether f's time can still be the folder's end.
 func (c *conversationEnding) live(f folderEndRecord) bool {
@@ -915,12 +931,20 @@ func (c *conversationEnding) publish() {
 	guarded, guarding := c.guard(needFolder)
 	seen = append(seen, guarded...)
 	// The time is taken only after every guard it may be given was seen, so a
-	// prune that saw no guard ran before the time.
-	var now int64
-	if guarding || needFolder || len(seen) > 0 {
-		now = c.a.Clock.Now().UnixMilli()
+	// prune that saw no guard ran before the time. A Stop that borrows another
+	// Stop's claim may take over once that Stop has returned, and then claims or
+	// writes its own time.
+	if guarding || needFolder || len(seen) > 0 || c.transient() {
+		c.now = c.a.Clock.Now().UnixMilli()
 	}
-	if needFolder {
+	c.seen = seen
+	c.settleClaim(c.now, seen)
+}
+
+// settleClaim claims now as the conversation's time when the folder needs a
+// claim, publishes F with the claim's record, and gives each seen guard its time.
+func (c *conversationEnding) settleClaim(now int64, seen []int) {
+	if !c.row.ended.Valid && c.fin == nil {
 		c.claimStop(now, seen)
 	}
 	if c.transient() && !c.row.ended.Valid {
@@ -1052,7 +1076,8 @@ func (c *conversationEnding) dropStaleClaim() {
 // holds the claim, or the claim's creator still runs and writes that time
 // wherever it can. The creator is asked only when a direct write needs it.
 func (c *conversationEnding) joined(seen []int) bool {
-	if c.fin == nil {
+	if c.fin == nil || c.borrowed() {
+		// A borrowing Stop writes no store directly, so it needs no common time.
 		return false
 	}
 	if c.ownsFin() {
@@ -1078,6 +1103,10 @@ func (c *conversationEnding) guardTime(i int, now int64, joined bool) {
 	switch {
 	case c.fin != nil && c.fin.covers(repoID(c.targets[i].dir)):
 		at = c.fin.EndedAt
+	case c.borrowed():
+		// The claim's creator writes this store while it runs; after that, this
+		// Stop's takeover gives the guard its time.
+		return
 	case joined:
 		c.ts[i].direct = true
 		return
@@ -1122,6 +1151,10 @@ func (c *conversationEnding) repoRecord(i int, stop bool) (repoEndRecord, bool) 
 // writeStores writes every store side by side under the one deadline, so a
 // busy store never holds up a free one.
 func (c *conversationEnding) writeStores(stop bool) {
+	if c.borrowed() {
+		c.writeBorrowed()
+		return
+	}
 	var folderAt int64
 	if !c.row.ended.Valid {
 		if c.fin != nil {
@@ -1130,14 +1163,10 @@ func (c *conversationEnding) writeStores(stop bool) {
 			folderAt = c.tc
 		}
 	}
-	var folderErr error
 	var wg sync.WaitGroup
 	if folderAt != 0 {
 		wg.Go(func() {
-			c.folderBusy, folderErr = c.writeSlot(c.a.Dir, func() error {
-				_, _, err := writeFolderEnd(c.ctx, c.a, c.sessionID, folderAt)
-				return err
-			}, func() error { return nil })
+			c.folderBusy, _, c.folderErr = c.writeSlot(c.a.Dir, c.folderWrite(folderAt), func() error { return nil })
 		})
 	}
 	for i, t := range c.targets {
@@ -1156,17 +1185,220 @@ func (c *conversationEnding) writeStores(stop bool) {
 			continue
 		}
 		wg.Go(func() {
-			s.busy, s.err = c.writeSlot(t.wt, func() error { return writeRepoEnd(c.ctx, t.rc.Store, rec) },
-				func() error { return s.r.remove(pdir) })
+			s.busy, _, s.err = c.writeSlot(t.wt, c.repoWrite(i, rec), func() error { return s.r.remove(pdir) })
 		})
 	}
 	wg.Wait()
-	c.errs = append(c.errs, folderErr)
+	c.errs = append(c.errs, c.folderErr)
+}
+
+// folderSlot is the folder's slot among a borrowing Stop's slots, which are
+// otherwise target indexes.
+const folderSlot = -1
+
+func (c *conversationEnding) folderWrite(at int64) func() error {
+	return func() error {
+		_, _, err := writeFolderEnd(c.ctx, c.a, c.sessionID, at)
+		return err
+	}
+}
+
+func (c *conversationEnding) repoWrite(i int, rec repoEndRecord) func() error {
+	return func() error { return writeRepoEnd(c.ctx, c.targets[i].rc.Store, rec) }
+}
+
+// writeBorrowed writes the stores of a Stop that borrows another running
+// Stop's claim. Each slot decides what it writes only when its write runs.
+func (c *conversationEnding) writeBorrowed() {
+	var slots []int
+	if !c.row.ended.Valid {
+		slots = append(slots, folderSlot)
+	}
+	for i, t := range c.targets {
+		if t.rc == nil {
+			// Its records wait for a session start that serves the repository.
+			continue
+		}
+		if c.ts[i].ended {
+			c.errs = append(c.errs, c.ts[i].r.remove(repoEndsDir(t.dir)))
+			continue
+		}
+		slots = append(slots, i)
+	}
+	c.runSlots(slots)
+	c.retryLeft()
+	c.errs = append(c.errs, c.folderErr)
+}
+
+func (c *conversationEnding) runSlots(slots []int) {
+	var wg sync.WaitGroup
+	for _, i := range slots {
+		wg.Go(func() { c.runSlot(i) })
+	}
+	wg.Wait()
+}
+
+// runSlot runs one borrowing slot's write; its outcome replaces an earlier one.
+func (c *conversationEnding) runSlot(i int) {
+	write := func() error {
+		w, err := c.slotWrite(i)
+		if err != nil || w == nil {
+			return err
+		}
+		return w()
+	}
+	if i == folderSlot {
+		c.folderBusy, c.folderLeft, c.folderErr = c.writeSlot(c.a.Dir, write, func() error { return nil })
+		return
+	}
+	s, pdir := &c.ts[i], repoEndsDir(c.targets[i].dir)
+	s.busy, s.left, s.err = c.writeSlot(c.targets[i].wt, write, func() error { return s.r.remove(pdir) })
+}
+
+// slotWrite decides, when slot i's write runs, what it writes: nil for nothing,
+// or errLeftToCreator for a store left to the borrowed claim's creator.
+//
+// A borrowed time lives only while its creator runs, and the creator writes
+// every store itself. So a Stop that borrows it writes only a time already
+// recorded durably, which every later writer writes too. Once the creator has
+// returned, it claims anew through the same first-wins link as any Stop, and
+// writes its own time or borrows the newer claim.
+func (c *conversationEnding) slotWrite(i int) (func() error, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for c.borrowed() {
+		if w := c.durableWrite(i); w != nil {
+			return w, nil
+		}
+		running, err := fCreatorRunning(c.cdir, *c.fin)
+		// A failed probe is read as returned: this Stop then writes its own time.
+		c.errs = append(c.errs, err)
+		if running || c.tookOver {
+			// A claim taken over has returned too: its writes are final, and it
+			// named every store it left.
+			return nil, errLeftToCreator
+		}
+		c.takeOver()
+	}
+	return c.ownedWrite(i), nil
+}
+
+// durableWrite returns slot i's write of a time recorded durably: F's, or one
+// recorded beside the repository; nil when there is none.
+func (c *conversationEnding) durableWrite(i int) func() error {
+	// An unreadable F records nothing; finishFolder reads it again.
+	f, fok, _ := readEnd[folderEndRecord](c.fdir, c.fname)
+	if i == folderSlot {
+		if !fok {
+			return nil
+		}
+		return c.folderWrite(f.EndedAt)
+	}
+	t, s := c.targets[i], &c.ts[i]
+	r := readRepoRecords(repoEndsDir(t.dir), c.sessionID)
+	rec, ok := r.recorded()
+	if !ok && r.plain() && fok && r.g.Dir == f.Dir && f.covers(repoID(t.dir)) {
+		rec, ok = r.g, true
+		rec.EndedAt = f.EndedAt
+	}
+	if !ok {
+		return nil
+	}
+	s.r, s.decided = r, true
+	return c.repoWrite(i, rec)
+}
+
+// ownedWrite returns slot i's write once this Stop no longer borrows: it owns
+// its claim, adopted a durable F, or has no claim.
+func (c *conversationEnding) ownedWrite(i int) func() error {
+	if i == folderSlot {
+		row, found, err := folderSession(c.ctx, c.a.Store, c.sessionID)
+		c.errs = append(c.errs, err)
+		if err == nil && (!found || row.ended.Valid) {
+			return nil
+		}
+		at := c.tc
+		if c.fin != nil {
+			at = c.fin.EndedAt
+		}
+		return c.folderWrite(at)
+	}
+	s := &c.ts[i]
+	s.r = readRepoRecords(repoEndsDir(c.targets[i].dir), c.sessionID)
+	rec, ok := c.repoRecord(i, true)
+	if !ok {
+		return nil
+	}
+	s.decided = true
+	return c.repoWrite(i, rec)
+}
+
+// takeOver settles this Stop's own claim once the claim it borrowed has lost
+// its creator: it adopts a live F, or claims anew, and times the guards it saw
+// that no slot has settled yet. It runs under c.mu.
+func (c *conversationEnding) takeOver() {
+	c.tookOver = true
+	c.fin, c.finDir = nil, ""
+	if row, found, err := folderSession(c.ctx, c.a.Store, c.sessionID); err != nil {
+		c.errs = append(c.errs, err)
+	} else if found {
+		c.row = row
+	}
+	f, fok, err := readEnd[folderEndRecord](c.fdir, c.fname)
+	c.errs = append(c.errs, err)
+	var kept []int
+	for _, i := range c.seen {
+		// A store a slot of this call already decided to write, or whose guard is
+		// gone, is settled; giving it a time now would leave a record nothing removes.
+		if c.ts[i].decided {
+			continue
+		}
+		if r := readRepoRecords(repoEndsDir(c.targets[i].dir), c.sessionID); r.plain() {
+			c.ts[i].r = r
+			kept = append(kept, i)
+		}
+	}
+	if fok && c.live(f) {
+		// The folder's end is recorded in F; a takeover never claims a time over it.
+		c.fin, c.finDir = &f, c.fdir
+	}
+	// A guard this Stop saw that F does not cover is timed as by any Stop that
+	// reads F; left plain, nothing but the next Stop would end its store.
+	c.settleClaim(c.now, kept)
+}
+
+// retryLeft writes once more each store a slot left to the borrowed claim's
+// creator, once that creator has returned. A slot can leave its store while
+// the claim's creator still runs, and the creator can then return without
+// writing it. Once it has returned, this Stop writes that store too, unless its
+// end is recorded by then.
+func (c *conversationEnding) retryLeft() {
+	var left []int
+	if c.folderLeft {
+		left = append(left, folderSlot)
+	}
+	for i := range c.ts {
+		if c.ts[i].left {
+			left = append(left, i)
+		}
+	}
+	if len(left) == 0 {
+		return
+	}
+	if c.borrowed() {
+		running, err := fCreatorRunning(c.cdir, *c.fin)
+		// A failed probe is read as gone: this Stop then writes its own time.
+		c.errs = append(c.errs, err)
+		if running {
+			return
+		}
+	}
+	c.runSlots(left)
 }
 
 // writeSlot runs one store's write and, once it succeeded, done. A panicking
 // write is reported and then decided like a busy one.
-func (c *conversationEnding) writeSlot(slot string, write, done func() error) (busy bool, err error) {
+func (c *conversationEnding) writeSlot(slot string, write, done func() error) (busy, left bool, err error) {
 	panicked := true
 	defer func() { busy = busy || panicked }()
 	defer recoverInto(&err, "end the session in "+slot)
@@ -1174,11 +1406,13 @@ func (c *conversationEnding) writeSlot(slot string, write, done func() error) (b
 	panicked = false
 	switch {
 	case werr == nil:
-		return false, done()
+		return false, false, done()
+	case errors.Is(werr, errLeftToCreator):
+		return false, true, nil
 	case store.IsBusy(werr):
-		return true, nil
+		return true, false, nil
 	default:
-		return false, fmt.Errorf("end the session in %s: %w", slot, werr)
+		return false, false, fmt.Errorf("end the session in %s: %w", slot, werr)
 	}
 }
 
@@ -1245,7 +1479,7 @@ func (c *conversationEnding) finishRepos() (pending bool) {
 	for i, t := range c.targets {
 		s := &c.ts[i]
 		c.errs = append(c.errs, s.recErr, s.finErr, s.err)
-		if !s.busy {
+		if !s.busy && !s.left {
 			continue
 		}
 		ended, err := rowEnded(c.ctx, t.rc.Store.DB, c.sessionID)
@@ -1259,6 +1493,8 @@ func (c *conversationEnding) finishRepos() (pending bool) {
 		switch {
 		case ended:
 			c.errs = append(c.errs, r.remove(pdir))
+		case s.left:
+			// Its claim's creator writes it, or names it when its store stays busy.
 		case recorded || (r.plain() && present != nil && present.covers(repoID(t.dir))):
 			pending = true
 		default:

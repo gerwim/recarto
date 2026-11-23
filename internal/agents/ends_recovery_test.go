@@ -1233,6 +1233,302 @@ func testStopClaimDead(t *testing.T) {
 	requireNoPendingFiles(t, f, rc(t, f, r))
 }
 
+// The Stops of a borrowedClaim run, by the phase the test lets run.
+const (
+	stopA int32 = iota
+	stopB
+	stopC
+)
+
+// How Stop B's first-pass write of a slot is held: before its write function
+// runs, after it returned, or not at all once it returned.
+const (
+	holdBefore = iota
+	holdAfter
+	runThrough
+)
+
+// borrowedClaim is Stop A paused right after its F° link and Stop B, a second
+// later, borrowing A's claim. Only the Stop the test let run publishes or
+// writes, so the phase tells whose hook runs.
+type borrowedClaim struct {
+	s     *scratch
+	f     *app.App
+	r     string
+	repo  *app.RepoContext
+	phase atomic.Int32
+
+	failGuard   [3]bool // per Stop: its guard link fails
+	failFB      bool    // B's F publications fail
+	pauseAtM    bool    // A pauses before its M link instead of after its F° link
+	bHold       map[string]int
+	bSecond     func(slot string, write func() error) error // B's later writes; nil runs them
+	cWrite      func(slot string, write func() error) error // C's writes
+	aReturned   atomic.Bool
+	bClaimsLate atomic.Int32 // B's F° links after A returned
+
+	tA, tB           int64
+	aPaused, resumeA chan struct{}
+	bSlots           chan string
+	resumeB          chan struct{}
+	doneA, doneB     chan startResult
+	mu               sync.Mutex
+	bEntered         map[string]bool
+}
+
+// newBorrowedClaim sets up one served repo, the hooks, and the writers held as
+// asked. Every guard link fails unless c changes it.
+func newBorrowedClaim(t *testing.T, c *borrowedClaim) *borrowedClaim {
+	c.s, c.f, c.r = directWriteSetup(t)
+	c.repo = rc(t, c.f, c.r)
+	c.aPaused, c.resumeA, c.resumeB = make(chan struct{}), make(chan struct{}), make(chan struct{})
+	c.bSlots = make(chan string, 4)
+	c.doneA, c.doneB = make(chan startResult, 1), make(chan startResult, 1)
+	c.bEntered = map[string]bool{}
+	onPublish(t, c.publish)
+	prev := endWrite
+	endWrite = c.write
+	t.Cleanup(func() { endWrite = prev })
+	return c
+}
+
+func (c *borrowedClaim) publish(dir, name string, data []byte) ([]byte, bool, error) {
+	p := c.phase.Load()
+	switch {
+	case isGuard(name) && c.failGuard[p]:
+		return nil, false, errors.New("injected guard failure")
+	case isFolder(dir) && p == stopB && c.failFB:
+		return nil, false, errors.New("injected F failure")
+	case isClaim(dir) && p == stopB && c.aReturned.Load():
+		c.bClaimsLate.Add(1)
+	case isFinal(dir, name) && p == stopA && c.pauseAtM:
+		close(c.aPaused)
+		<-c.resumeA
+	}
+	existing, created, err := linkEnd(dir, name, data)
+	if isClaim(dir) && created && p == stopA && !c.pauseAtM {
+		close(c.aPaused)
+		<-c.resumeA
+	}
+	return existing, created, err
+}
+
+func (c *borrowedClaim) write(slot string, write func() error) error {
+	switch c.phase.Load() {
+	case stopC:
+		return c.cWrite(slot, write)
+	case stopB:
+		c.mu.Lock()
+		first := !c.bEntered[slot]
+		c.bEntered[slot] = true
+		c.mu.Unlock()
+		if !first {
+			if c.bSecond != nil {
+				return c.bSecond(slot, write)
+			}
+			return write()
+		}
+		if c.bHold[slot] == holdBefore {
+			c.bSlots <- slot
+			<-c.resumeB
+			return write()
+		}
+		err := write()
+		c.bSlots <- slot
+		if c.bHold[slot] == holdAfter {
+			<-c.resumeB
+		}
+		return err
+	}
+	return write()
+}
+
+// open runs A to its pause, then starts B and waits until n of B's slots
+// reached their hold.
+func (c *borrowedClaim) open(n int) {
+	c.s.clk.Advance(time.Second)
+	c.tA = c.s.clk.Now().UnixMilli()
+	go runStop(c.f, c.doneA)
+	<-c.aPaused
+	c.phase.Store(stopB)
+	c.s.clk.Advance(time.Second)
+	c.tB = c.s.clk.Now().UnixMilli()
+	go runStop(c.f, c.doneB)
+	for range n {
+		<-c.bSlots
+	}
+}
+
+// finishA lets A run to its return.
+func (c *borrowedClaim) finishA() startResult {
+	c.phase.Store(stopA)
+	close(c.resumeA)
+	a := <-c.doneA
+	c.aReturned.Store(true)
+	return a
+}
+
+// finishB lets B run to its return.
+func (c *borrowedClaim) finishB() startResult {
+	c.phase.Store(stopB)
+	close(c.resumeB)
+	return <-c.doneB
+}
+
+// require checks that no Stop failed, that B named no store as not recorded,
+// that the stores ended at folderAt and repoAt, and that no record remains.
+func (c *borrowedClaim) require(t *testing.T, folderAt, repoAt int64, b startResult, others ...startResult) {
+	t.Helper()
+	for _, res := range append(others, b) {
+		if res.err != nil {
+			t.Fatal(res.err)
+		}
+	}
+	if strings.Contains(failure(b.res), "not recorded") {
+		t.Fatalf("B's failure = %q; want no store named", failure(b.res))
+	}
+	requireSessionEnd(t, folderRC(c.f), "s", true, folderAt)
+	requireSessionEnd(t, c.repo, "s", true, repoAt)
+	requireNoPendingFiles(t, c.f, c.repo)
+}
+
+// requireNamed fails unless res names exactly the stores named as not recorded.
+func (c *borrowedClaim) requireNamed(t *testing.T, res startResult, folder, repo bool) {
+	t.Helper()
+	got := failure(res.res)
+	if strings.Contains(got, "session end not recorded in "+c.s.folder) != folder ||
+		strings.Contains(got, "session end not recorded in "+c.r) != repo {
+		t.Fatalf("A's failure = %q; want folder named %v, repo named %v", got, folder, repo)
+	}
+}
+
+// held takes the folder's writer, and the repo's when repo is set, and returns
+// the function that releases them.
+func (c *borrowedClaim) held(t *testing.T, repo bool) func() {
+	release := []func(){holdWriter(t, c.f.Store)}
+	if repo {
+		release = append(release, holdWriter(t, c.repo.Store))
+	}
+	return func() {
+		for _, r := range release {
+			r()
+		}
+	}
+}
+
+func TestBorrowedClaimAfterItsCreatorReturned(t *testing.T) {
+	t.Run("a newer Stop claims first", testBorrowedNewerStop)
+	t.Run("no newer Stop", func(t *testing.T) { testBorrowedNoNewerStop(t, false) })
+	t.Run("no newer Stop, B's own guard", func(t *testing.T) { testBorrowedNoNewerStop(t, true) })
+	t.Run("slots straddle A's return", testBorrowedSlotsStraddle)
+	t.Run("a takeover after the repo is settled", testBorrowedRepoSettled)
+	t.Run("a late F before the second pass", testBorrowedLateF)
+	t.Run("a late F that does not cover B's own guard", testBorrowedLateFUncovered)
+}
+
+func testBorrowedNewerStop(t *testing.T) {
+	cFolder, resumeC := make(chan struct{}), make(chan struct{})
+	cRepo := make(chan error, 1)
+	c := newBorrowedClaim(t, &borrowedClaim{failGuard: [3]bool{true, true, false}})
+	c.cWrite = func(slot string, write func() error) error {
+		if slot == c.r {
+			err := write()
+			cRepo <- err
+			return err
+		}
+		close(cFolder)
+		<-resumeC
+		return write()
+	}
+	unwritable(t, folderEndsDir(c.f.Store))
+	release := c.held(t, true)
+	c.open(2)
+	a := c.finishA()
+	c.requireNamed(t, a, true, true)
+	release()
+	c.phase.Store(stopC)
+	c.s.clk.Advance(time.Second)
+	tC := c.s.clk.Now().UnixMilli()
+	doneC := make(chan startResult, 1)
+	go runStop(c.f, doneC)
+	<-cFolder
+	if err := <-cRepo; err != nil {
+		t.Fatal(err)
+	}
+	b := c.finishB()
+	close(resumeC)
+	c.require(t, tC, tC, b, a, <-doneC)
+}
+
+func testBorrowedNoNewerStop(t *testing.T, ownGuard bool) {
+	c := newBorrowedClaim(t, &borrowedClaim{failGuard: [3]bool{true, !ownGuard, false}})
+	unwritable(t, folderEndsDir(c.f.Store))
+	release := c.held(t, true)
+	c.open(2)
+	a := c.finishA()
+	c.requireNamed(t, a, true, true)
+	release()
+	c.require(t, c.tB, c.tB, c.finishB(), a)
+}
+
+func testBorrowedSlotsStraddle(t *testing.T) {
+	c := newBorrowedClaim(t, &borrowedClaim{failGuard: [3]bool{true, true, false}})
+	c.bHold = map[string]int{c.s.folder: runThrough}
+	unwritable(t, folderEndsDir(c.f.Store))
+	release := c.held(t, true)
+	c.open(2)
+	a := c.finishA()
+	c.requireNamed(t, a, true, true)
+	release()
+	c.require(t, c.tB, c.tB, c.finishB(), a)
+}
+
+func testBorrowedRepoSettled(t *testing.T) {
+	c := newBorrowedClaim(t, &borrowedClaim{pauseAtM: true})
+	c.bHold = map[string]int{c.s.folder: runThrough, c.r: holdAfter}
+	unwritable(t, folderEndsDir(c.f.Store))
+	release := c.held(t, false)
+	c.open(2)
+	a := c.finishA()
+	c.requireNamed(t, a, true, false)
+	release()
+	c.require(t, c.tB, c.tA, c.finishB(), a)
+}
+
+func testBorrowedLateF(t *testing.T) {
+	c := newBorrowedClaim(t, &borrowedClaim{failGuard: [3]bool{true, true, false}, failFB: true})
+	c.bHold = map[string]int{c.s.folder: runThrough, c.r: holdAfter}
+	release := c.held(t, false)
+	c.open(2)
+	a := c.finishA()
+	release()
+	b := c.finishB()
+	if n := c.bClaimsLate.Load(); n != 0 {
+		t.Fatalf("B linked %d claims after A returned; want none", n)
+	}
+	c.require(t, c.tA, c.tA, b, a)
+}
+
+func testBorrowedLateFUncovered(t *testing.T) {
+	c := newBorrowedClaim(t, &borrowedClaim{failGuard: [3]bool{true, false, false}, failFB: true})
+	repoDone := make(chan struct{})
+	c.bHold = map[string]int{c.s.folder: holdAfter, c.r: holdAfter}
+	c.bSecond = func(slot string, write func() error) error {
+		if slot == c.r {
+			defer close(repoDone)
+			return write()
+		}
+		<-repoDone
+		return write()
+	}
+	release := c.held(t, true)
+	c.open(2)
+	a := c.finishA()
+	c.requireNamed(t, a, false, true)
+	release()
+	c.require(t, c.tA, c.tB, c.finishB(), a)
+}
+
 func TestLateGuardGetsTheRunningStopsTime(t *testing.T) {
 	t.Run("stores free", func(t *testing.T) { testLateGuard(t, false) })
 	t.Run("repo store held through both Stops", func(t *testing.T) { testLateGuard(t, true) })
