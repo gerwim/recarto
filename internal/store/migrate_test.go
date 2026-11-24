@@ -283,8 +283,8 @@ func TestConstructorLinkMigration(t *testing.T) {
 	if err := st.DB.QueryRow("PRAGMA user_version").Scan(&v); err != nil {
 		t.Fatal(err)
 	}
-	if v != 27 {
-		t.Errorf("user_version = %d, want 27", v)
+	if v != schemaVersion {
+		t.Errorf("user_version = %d, want %d", v, schemaVersion)
 	}
 }
 
@@ -447,12 +447,12 @@ func TestLatestCheckMigrationPreservesMemoriesAndColumns(t *testing.T) {
 		VALUES('t2','todo','done',1,1)`)
 }
 
-func TestSchemaVersionIs27(t *testing.T) {
-	if schemaVersion != 27 {
-		t.Fatalf("schemaVersion = %d, want 27", schemaVersion)
+func TestSchemaVersionIs28(t *testing.T) {
+	if schemaVersion != 28 {
+		t.Fatalf("schemaVersion = %d, want 28", schemaVersion)
 	}
-	if len(migrations) != 27 {
-		t.Fatalf("len(migrations) = %d, want 27", len(migrations))
+	if len(migrations) != 28 {
+		t.Fatalf("len(migrations) = %d, want 28", len(migrations))
 	}
 	st, err := Open(filepath.Join(t.TempDir(), "store.db"))
 	if err != nil {
@@ -463,8 +463,8 @@ func TestSchemaVersionIs27(t *testing.T) {
 	if err := st.DB.QueryRow("PRAGMA user_version").Scan(&v); err != nil {
 		t.Fatal(err)
 	}
-	if v != 27 {
-		t.Fatalf("user_version = %d, want 27", v)
+	if v != 28 {
+		t.Fatalf("user_version = %d, want 28", v)
 	}
 }
 

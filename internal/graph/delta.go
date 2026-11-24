@@ -22,7 +22,7 @@ type Delta struct {
 
 // journalFileDeltas diffs a file's stored node set against the replacement and
 // inserts one graph_deltas row per difference, on the caller's transaction.
-// Identity is (qualified_name, kind); a span or signature difference is
+// The rows count at ts.at. Identity is (qualified_name, kind); a span or signature difference is
 // "changed". Called only when the file already had rows (first index of a file
 // journals nothing — fresh clones and wipe-migration rebuilds must not flood
 // the journal).
@@ -32,7 +32,7 @@ type Delta struct {
 // side as a sorted multiset of "startByte:endByte:signature" strings and diff
 // the multisets, so an unchanged overload set never emits a spurious "changed".
 func journalFileDeltas(ctx context.Context, c store.Conn, worktree, path, fileID string,
-	newNodes []nodeRow, now int64) error {
+	newNodes []nodeRow, ts stamp) error {
 
 	// oldMulti maps key → sorted slice of "sb:eb:sig" fingerprints.
 	oldMulti := map[string][]string{}
@@ -72,11 +72,9 @@ func journalFileDeltas(ctx context.Context, c store.Conn, worktree, path, fileID
 		sort.Strings(newMulti[k])
 	}
 
-	emit := func(qn, kind, change string) error {
-		_, err := c.ExecContext(ctx,
-			`INSERT INTO graph_deltas(id, worktree, path, qualified_name, kind, change, at)
-			 VALUES (?,?,?,?,?,?,?)`, ids.New(), worktree, path, qn, kind, change, now)
-		return err
+	var changes []deltaRow
+	emit := func(qn, kind, change string) {
+		changes = append(changes, deltaRow{qn: qn, kind: kind, change: change})
 	}
 
 	// New keys: added or changed.
@@ -85,13 +83,9 @@ func journalFileDeltas(ctx context.Context, c store.Conn, worktree, path, fileID
 		oldFPs, ok := oldMulti[key]
 		switch {
 		case !ok:
-			if err := emit(qn, kind, "added"); err != nil {
-				return err
-			}
+			emit(qn, kind, "added")
 		case !multisetEqual(oldFPs, newFPs):
-			if err := emit(qn, kind, "changed"); err != nil {
-				return err
-			}
+			emit(qn, kind, "changed")
 		}
 	}
 	// Old keys absent from new: removed.
@@ -100,14 +94,12 @@ func journalFileDeltas(ctx context.Context, c store.Conn, worktree, path, fileID
 			continue
 		}
 		qn, kind := splitDeltaKey(key)
-		if err := emit(qn, kind, "removed"); err != nil {
-			return err
-		}
+		emit(qn, kind, "removed")
 	}
-	return nil
+	return insertDeltas(ctx, c, worktree, path, changes, ts)
 }
 
-// journalRecreatedFileDeltas journals "added" for every node of a file whose
+// journalRecreatedFileDeltas journals "added", at ts.at, for every node of a file whose
 // first index follows earlier journal rows at the same path — the
 // delete-then-recreate shape (branch switches, stash pops). Without it the
 // recreation is invisible (a first index journals nothing) and the earlier
@@ -117,7 +109,7 @@ func journalFileDeltas(ctx context.Context, c store.Conn, worktree, path, fileID
 // session-pruned graph_deltas table, so it costs nothing on the fresh-clone
 // path where it runs once per file.
 func journalRecreatedFileDeltas(ctx context.Context, c store.Conn, worktree, path string,
-	newNodes []nodeRow, now int64) error {
+	newNodes []nodeRow, ts stamp) error {
 	var seen bool
 	if err := c.QueryRowContext(ctx,
 		`SELECT EXISTS(SELECT 1 FROM graph_deltas WHERE worktree = ? AND path = ?)`,
@@ -127,14 +119,56 @@ func journalRecreatedFileDeltas(ctx context.Context, c store.Conn, worktree, pat
 	if !seen {
 		return nil
 	}
+	rows := make([]deltaRow, 0, len(newNodes))
 	for _, n := range newNodes {
+		rows = append(rows, deltaRow{qn: n.qn, kind: n.kind, change: "added"})
+	}
+	return insertDeltas(ctx, c, worktree, path, rows, ts)
+}
+
+// stamp is when a write's journal rows count (at), when the index saw the
+// version they come from (seen), and the write's own time (now).
+type stamp struct{ at, seen, now int64 }
+
+// deltaRow is one symbol's change in a write's journal.
+type deltaRow struct{ qn, kind, change string }
+
+// insertDeltas journals a write's rows of path on c, counting at ts.at, with
+// the time the index saw their version. A credited write that changes no
+// symbol journals nothing and so moves nothing: the journal stays as it
+// would be without the edit.
+func insertDeltas(ctx context.Context, c store.Conn, worktree, path string, rows []deltaRow, ts stamp) error {
+	if len(rows) == 0 {
+		return nil
+	}
+	if err := moveBackLaterRows(ctx, c, worktree, path, ts); err != nil {
+		return err
+	}
+	for _, r := range rows {
 		if _, err := c.ExecContext(ctx,
-			`INSERT INTO graph_deltas(id, worktree, path, qualified_name, kind, change, at)
-			 VALUES (?,?,?,?,?,?,?)`, ids.New(), worktree, path, n.qn, n.kind, "added", now); err != nil {
+			`INSERT INTO graph_deltas(id, worktree, path, qualified_name, kind, change, at, seen_at)
+			 VALUES (?,?,?,?,?,?,?,?)`, ids.New(), worktree, path, r.qn, r.kind, r.change, ts.at, ts.seen); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// moveBackLaterRows readies path's journal on c for a write credited to an
+// earlier edit (ts.at < ts.now). Its rows that count after ts.at belong to
+// versions the index saw before that edit; DeltasSince folds rows in at
+// order and a session's listing starts at the latest session holding any,
+// so they move to just before their version was seen, ahead of the edit
+// and its session. A row without seen_at (written before it existed), or one
+// seen after the credit, goes to the credit itself.
+func moveBackLaterRows(ctx context.Context, c store.Conn, worktree, path string, ts stamp) error {
+	if ts.at >= ts.now {
+		return nil
+	}
+	_, err := c.ExecContext(ctx,
+		`UPDATE graph_deltas SET at = MIN(COALESCE(seen_at - 1, ?1), ?1)
+		  WHERE worktree=?2 AND path=?3 AND at > ?1`, ts.at, worktree, path)
+	return err
 }
 
 // multisetEqual reports whether two sorted string slices are identical.

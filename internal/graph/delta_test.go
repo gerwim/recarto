@@ -85,7 +85,8 @@ func TestDeltaJournalOnFileDelete(t *testing.T) {
 	ctx := context.Background()
 	wt := t.TempDir()
 	indexInto(t, e, wt, "gone.go", "package p\nfunc Bye() {}\n")
-	if err := e.deleteFile(ctx, wt, "gone.go"); err != nil {
+	n := e.clk.Now().UnixMilli()
+	if err := e.deleteFile(ctx, wt, "gone.go", stamp{at: n, seen: n, now: n}); err != nil {
 		t.Fatal(err)
 	}
 	d, _, err := e.DeltasSince(ctx, wt, 0, 50)
@@ -130,7 +131,8 @@ func TestDeltaFileRecreateReadsAsChangedNotRemoved(t *testing.T) {
 	indexInto(t, e, wt, "back.go", "package p\nfunc Back() {}\n")
 
 	// Branch-switch shape: the file vanishes, then comes back at the same path.
-	if err := e.deleteFile(ctx, wt, "back.go"); err != nil {
+	n := e.clk.Now().UnixMilli()
+	if err := e.deleteFile(ctx, wt, "back.go", stamp{at: n, seen: n, now: n}); err != nil {
 		t.Fatal(err)
 	}
 	indexInto(t, e, wt, "back.go", "package p\nfunc Back() {}\n")

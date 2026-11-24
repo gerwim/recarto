@@ -37,6 +37,9 @@ type parsedFile struct {
 	graph       fileGraph
 	hash        string
 	mtime, size int64
+	readFrom    int64 // when Read of the version began, Unix ns
+	readTo      int64 // when it returned, Unix ns
+	listed      listedVersion
 }
 
 // Reconcile makes the worktree's graph match src: it (re)indexes new and changed
@@ -101,6 +104,120 @@ func (e *Engine) clearResolvePending(ctx context.Context, worktree string) error
 	})
 }
 
+// indexedFile is a file's stored content hash and stat.
+type indexedFile struct {
+	hash        string
+	mtime, size int64
+}
+
+// indexedFiles returns worktree's indexed files by path.
+func (e *Engine) indexedFiles(ctx context.Context, worktree string) (map[string]indexedFile, error) {
+	have := map[string]indexedFile{}
+	rows, err := e.st.DB.QueryContext(ctx,
+		`SELECT path, content_hash, mtime, size FROM files WHERE worktree=?`, worktree)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var p string
+		var r indexedFile
+		if err := rows.Scan(&p, &r.hash, &r.mtime, &r.size); err != nil {
+			return nil, errors.Join(err, rows.Close())
+		}
+		have[p] = r
+	}
+	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
+		return nil, err
+	}
+	return have, nil
+}
+
+// worklistOf splits entries into the files that may have changed since they
+// were indexed, and returns the listed paths. A file with a pending edit is
+// read even when its stat matches: the edit may have kept its size and its
+// mtime to the millisecond.
+func worklistOf(entries []FileEntry, have map[string]indexedFile, edits map[string][]pendingEdit) (worklist []FileEntry, seen map[string]bool) {
+	// A cheap mtime/size pre-check: the worklist is reported as the progress
+	// total, and reading + hashing happens in pass 2.
+	seen = map[string]bool{}
+	for _, fe := range entries {
+		seen[fe.Path] = true
+		prev, known := have[fe.Path]
+		if known && prev.mtime == fe.Mtime && prev.size == fe.Size && len(edits[fe.Path]) == 0 {
+			continue
+		}
+		worklist = append(worklist, fe)
+	}
+	return worklist, seen
+}
+
+// removeVanished deletes the graph of the indexed files the listing at
+// listedAt did not find, and takes in the records of the edits that absence
+// includes. It reports whether it deleted any file.
+func (e *Engine) removeVanished(ctx context.Context, worktree string, have map[string]indexedFile, seen map[string]bool, listedAt int64) (bool, error) {
+	// now before the load, as in creditBatch.
+	now := e.clk.Now().UnixMilli()
+	edits, err := e.pendingEdits(worktree)
+	if err != nil {
+		return false, err
+	}
+	var done []pendingEdit
+	removed := false
+	// CASCADE removes a file's nodes/edges; deleteFile drops its FTS rows, as
+	// FTS5 is not linked.
+	for p := range have {
+		if seen[p] {
+			continue
+		}
+		absent, err := e.absentAt(worktree, p, edits[p], listedAt)
+		if err != nil {
+			return false, err
+		}
+		d, at := creditOf(edits[p], "", absent, absent, listedVersion{}, now)
+		if err := e.deleteFile(ctx, worktree, p, stamp{at: at, seen: msOf(absent), now: now}); err != nil {
+			return false, err
+		}
+		done = append(done, d...)
+		removed = true
+	}
+	// An edit of a path never indexed and gone by the listing: kept, its record
+	// would credit a later re-creation of the path to its old session.
+	for p, pes := range edits {
+		if _, known := have[p]; known || seen[p] {
+			continue
+		}
+		absent, err := e.absentAt(worktree, p, pes, listedAt)
+		if err != nil {
+			return false, err
+		}
+		d, _ := creditOf(pes, "", absent, absent, listedVersion{}, now)
+		done = append(done, d...)
+	}
+	return removed, e.removeEdits(worktree, done)
+}
+
+// absentAt returns when path, which the listing that started at listedAt did
+// not find, counts as seen absent (Unix ns). A listing takes time: an edit
+// recorded at or after listedAt may come before the listing saw path gone
+// (then the absence includes it) or after (the edit made path again). A
+// fresh check tells them apart: path still absent counts as absent at the
+// check; path present keeps listedAt and leaves the edit to the read its
+// record brings.
+func (e *Engine) absentAt(worktree, path string, edits []pendingEdit, listedAt int64) (int64, error) {
+	if len(edits) == 0 || edits[len(edits)-1].At < listedAt {
+		return listedAt, nil
+	}
+	checked := e.clk.Now().UnixNano()
+	info, err := fileAt(worktree, path)
+	if err != nil {
+		return 0, err
+	}
+	if info == nil {
+		return checked, nil
+	}
+	return listedAt, nil
+}
+
 func (e *Engine) Reconcile(ctx context.Context, worktree string, src Source, opts ...ReconcileOption) error {
 	var o reconcileOptions
 	o.resolve(opts)
@@ -112,50 +229,21 @@ func (e *Engine) Reconcile(ctx context.Context, worktree string, src Source, opt
 	marked := e.resolvePending(ctx, worktree)
 	pending := o.force || marked || e.graphIndexesMissing(ctx)
 
+	listedAt := e.clk.Now().UnixNano()
 	entries, err := src.List()
 	if err != nil {
 		return err
 	}
 
-	// Load current index state for this worktree.
-	type rec struct {
-		hash        string
-		mtime, size int64
-	}
-	have := map[string]rec{}
-	rows, err := e.st.DB.QueryContext(ctx,
-		`SELECT path, content_hash, mtime, size FROM files WHERE worktree=?`, worktree)
+	have, err := e.indexedFiles(ctx, worktree)
 	if err != nil {
 		return err
 	}
-	for rows.Next() {
-		var p string
-		var r rec
-		if err := rows.Scan(&p, &r.hash, &r.mtime, &r.size); err != nil {
-			rows.Close()
-			return err
-		}
-		have[p] = r
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
+	edits, err := e.pendingEdits(worktree)
+	if err != nil {
 		return err
 	}
-	rows.Close()
-
-	// Pass 1: a cheap mtime/size pre-check splits source files into those that
-	// may have changed (the worklist, which we report as the progress total) and
-	// those skipped without any IO. Reading + hashing happens in pass 2.
-	seen := map[string]bool{}
-	var worklist []FileEntry
-	for _, fe := range entries {
-		seen[fe.Path] = true
-		prev, known := have[fe.Path]
-		if known && prev.mtime == fe.Mtime && prev.size == fe.Size {
-			continue // cheap pre-check: unchanged
-		}
-		worklist = append(worklist, fe)
-	}
+	worklist, seen := worklistOf(entries, have, edits)
 
 	// The dirty set drives incremental resolve: the paths this reconcile rewrites
 	// (worklist) plus the paths it deletes. A reconcile over an already-indexed
@@ -241,7 +329,7 @@ func (e *Engine) Reconcile(ctx context.Context, worktree string, src Source, opt
 	o.progress.Start(len(worklist))
 	mutated := false
 	if len(worklist) > 0 {
-		wrote, err := e.indexWorklist(ctx, worktree, src, worklist,
+		wrote, err := e.indexWorklist(ctx, worktree, src, worklist, listedAt,
 			func(path string) (prevHash string, known bool) {
 				r, ok := have[path]
 				return r.hash, ok
@@ -252,17 +340,11 @@ func (e *Engine) Reconcile(ctx context.Context, worktree string, src Source, opt
 		mutated = wrote
 	}
 
-	// Delete files that disappeared (CASCADE removes their nodes/edges; FTS rows
-	// are dropped explicitly since FTS5 is not linked).
-	for p := range have {
-		if seen[p] {
-			continue
-		}
-		if err := e.deleteFile(ctx, worktree, p); err != nil {
-			return err
-		}
-		mutated = true
+	removed, err := e.removeVanished(ctx, worktree, have, seen, listedAt)
+	if err != nil {
+		return err
 	}
+	mutated = mutated || removed
 	// Resolution depends only on the stored nodes/edges. If this reconcile changed
 	// nothing (e.g. the freshness token moved but no source file did), the existing
 	// resolution is still correct — skip the full-worktree re-resolve. A pending
@@ -341,27 +423,34 @@ func (e *Engine) Reconcile(ctx context.Context, worktree string, src Source, opt
 // nothing). prevHash looks up a path's last-indexed content hash for the cheap
 // "mtime moved but bytes unchanged" skip.
 func (e *Engine) indexWorklist(ctx context.Context, worktree string, src Source,
-	worklist []FileEntry, prevHash func(path string) (string, bool), prog Progress) (bool, error) {
+	worklist []FileEntry, listedAt int64, prevHash func(path string) (string, bool), prog Progress) (bool, error) {
 
 	// outcome is a worker's result for one file: a parsed graph to write, a skip
 	// (content unchanged / unparseable), or an error.
 	type outcome struct {
 		pf    parsedFile
 		skip  bool
-		touch *FileEntry
+		touch bool
 		err   error
 	}
 	readParse := func(fe FileEntry) outcome {
+		from := e.clk.Now().UnixNano()
 		content, err := src.Read(fe.Path)
+		to := e.clk.Now().UnixNano()
 		if err != nil {
 			return outcome{err: err}
 		}
+		listed := listedOf(fe, listedAt, len(content))
 		hash := sha256hex(content)
 		if prev, known := prevHash(fe.Path); known && prev == hash {
-			// mtime moved but content identical: refresh the stored stat so the
-			// next reconcile's cheap pre-check skips it instead of re-hashing it
-			// (and counting it as dirty).
-			return outcome{skip: true, touch: &fe}
+			// Content identical (the mtime moved, or a pending record forced the
+			// read): refresh the stored stat so the next reconcile's cheap
+			// pre-check skips it instead of re-hashing it (and counting it as
+			// dirty), and take in the records of the edits this version includes.
+			return outcome{skip: true, touch: true, pf: parsedFile{
+				path: fe.Path, hash: hash, mtime: fe.Mtime, size: fe.Size, readFrom: from, readTo: to,
+				listed: listed,
+			}}
 		}
 		lang, ok := parse.LangForExt(fe.Path)
 		if !ok {
@@ -375,17 +464,12 @@ func (e *Engine) indexWorklist(ctx context.Context, worktree string, src Source,
 		// binds and inserts (graph construction is otherwise the writer's CPU floor).
 		return outcome{pf: parsedFile{
 			path: fe.Path, lang: lang, graph: buildFileGraph(content, res),
-			hash: hash, mtime: fe.Mtime, size: fe.Size,
+			hash: hash, mtime: fe.Mtime, size: fe.Size, readFrom: from, readTo: to,
+			listed: listed,
 		}}
 	}
 
-	nworkers := runtime.NumCPU()
-	if nworkers > len(worklist) {
-		nworkers = len(worklist)
-	}
-	if nworkers < 1 {
-		nworkers = 1
-	}
+	nworkers := max(1, min(runtime.NumCPU(), len(worklist)))
 
 	wctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -396,11 +480,7 @@ func (e *Engine) indexWorklist(ctx context.Context, worktree string, src Source,
 	// that idled the parse cores ~50% of wall. Buffer several batches so the workers
 	// keep parsing the next batches ahead while the writer flushes the current one;
 	// the pool then runs continuously and the serial writer becomes the sole floor.
-	resultsBuf := 4 * indexBatchSize
-	if resultsBuf > len(worklist) {
-		resultsBuf = len(worklist)
-	}
-	results := make(chan outcome, resultsBuf)
+	results := make(chan outcome, min(4*indexBatchSize, len(worklist)))
 	var wg sync.WaitGroup
 	for range nworkers {
 		wg.Add(1)
@@ -436,20 +516,27 @@ func (e *Engine) indexWorklist(ctx context.Context, worktree string, src Source,
 			return nil
 		}
 		now := e.clk.Now().UnixMilli()
+		ats, done, err := e.creditBatch(worktree, batch, now)
+		if err != nil {
+			return err
+		}
 		if err := e.st.WriteTx(ctx, func(c store.Conn) error {
 			st, err := prepareWriteStmts(ctx, c)
 			if err != nil {
 				return err
 			}
 			defer st.Close()
-			for _, pf := range batch {
+			for i, pf := range batch {
 				if err := e.writeFileGraph(ctx, c, st, worktree, pf.path, pf.lang,
-					pf.graph, pf.hash, pf.mtime, pf.size, now); err != nil {
+					pf.graph, pf.hash, pf.mtime, pf.size, stamp{at: ats[i], seen: msOf(pf.readFrom), now: now}); err != nil {
 					return err
 				}
 			}
 			return nil
 		}); err != nil {
+			return err
+		}
+		if err := e.removeEdits(worktree, done); err != nil {
 			return err
 		}
 		sinceCheckpoint += len(batch)
@@ -463,7 +550,7 @@ func (e *Engine) indexWorklist(ctx context.Context, worktree string, src Source,
 
 	wrote := false
 	var indexErr error
-	var touched []*FileEntry
+	var touched []parsedFile
 	for out := range results {
 		if out.err != nil {
 			if indexErr == nil {
@@ -474,8 +561,8 @@ func (e *Engine) indexWorklist(ctx context.Context, worktree string, src Source,
 		}
 		prog.Inc()
 		if out.skip {
-			if out.touch != nil {
-				touched = append(touched, out.touch)
+			if out.touch {
+				touched = append(touched, out.pf)
 			}
 			continue
 		}
@@ -497,21 +584,27 @@ func (e *Engine) indexWorklist(ctx context.Context, worktree string, src Source,
 	if err := flush(); err != nil {
 		return false, err
 	}
-	if len(touched) > 0 {
-		if err := e.st.WriteTx(ctx, func(c store.Conn) error {
-			for _, fe := range touched {
-				if _, err := c.ExecContext(ctx,
-					`UPDATE files SET mtime=?, size=? WHERE worktree=? AND path=?`,
-					fe.Mtime, fe.Size, worktree, fe.Path); err != nil {
-					return err
-				}
-			}
-			return nil
-		}); err != nil {
-			return false, err
-		}
+	return wrote, e.touchFiles(ctx, worktree, touched)
+}
+
+// touchFiles stores the new stat of files whose content is unchanged.
+func (e *Engine) touchFiles(ctx context.Context, worktree string, touched []parsedFile) error {
+	if len(touched) == 0 {
+		return nil
 	}
-	return wrote, nil
+	if err := e.st.WriteTx(ctx, func(c store.Conn) error {
+		for _, pf := range touched {
+			if _, err := c.ExecContext(ctx,
+				`UPDATE files SET mtime=?, size=? WHERE worktree=? AND path=?`,
+				pf.mtime, pf.size, worktree, pf.path); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	return e.takeInTouched(worktree, touched)
 }
 
 // ReconcileIfStale reconciles only when the worktree's git token differs from the
@@ -528,7 +621,8 @@ func (e *Engine) indexWorklist(ctx context.Context, worktree string, src Source,
 //
 // While another process indexes the worktree it waits for that process, then
 // re-checks freshness, so the work is done once. Before it returns it takes in
-// the edits the post-edit hook left to it (see ReindexFileIncremental).
+// the edits the post-edit hook left to it, each with the time its change counts
+// at (see ReindexFileIncremental).
 func (e *Engine) ReconcileIfStale(ctx context.Context, worktree string, src Source, token string, opts ...ReconcileOption) error {
 	// The mark comes before the freshness check and the reconcile's reads, so a
 	// sweep pruning this worktree concurrently sees it and stops (see PruneWorktree).
