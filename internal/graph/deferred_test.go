@@ -3,6 +3,7 @@ package graph
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io/fs"
 	"maps"
 	"os"
@@ -17,8 +18,8 @@ import (
 )
 
 // heldReadSource returns each file's bytes as they are when Read is called, then
-// holds the call until the test sends on release: an index that parsed the file
-// just before an edit.
+// holds the call until the test sends on release: an index that got the file's
+// bytes just before an edit, and whose Read has not returned yet.
 type heldReadSource struct {
 	inner   Source
 	read    chan string   // receives the path of each Read
@@ -236,6 +237,36 @@ func (f *deferFixture) hold() (heldReadSource, chan error) {
 	return src, done
 }
 
+// heldWrite holds an index after each file it read, before it writes it, until
+// the test sends on release: an index whose read of the file returned just
+// before an edit. The drain passes after the held pass report to no Progress.
+type heldWrite struct {
+	noopProgress
+	read    chan struct{} // receives once per file read
+	release chan struct{} // one send per file read
+}
+
+func (h heldWrite) Inc() {
+	h.read <- struct{}{}
+	<-h.release
+}
+
+// holdWrite starts an index of the worktree and returns once its read of the
+// one file the caller changed since the last index has returned, before the
+// pass writes it.
+func (f *deferFixture) holdWrite() (heldWrite, chan error) {
+	f.t.Helper()
+	h := heldWrite{read: make(chan struct{}), release: make(chan struct{})}
+	done := make(chan error, 1)
+	go func() { done <- f.idx.ReconcileIfStale(f.ctx, f.wt, FSSource{Root: f.wt}, "", WithProgress(h)) }()
+	select {
+	case <-h.read:
+	case <-time.After(hangTimeout):
+		f.t.Fatal("no read came")
+	}
+	return h, done
+}
+
 // edit writes rel defining fns and runs the post-edit hook on it.
 func (f *deferFixture) edit(rel string, fns ...string) {
 	f.t.Helper()
@@ -420,12 +451,12 @@ func TestEditRecordedAfterTheReadCountsInItsSession(t *testing.T) {
 	f := newDeferFixture(t)
 	s1 := f.tick()
 	b, mtime, size := writeGo(t, f.wt, "a.go", "A", "Foo") // S1's edit, before its hook runs
-	src, done := f.hold()                                  // the pass reads it
+	held, done := f.holdWrite()                            // the pass has read it
 	f.tick()
 	f.postEdit("a.go", b, mtime, size)
 	addSession(t, f.idx, f.wt, "s1", s1, f.tick())
 	f.tick()
-	release(t, src, false)
+	held.release <- struct{}{}
 	awaitErr(t, "index", done)
 
 	f.wantListed(s1, map[string]string{"Foo": "added"})
@@ -782,10 +813,146 @@ func TestFileWhoseDirectoryBecameAFileDuringAListingCountsInTheEditingSession(t 
 	f.wantListed(s1, map[string]string{"C": "removed"})
 }
 
+// heldStart holds an index between its listing and its reads until the test
+// closes release. The drain passes after the held pass report to no Progress.
+type heldStart struct {
+	noopProgress
+	started chan struct{} // closed once the listing is done
+	release chan struct{}
+}
+
+func (h heldStart) Start(int) {
+	close(h.started)
+	<-h.release
+}
+
+// editsDuringTheRead starts an index of f's worktree, which then reads only
+// a.go. It runs between, when given, once the listing is done; then it holds
+// the read of a.go before the read gets the bytes, while each of edits, in a
+// session of its own, rewrites a.go to define those functions. It returns the
+// sessions' starts once the index has ended.
+func (f *deferFixture) editsDuringTheRead(between func(), edits ...[]string) []int64 {
+	f.t.Helper()
+	src := &gateFirstRead{inner: FSSource{Root: f.wt}, started: make(chan struct{}), release: make(chan struct{})}
+	listed := heldStart{started: make(chan struct{}), release: make(chan struct{})}
+	done := make(chan error, 1)
+	go func() { done <- f.idx.ReconcileIfStale(f.ctx, f.wt, src, "", WithProgress(listed)) }()
+	for _, c := range []chan struct{}{listed.started, src.started} {
+		select {
+		case <-c:
+		case <-time.After(hangTimeout):
+			f.t.Fatal("the index did not reach its read of a.go")
+		}
+		if c == listed.started {
+			f.tick()
+			if between != nil {
+				between()
+			}
+			close(listed.release)
+		}
+	}
+	var starts []int64
+	for i, fns := range edits {
+		s := f.tick()
+		f.edit("a.go", fns...)
+		addSession(f.t, f.idx, f.wt, fmt.Sprintf("s%d", i+1), s, f.tick())
+		starts = append(starts, s)
+	}
+	f.tick()
+	close(src.release)
+	awaitErr(f.t, "index", done)
+	return starts
+}
+
+func TestEditsMadeWhileAReadWaitsForTheBytesCountInTheLastEditsSession(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		before  func(f *deferFixture) // before the index starts
+		between func(f *deferFixture) // between its listing and its read
+		edits   [][]string
+		want    map[string]string // listed since the last edit's session
+	}{{
+		// The listed version is the stored one, so the bytes read are not it.
+		name:   "two edits after a touch",
+		before: func(f *deferFixture) { writeGo(f.t, f.wt, "a.go", "A") },
+		edits:  [][]string{{"A", "Foo"}, {"A", "Bar"}},
+		want:   map[string]string{"Bar": "added"},
+	}, {
+		// The first edit after the read began names the bytes read, though
+		// they have the size of the unreported version the listing saw.
+		name:   "one edit after an unreported change of that size",
+		before: func(f *deferFixture) { writeGo(f.t, f.wt, "a.go", "A", "Pulled") },
+		edits:  [][]string{{"A", "Barbar"}},
+		want:   map[string]string{"Barbar": "added"},
+	}, {
+		// The listed version is the earlier edit's, which its record names.
+		name: "two edits after an earlier deferred edit of that size",
+		before: func(f *deferFixture) {
+			unlock, ok, err := store.TryLockFile(f.idx.indexLockPath(f.wt)) // another index holds the worktree
+			if err != nil || !ok {
+				f.t.Fatalf("index lock: %v, %v", ok, err)
+			}
+			s0 := f.tick()
+			f.edit("a.go", "A", "Foo")
+			addSession(f.t, f.idx, f.wt, "s0", s0, f.tick())
+			unlock()
+		},
+		edits: [][]string{{"A", "Baz"}, {"A", "Bar"}},
+		want:  map[string]string{"Bar": "added"},
+	}, {
+		// An edit recorded after the listing, before the read: the read did not
+		// get the listed version.
+		name:   "two edits after one made between the listing and the read",
+		before: func(f *deferFixture) { writeGo(f.t, f.wt, "a.go", "A", "Pulled") },
+		between: func(f *deferFixture) {
+			s0 := f.tick()
+			f.edit("a.go", "A", "Foo")
+			addSession(f.t, f.idx, f.wt, "s0", s0, f.tick())
+		},
+		edits: [][]string{{"A", "Bazbaz"}, {"A", "Barbar"}},
+		want:  map[string]string{"Barbar": "added"},
+	}} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newDeferFixture(t)
+			tc.before(f)
+			var between func()
+			if tc.between != nil {
+				between = func() { tc.between(f) }
+			}
+			starts := f.editsDuringTheRead(between, tc.edits...)
+			f.wantListed(starts[len(starts)-1], tc.want)
+		})
+	}
+}
+
+func TestEditDuringTheReadOfAnUnhookedChangeWaitsForTheNextRead(t *testing.T) {
+	f := newDeferFixture(t)
+	writeGo(t, f.wt, "b.go", "B")
+	src, done := f.hold()
+	s1 := f.tick()
+	f.edit("a.go", "A", "Foo")
+	// A formatter run no hook reports: the same symbols in other bytes.
+	writeSrc(t, f.wt, "a.go", []byte("package p\n\nfunc A() {}\n\nfunc Foo() {\n}\n"))
+	addSession(t, f.idx, f.wt, "s1", s1, f.tick())
+	f.tick()
+	release(t, src, true) // the drain pass has the formatted bytes
+	s2 := f.tick()
+	b, mtime, size := writeSrc(t, f.wt, "a.go", []byte("package p\n\nfunc A() {}\n\nfunc Foo() {\n}\n\nfunc Bar() {}\n"))
+	f.postEdit("a.go", b, mtime, size)
+	addSession(t, f.idx, f.wt, "s2", s2, f.tick())
+	f.tick()
+	release(t, src, true) // S2's record makes the next pass read a.go
+	f.wantListed(s1, map[string]string{"Foo": "added"})
+	release(t, src, false)
+	awaitErr(t, "index", done)
+
+	f.wantListed(s2, map[string]string{"Bar": "added"})
+}
+
 func TestUnreadableEditRecordDoesNotFailTheIndex(t *testing.T) {
 	f := newDeferFixture(t)
-	b, _, _ := writeGo(t, f.wt, "a.go", "A", "Foo")
-	if err := f.idx.recordEdit(f.wt, "a.go", b, f.clk.Now().UnixNano()); err != nil {
+	b, mtime, size := writeGo(t, f.wt, "a.go", "A", "Foo")
+	if err := f.idx.recordEdit(f.wt, "a.go", b, mtime, size, f.clk.Now().UnixNano()); err != nil {
 		t.Fatal(err)
 	}
 	bad := filepath.Join(f.idx.editsDir(f.wt), "cut-short.json")

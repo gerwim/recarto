@@ -104,16 +104,19 @@ type pendingEdit struct {
 	Path string `json:"path"`  // worktree-relative, slash-separated: files.path
 	Hash string `json:"hash"`  // sha256hex of the bytes the hook read
 	At   int64  `json:"at_ns"` // the hook's clock, Unix ns
-	name string // the record's file name in editsDir
+	// The stat the hook saw: the mtime in Unix ms, and the size.
+	Mtime int64  `json:"mtime"`
+	Size  int64  `json:"size"`
+	name  string // the record's file name in editsDir
 }
 
 // editsDir holds worktree's pending edit records, one file each.
 func (e *Engine) editsDir(worktree string) string { return e.indexFileBase(worktree) + ".edits" }
 
 // recordEdit records that the post-edit hook left the edit of path, whose
-// bytes are src, to the index lock holder at time at. Only a file the graph
-// indexes has a change to credit.
-func (e *Engine) recordEdit(worktree, path string, src []byte, at int64) error {
+// bytes are src and stat mtime and size, to the index lock holder at time at.
+// Only a file the graph indexes has a change to credit.
+func (e *Engine) recordEdit(worktree, path string, src []byte, mtime, size, at int64) error {
 	if _, ok := parse.LangForExt(path); !ok {
 		return nil
 	}
@@ -121,7 +124,7 @@ func (e *Engine) recordEdit(worktree, path string, src []byte, at int64) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	b, err := json.Marshal(pendingEdit{Path: path, Hash: sha256hex(src), At: at})
+	b, err := json.Marshal(pendingEdit{Path: path, Hash: sha256hex(src), At: at, Mtime: mtime, Size: size})
 	if err != nil {
 		return err
 	}
@@ -191,40 +194,89 @@ func (e *Engine) pendingEdits(worktree string) (map[string][]pendingEdit, error)
 	return out, nil
 }
 
+// listedVersion is the version of a file that a pass's listing, begun at at
+// (Unix ns), saw before the pass read the file: its mtime (Unix ms) and size.
+// A read is given it only when the bytes read have that size, as only then
+// may the read have got it. The zero value is none.
+type listedVersion struct{ at, mtime, size int64 }
+
+// listedOf returns the version the listing begun at listedAt saw as fe, for a
+// read of n bytes of the file.
+func listedOf(fe FileEntry, listedAt int64, n int) listedVersion {
+	if int64(n) != fe.Size {
+		return listedVersion{}
+	}
+	return listedVersion{at: listedAt, mtime: fe.Mtime, size: fe.Size}
+}
+
 // creditOf names the pending edit whose session the version of a file with
-// content hash hash, observed at readAt by an index writing at now, counts in.
-// edits are the file's pending records in (At, name) order. It returns the
-// records the version includes, to remove once its write commits, and the
-// time the change counts at. An absent file's hash is empty, which no record
-// has. readAt and the records' times are Unix ns, so a hook, a change after it
-// and a read within one millisecond keep their order; now and the time
-// returned are the journal's Unix ms.
+// content hash hash counts in. An index read it during [from, to]: from just
+// before Read, to once Read returned (a listed absence and the hook's own
+// write are each seen at one time, from == to). listed is the version the
+// pass's listing saw, when the read may have got it. edits are the file's
+// pending records in (At, name) order. It returns the records the version
+// includes, to remove once its write commits, and the time the change counts
+// at. An absent file's hash is empty, which no record has. from, to and the
+// records' times are Unix ns, so a hook, a change after it and a read within
+// one millisecond keep their order; now and the time returned are the
+// journal's Unix ms.
 //
-// L, the last edit recorded before the read, is in what was read; F, the one
-// right after it, is the only later record that may still be in it, its hook
-// having run after the read. An agent edits one change at a time, so every
-// record after F is an edit made after the read, and matching stops at F even
-// when a later edit restores the bytes read. A version matching neither L nor
-// F had a change no hook reported after L, and counts with L. A version no
-// record names counts at now, as an unreported change always has: edits
-// recorded after the read are not in it.
-func creditOf(edits []pendingEdit, hash string, readAt, now int64) (done []pendingEdit, at int64) {
+// L, the last edit recorded before the read began, is in what was read. An
+// edit recorded while Read ran may be in it or not: Read gets the bytes at
+// some moment it does not report. So may the first edit recorded after the
+// read, its hook having run after the read got its bytes. An agent edits one
+// change at a time, so every later record is an edit made after the read.
+// The first of these whose bytes match made the version. A match after one
+// that does not is an edit that may have restored bytes the read got before
+// the edits: when those may be the listed version, which no record names,
+// the read is taken to have got them. A version none of them names had a
+// change no hook reported after L, and counts with L; the edits recorded
+// during the read stay pending, since the read may have got its bytes before
+// them. A version no record names counts at now, as an unreported change
+// always has.
+func creditOf(edits []pendingEdit, hash string, from, to int64, listed listedVersion, now int64) (done []pendingEdit, at int64) {
 	l := -1
 	for i, pe := range edits {
-		if pe.At < readAt {
+		if pe.At < from {
 			l = i
 		}
 	}
 	if l >= 0 && edits[l].Hash == hash {
 		return edits[:l+1], msOf(edits[l].At)
 	}
-	if f := l + 1; f < len(edits) && edits[f].Hash == hash {
-		return edits[:f+1], msOf(edits[f].At)
+	g := l + 1 // past the edits recorded during the read, to the first after it
+	for g < len(edits) && edits[g].At <= to {
+		g++
+	}
+	for i := l + 1; i <= g && i < len(edits); i++ {
+		if edits[i].Hash != hash {
+			continue
+		}
+		if i > l+1 && unnamedListed(edits, l, listed) {
+			break
+		}
+		return edits[:i+1], msOf(edits[i].At)
 	}
 	if l >= 0 {
 		return edits[:l+1], msOf(edits[l].At)
 	}
 	return nil, now
+}
+
+// unnamedListed reports whether listed is the last version seen before a read
+// whose last earlier record is edits[l], and no record gives its bytes: no
+// edit was recorded between the listing and the read, and no hook saw its
+// mtime and size.
+func unnamedListed(edits []pendingEdit, l int, listed listedVersion) bool {
+	if listed.at == 0 || (l >= 0 && edits[l].At >= listed.at) {
+		return false
+	}
+	for _, pe := range edits {
+		if pe.Mtime == listed.mtime && pe.Size == listed.size {
+			return false
+		}
+	}
+	return true
 }
 
 // msOf returns Unix ns time t in the journal's Unix ms.
@@ -243,7 +295,7 @@ func (e *Engine) creditBatch(worktree string, batch []parsedFile, now int64) ([]
 	ats := make([]int64, len(batch))
 	var done []pendingEdit
 	for i, pf := range batch {
-		d, at := creditOf(edits[pf.path], pf.hash, pf.readAt, now)
+		d, at := creditOf(edits[pf.path], pf.hash, pf.readFrom, pf.readTo, pf.listed, now)
 		ats[i] = at
 		done = append(done, d...)
 	}
@@ -264,7 +316,7 @@ func (e *Engine) takeInTouched(worktree string, touched []parsedFile) error {
 	var done []pendingEdit
 	for _, pf := range touched {
 		// The time is unused: a touched file journals nothing.
-		d, _ := creditOf(edits[pf.path], pf.hash, pf.readAt, pf.readAt)
+		d, _ := creditOf(edits[pf.path], pf.hash, pf.readFrom, pf.readTo, pf.listed, 0)
 		done = append(done, d...)
 	}
 	return e.removeEdits(worktree, done)

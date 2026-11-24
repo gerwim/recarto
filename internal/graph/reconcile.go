@@ -37,7 +37,9 @@ type parsedFile struct {
 	graph       fileGraph
 	hash        string
 	mtime, size int64
-	readAt      int64 // when the version was read, Unix ns
+	readFrom    int64 // when Read of the version began, Unix ns
+	readTo      int64 // when it returned, Unix ns
+	listed      listedVersion
 }
 
 // Reconcile makes the worktree's graph match src: it (re)indexes new and changed
@@ -171,7 +173,7 @@ func (e *Engine) removeVanished(ctx context.Context, worktree string, have map[s
 		if err != nil {
 			return false, err
 		}
-		d, at := creditOf(edits[p], "", absent, now)
+		d, at := creditOf(edits[p], "", absent, absent, listedVersion{}, now)
 		if err := e.deleteFile(ctx, worktree, p, stamp{at: at, seen: msOf(absent), now: now}); err != nil {
 			return false, err
 		}
@@ -188,7 +190,7 @@ func (e *Engine) removeVanished(ctx context.Context, worktree string, have map[s
 		if err != nil {
 			return false, err
 		}
-		d, _ := creditOf(pes, "", absent, now)
+		d, _ := creditOf(pes, "", absent, absent, listedVersion{}, now)
 		done = append(done, d...)
 	}
 	return removed, e.removeEdits(worktree, done)
@@ -327,7 +329,7 @@ func (e *Engine) Reconcile(ctx context.Context, worktree string, src Source, opt
 	o.progress.Start(len(worklist))
 	mutated := false
 	if len(worklist) > 0 {
-		wrote, err := e.indexWorklist(ctx, worktree, src, worklist,
+		wrote, err := e.indexWorklist(ctx, worktree, src, worklist, listedAt,
 			func(path string) (prevHash string, known bool) {
 				r, ok := have[path]
 				return r.hash, ok
@@ -421,7 +423,7 @@ func (e *Engine) Reconcile(ctx context.Context, worktree string, src Source, opt
 // nothing). prevHash looks up a path's last-indexed content hash for the cheap
 // "mtime moved but bytes unchanged" skip.
 func (e *Engine) indexWorklist(ctx context.Context, worktree string, src Source,
-	worklist []FileEntry, prevHash func(path string) (string, bool), prog Progress) (bool, error) {
+	worklist []FileEntry, listedAt int64, prevHash func(path string) (string, bool), prog Progress) (bool, error) {
 
 	// outcome is a worker's result for one file: a parsed graph to write, a skip
 	// (content unchanged / unparseable), or an error.
@@ -432,11 +434,13 @@ func (e *Engine) indexWorklist(ctx context.Context, worktree string, src Source,
 		err   error
 	}
 	readParse := func(fe FileEntry) outcome {
-		readAt := e.clk.Now().UnixNano()
+		from := e.clk.Now().UnixNano()
 		content, err := src.Read(fe.Path)
+		to := e.clk.Now().UnixNano()
 		if err != nil {
 			return outcome{err: err}
 		}
+		listed := listedOf(fe, listedAt, len(content))
 		hash := sha256hex(content)
 		if prev, known := prevHash(fe.Path); known && prev == hash {
 			// Content identical (the mtime moved, or a pending record forced the
@@ -444,7 +448,8 @@ func (e *Engine) indexWorklist(ctx context.Context, worktree string, src Source,
 			// pre-check skips it instead of re-hashing it (and counting it as
 			// dirty), and take in the records of the edits this version includes.
 			return outcome{skip: true, touch: true, pf: parsedFile{
-				path: fe.Path, hash: hash, mtime: fe.Mtime, size: fe.Size, readAt: readAt,
+				path: fe.Path, hash: hash, mtime: fe.Mtime, size: fe.Size, readFrom: from, readTo: to,
+				listed: listed,
 			}}
 		}
 		lang, ok := parse.LangForExt(fe.Path)
@@ -459,7 +464,8 @@ func (e *Engine) indexWorklist(ctx context.Context, worktree string, src Source,
 		// binds and inserts (graph construction is otherwise the writer's CPU floor).
 		return outcome{pf: parsedFile{
 			path: fe.Path, lang: lang, graph: buildFileGraph(content, res),
-			hash: hash, mtime: fe.Mtime, size: fe.Size, readAt: readAt,
+			hash: hash, mtime: fe.Mtime, size: fe.Size, readFrom: from, readTo: to,
+			listed: listed,
 		}}
 	}
 
@@ -522,7 +528,7 @@ func (e *Engine) indexWorklist(ctx context.Context, worktree string, src Source,
 			defer st.Close()
 			for i, pf := range batch {
 				if err := e.writeFileGraph(ctx, c, st, worktree, pf.path, pf.lang,
-					pf.graph, pf.hash, pf.mtime, pf.size, stamp{at: ats[i], seen: msOf(pf.readAt), now: now}); err != nil {
+					pf.graph, pf.hash, pf.mtime, pf.size, stamp{at: ats[i], seen: msOf(pf.readFrom), now: now}); err != nil {
 					return err
 				}
 			}
