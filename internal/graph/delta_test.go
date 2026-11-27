@@ -558,11 +558,7 @@ func (f *rangeFixture) rng(pending ...Session) (ChangeRange, map[string]string) 
 	if err != nil {
 		f.t.Fatal(err)
 	}
-	out := map[string]string{}
-	for _, d := range r.Deltas {
-		out[d.QualifiedName] = d.Change
-	}
-	return r, out
+	return r, rangeNames(r)
 }
 
 // recordRead raises session id's mark to read, as a block's own write does.

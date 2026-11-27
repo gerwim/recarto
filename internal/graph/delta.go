@@ -521,18 +521,20 @@ func tenthSessionStart(ctx context.Context, c store.Conn, worktree string) (int6
 	return at, err
 }
 
-// PruneUnreachableDeltas drops worktree's journal rows no baseline walk can
-// reach: those older than the 10th-most-recent session's start, never past the
-// baseline worktree's rows alone give, nor, when they give none, past the
-// baseline of the range that counts pending. While no session end is still to
-// be written (hold), the rows' baseline is the earliest any range takes: the
-// sessions a range adds beside the rows (Session) can only move its baseline
-// later, and only a pending end can give a row an end. So no reader's
-// baseline moves while the rows give one, and the caller's does not when they
-// give none. hold reports a session end still to be written, which makes it
-// delete nothing. Like PruneDeltas before it, it takes the write lock only
-// when the reads find ten sessions and no hold; it then decides again inside
-// that transaction, so an end written since the reads counts.
+// PruneUnreachableDeltas cuts worktree's journal at the earlier of the
+// 10th-most-recent session's start and the baseline of the range that counts
+// pending, so the rows that make a baseline session a candidate stay. While no
+// session end is still to be written (hold), it protects the baseline
+// worktree's rows alone give, or, when they give none, the baseline of the
+// range that counts pending: the sessions a range adds beside the rows
+// (Session) can only move that baseline later, and only a pending end can give
+// a row an end. So no reader's baseline moves while the rows give one, and the
+// pruning reader's does not when they give none. A row older than the cutoff
+// is pruned, whether a reader would have reported it or not. hold reports a
+// session end still to be written, which makes it delete nothing. Like
+// PruneDeltas before it, it takes the write lock only when the reads find ten
+// sessions and no hold; it then decides again inside that transaction, so an
+// end written since the reads counts.
 func (e *Engine) PruneUnreachableDeltas(ctx context.Context, worktree string, pending []Session, nowMs int64, hold func(c store.Conn) (bool, error)) error {
 	tenth, err := tenthSessionStart(ctx, e.st.DB, worktree)
 	if err != nil || tenth == 0 {

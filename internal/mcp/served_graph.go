@@ -321,9 +321,6 @@ func getGraphDeltaServed(ctx context.Context, a *app.App, in GetGraphDeltaInput)
 		}
 		sections[i].BaselineAt = time.UnixMilli(r.Since).Format(time.RFC3339)
 		parts[i], sections[i].Total = r.Deltas, r.Total
-		if err != nil {
-			return GetGraphDeltaOutput{}, fmt.Errorf("%s: %w", s.label, err)
-		}
 		avail[i] = sections[i].Total
 	}
 	shares := shareCap(avail, cap)
