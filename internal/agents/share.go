@@ -392,7 +392,7 @@ const (
 // each repo's map, bugs, changes and memories, labelled with it, within shares
 // of the budget (share).
 func sharedBlock(ctx, skip context.Context, a *app.App, now int64, scope string, resumed bool,
-	wait *startWait, session string, since int64, covered []coveredRepo) (Result, error) {
+	wait *startWait, session string, covered []coveredRepo) (Result, error) {
 	codeMap := !resumed && a.Features.On(features.CodeMap)
 	var tiers []*mapTier
 	if codeMap {
@@ -409,7 +409,7 @@ func sharedBlock(ctx, skip context.Context, a *app.App, now int64, scope string,
 	sessionStartUpkeep(skip, a, rcs)
 
 	f := toolFeatures(a)
-	ws, srcs, reads, empty, err := shareSources(ctx, skip, a, now, resumed, session, since, covered, tiers, f)
+	ws, srcs, reads, empty, err := shareSources(ctx, skip, a, now, resumed, session, covered, tiers, f)
 	if err != nil {
 		return Result{}, err
 	}
@@ -462,7 +462,7 @@ func sharedBlock(ctx, skip context.Context, a *app.App, now int64, scope string,
 // and each covered repo's ranked memories and, for a full block, its map,
 // bugs and changes. reads are the journal marks the full block read per repo.
 // empty reports that no source holds a memory.
-func shareSources(ctx, skip context.Context, a *app.App, now int64, resumed bool, session string, since int64,
+func shareSources(ctx, skip context.Context, a *app.App, now int64, resumed bool, session string,
 	covered []coveredRepo, tiers []*mapTier, f features.Set) (ws *shareSource, srcs []*shareSource, reads []repoRead, empty bool, err error) {
 	memories := a.Features.On(features.SessionMemories)
 	keep := func(rs []memory.RecallResult) []memory.RecallResult {
@@ -494,7 +494,7 @@ func shareSources(ctx, skip context.Context, a *app.App, now int64, resumed bool
 		if c.sel == "" {
 			fr = withoutTools(f)
 		}
-		r, read := recentChanges(ctx, skip, a, c.RepoContext, graph.Session{ID: session, StartedAt: since, Mark: c.blockMark}, now)
+		r, read := recentChanges(ctx, skip, a, c.RepoContext, now)
 		if read && r.Base != session {
 			reads = append(reads, repoRead{wt: c.Git.Worktree, mark: r.Read})
 		}

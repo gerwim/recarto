@@ -725,9 +725,8 @@ type deferredEndReport struct {
 	baseline    int64
 }
 
-// editIn appends function name to file and reports the edit in session.
-// editIn appends an empty function name to file, starts a second later, and
-// reports the edit in session.
+// editIn advances the clock a second, appends an empty function name to file
+// and reports the edit in session.
 func editIn(t *testing.T, s *scratch, a *app.App, session, file, name string) {
 	t.Helper()
 	s.clk.Advance(time.Second)

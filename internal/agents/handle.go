@@ -336,9 +336,9 @@ func handleSessionStart(ctx context.Context, a *app.App, ev Event) (res Result, 
 	case 0:
 		res, err = goneBlock(ctx, skip, a, scope, resumed, gone)
 	case 1:
-		res, err = repoBlock(ctx, skip, a, now, scope, resumed, wait, covered[0].subject(ev.SessionID, conv.startedAt))
+		res, err = repoBlock(ctx, skip, a, now, scope, resumed, wait, covered[0].subject(ev.SessionID))
 	default:
-		res, err = sharedBlock(ctx, skip, a, now, scope, resumed, wait, ev.SessionID, conv.startedAt, covered)
+		res, err = sharedBlock(ctx, skip, a, now, scope, resumed, wait, ev.SessionID, covered)
 	}
 	bg.Wait()
 	if err != nil {
@@ -353,12 +353,11 @@ func handleSessionStart(ctx context.Context, a *app.App, ev Event) (res Result, 
 // subject is the repo a one-repo block is about.
 type subject struct {
 	rc        *app.RepoContext
-	served    bool          // RECARTO_REPOS serves it: it gets the first-index wait
-	tools     bool          // the repo argument reaches it: the block points at tools
-	header    string        // the memory tier's header
-	reposLine string        // the line naming served repos, "" for none
-	caller    graph.Session // the conversation, counted as a session in rc while its row there is not written: its id ("" in a session's own worktree, whose row is written before the block), start and roster mark
-	marks     blockMarks    // where the block records the journal mark it read
+	served    bool       // RECARTO_REPOS serves it: it gets the first-index wait
+	tools     bool       // the repo argument reaches it: the block points at tools
+	header    string     // the memory tier's header
+	reposLine string     // the line naming served repos, "" for none
+	marks     blockMarks // where the block records the journal mark it read
 }
 
 // blockMarks is where a full block records the journal marks it read:
@@ -459,7 +458,7 @@ func repoBlock(ctx, skip context.Context, a *app.App, now int64, scope string, r
 		isTodo := func(r memory.RecallResult) bool { return r.Record.Kind == memory.KindTodo }
 		results, wsResults = slices.DeleteFunc(results, isTodo), slices.DeleteFunc(wsResults, isTodo)
 	}
-	r, read := recentChanges(ctx, skip, a, rc, s.caller, now)
+	r, read := recentChanges(ctx, skip, a, rc, now)
 	deltas, deltaTotal, deltaBaseline := r.Deltas, r.Total, r.Since
 	var reads []repoRead
 	if read && r.Base != s.marks.session {
@@ -503,22 +502,22 @@ func repoBlock(ctx, skip context.Context, a *app.App, now int64, scope string, r
 	return Result{Context: out}, nil
 }
 
-// recentChanges prunes rc's journal past what any baseline walk can reach,
-// then reads the range a block built now in rc reports, counting caller while
-// its row there is not written. read is false when the range could not be
-// read. With the recent-changes feature off the range carries no changes,
+// recentChanges reads the range a block built now in rc reports, counting the
+// sessions pendingIn adds, after pruning rc's journal past what a baseline
+// walk over those sessions can reach. read is false when the range could not
+// be read. With the recent-changes feature off the range carries no changes,
 // but it is still read: the block has had it all the same.
-func recentChanges(ctx, skip context.Context, a *app.App, rc *app.RepoContext, caller graph.Session, now int64) (r graph.ChangeRange, read bool) {
+func recentChanges(ctx, skip context.Context, a *app.App, rc *app.RepoContext, now int64) (r graph.ChangeRange, read bool) {
 	// Pruned before the read, so every row the block reports stays for
 	// get_graph_delta in this session. A prune that fails or is skipped only keeps
 	// rows longer; a later start prunes them. Recent changes are a best-effort
 	// tier like the map and bugs: a journal or pending-ends folder that cannot be
 	// read leaves the tier out of the block.
-	_ = rc.Graph.PruneUnreachableDeltas(skip, rc.Git.Worktree, caller.ID, caller.StartedAt, now, endsHoldFor(ctx, rc))
-	pending, err := pendingIn(rc, caller)
+	pending, err := pendingIn(ctx, a, rc)
 	if err != nil {
 		return graph.ChangeRange{}, false
 	}
+	_ = rc.Graph.PruneUnreachableDeltas(skip, rc.Git.Worktree, pending, now, endsHoldFor(ctx, rc))
 	r, ok, err := rc.Graph.RecentRange(ctx, rc.Git.Worktree, pending, now, 200)
 	if err != nil || !ok {
 		return graph.ChangeRange{}, false
@@ -529,36 +528,41 @@ func recentChanges(ctx, skip context.Context, a *app.App, rc *app.RepoContext, c
 	return r, true
 }
 
-// pendingIn returns the sessions a range in rc counts while their rows are
-// not written, or not yet ended: those whose ends wait in rc's pending ends,
-// and caller unless its id is "" or a pending end holds it (that end holds
-// its end).
-func pendingIn(rc *app.RepoContext, caller graph.Session) ([]graph.Session, error) {
+// pendingIn returns the sessions a range in rc counts beside its rows: those
+// whose ends wait in rc's pending ends, and, when a runs in a folder outside
+// git, the folder's conversations whose roster covers rc. A session in both
+// is one entry: its pending end's start and end, the higher of the two marks
+// for a missing or open row, and the roster mark for an ended one. Every
+// reader of rc in one folder gets the same list.
+func pendingIn(ctx context.Context, a *app.App, rc *app.RepoContext) ([]graph.Session, error) {
 	pending, err := pendingSessions(rc)
 	if err != nil {
 		return nil, err
 	}
-	if caller.ID != "" && !slices.ContainsFunc(pending, func(s graph.Session) bool { return s.ID == caller.ID }) {
-		pending = append(pending, caller)
+	folder, err := folderSessions(ctx, a, rc)
+	if err != nil {
+		return nil, err
+	}
+	for _, f := range folder {
+		i := slices.IndexFunc(pending, func(s graph.Session) bool { return s.ID == f.ID })
+		if i < 0 {
+			pending = append(pending, f)
+			continue
+		}
+		if f.Mark.Valid && (!pending[i].Mark.Valid || f.Mark.Int64 > pending[i].Mark.Int64) {
+			pending[i].Mark = f.Mark
+		}
+		pending[i].EndedMark = f.EndedMark
 	}
 	return pending, nil
 }
 
 // LiveRange returns what get_graph_delta reports in rc, up to limit changes:
-// the range a full block built now in the calling session would report there,
-// read as the journal stands. The calling session is the latest one: in a
-// folder outside git the folder's latest conversation, counted in a repo its
-// roster covers while its row there is not written. ok=false when rc has no
-// baseline. It writes nothing.
+// the range a full block built now in a's folder or worktree would report
+// there, read as the journal stands. ok=false when rc has no baseline. It
+// writes nothing.
 func LiveRange(ctx context.Context, a *app.App, rc *app.RepoContext, limit int) (graph.ChangeRange, bool, error) {
-	caller, ok, err := rosterSession(ctx, a, rc)
-	if err != nil {
-		return graph.ChangeRange{}, false, err
-	}
-	if !ok {
-		caller = graph.Session{}
-	}
-	pending, err := pendingIn(rc, caller)
+	pending, err := pendingIn(ctx, a, rc)
 	if err != nil {
 		return graph.ChangeRange{}, false, err
 	}

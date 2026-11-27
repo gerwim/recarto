@@ -379,12 +379,10 @@ func (c coveredRepo) label() string {
 	return c.Git.Worktree + " (" + c.mark + ")"
 }
 
-// subject is the one-repo block's subject for c, in the conversation session
-// started at since.
-func (c coveredRepo) subject(session string, since int64) subject {
+// subject is the one-repo block's subject for c, in conversation session.
+func (c coveredRepo) subject(session string) subject {
 	s := subject{rc: c.RepoContext, served: c.served,
-		caller: graph.Session{ID: session, StartedAt: since, Mark: c.blockMark},
-		marks:  blockMarks{session: session, roster: true}}
+		marks: blockMarks{session: session, roster: true}}
 	if c.sel != "" {
 		s.tools, s.header, s.reposLine = true, memoryHeader, alsoServing([]string{c.sel})
 		return s
@@ -477,35 +475,37 @@ func ensureRosterSessions(ctx context.Context, covered []coveredRepo, ev Event, 
 	return errors.Join(errs...)
 }
 
-// rosterSession returns the conversation counted in rc as a session before its
-// row there is written, as its session start counts it: the latest
-// conversation of the folder outside git a runs in, when its roster covers
-// rc's worktree, with its start and its roster mark there. ok is false
-// otherwise.
-func rosterSession(ctx context.Context, a *app.App, rc *app.RepoContext) (s graph.Session, ok bool, err error) {
+// folderSessions returns the conversations of the folder outside git a runs
+// in whose roster covers rc's worktree: each with its folder row's start, no
+// end, and its roster mark there as the mark of its row, open or ended
+// (invalid when none is recorded). Warm writes that mark to the row; the
+// roster keeps it. None when a does not run in such a folder.
+func folderSessions(ctx context.Context, a *app.App, rc *app.RepoContext) ([]graph.Session, error) {
 	if !a.Git.NonGit {
-		return graph.Session{}, false, nil
+		return nil, nil
 	}
-	var id string
-	var startedAt int64
-	err = a.Store.DB.QueryRowContext(ctx,
-		`SELECT id, started_at FROM sessions ORDER BY started_at DESC, id DESC LIMIT 1`).Scan(&id, &startedAt)
-	if errors.Is(err, sql.ErrNoRows) {
-		return graph.Session{}, false, nil
-	}
+	prefix := rosterScope("")
+	rows, err := a.Store.DB.QueryContext(ctx,
+		`SELECT s.id, s.started_at, m.value
+		   FROM counters r
+		   JOIN sessions s ON s.id = substr(r.scope, length(?3) + 1)
+		   LEFT JOIN counters m ON m.scope = r.scope AND m.metric = ?2
+		  WHERE r.metric = ?1 AND substr(r.scope, 1, length(?3)) = ?3`,
+		rosterMetric+rc.Git.Worktree, rosterMarkMetric+rc.Git.Worktree, prefix)
 	if err != nil {
-		return graph.Session{}, false, err
+		return nil, err
 	}
-	roster, err := readRoster(ctx, a.Ledger, id)
-	if err != nil {
-		return graph.Session{}, false, err
-	}
-	for _, e := range roster {
-		if e.wt == rc.Git.Worktree {
-			return graph.Session{ID: id, StartedAt: startedAt, Mark: e.blockMark}, true, nil
+	defer func() { _ = rows.Close() }() // a read-only cursor: closing it cannot lose data
+	var out []graph.Session
+	for rows.Next() {
+		var s graph.Session
+		if err := rows.Scan(&s.ID, &s.StartedAt, &s.Mark); err != nil {
+			return nil, err
 		}
+		s.EndedMark = s.Mark
+		out = append(out, s)
 	}
-	return graph.Session{}, false, nil
+	return out, rows.Err()
 }
 
 // rosterRetryWait waits before RecordRosterSessions tries a busy repo again.

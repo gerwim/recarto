@@ -348,40 +348,55 @@ func deltaBaselineWith(ctx context.Context, c store.Conn, worktree, id string, s
 	return b.since, ok, err
 }
 
-// Session is a session counted in a worktree while its row is not written, or
-// whose end is not: a session start's own conversation, or one whose row waits
-// in a pending end.
+// Session is a session a range counts beside the worktree's rows, as the state
+// still to come will leave its row: one whose end waits in a pending end, or a
+// conversation of a folder outside git whose roster covers the worktree.
 type Session struct {
 	ID        string
 	StartedAt int64
-	EndedAt   sql.NullInt64 // invalid: no end recorded
-	Mark      sql.NullInt64 // the mark of its latest full block; invalid: none
+	EndedAt   sql.NullInt64 // the end a missing or open row takes; invalid: none
+	Mark      sql.NullInt64 // the mark a missing or open row is raised to; invalid: none
+	EndedMark sql.NullInt64 // the mark an ended row is raised to; invalid: it keeps its own
 }
 
-// sessionsOf is worktree ?1's sessions and the pending ones (?2, a JSON array
-// of {id, started_at, ended_at, mark}), as recovery will leave them: a pending
-// one without a row counts as itself; one whose row is open gives that row its
-// end and the higher of the two marks, as writeRepoEnd writes them; one whose
-// row is ended changes nothing, as writeRepoEnd leaves an ended row.
-const sessionsOf = `(SELECT s.id, s.started_at,
-         CASE WHEN s.ended_at IS NULL THEN json_extract(p.value, '$.ended_at') ELSE s.ended_at END AS ended_at,
-         CASE WHEN s.ended_at IS NULL AND json_extract(p.value, '$.mark') > COALESCE(s.delta_mark, -1)
-              THEN json_extract(p.value, '$.mark') ELSE s.delta_mark END AS delta_mark
-    FROM sessions s LEFT JOIN json_each(?2) p ON json_extract(p.value, '$.id') = s.id
-   WHERE s.worktree = ?1
+// sessionsWith defines s: worktree ?1's sessions with the entries of ?2 (a
+// JSON array of {id, started_at, ended_at, mark, ended_mark}, one per id)
+// folded in as the state still to come leaves them. An entry with no row in
+// the store counts as itself; one whose row is open in the worktree gives it
+// its end and the higher of the two marks, as recovery (writeRepoEnd) and warm
+// (raiseMark) write it; one whose row is ended there gives it only the higher
+// of its mark and ended_mark, the roster mark warm writes to any row (a
+// pending end's record is dropped once its row is ended); one whose row is in
+// another worktree is not counted. The entries are read once and each finds
+// its row by key, so a folder's whole history costs a lookup per entry, not a
+// scan per row.
+const sessionsWith = `WITH p AS MATERIALIZED (
+  SELECT json_extract(value, '$.id') AS id, json_extract(value, '$.started_at') AS started_at,
+         json_extract(value, '$.ended_at') AS ended_at, json_extract(value, '$.mark') AS mark,
+         json_extract(value, '$.ended_mark') AS ended_mark
+    FROM json_each(?2)),
+s AS (
+  SELECT r.id, r.started_at, r.ended_at, r.delta_mark FROM sessions r
+   WHERE r.worktree = ?1 AND r.id NOT IN (SELECT id FROM p)
   UNION ALL
-  SELECT json_extract(p.value, '$.id'), json_extract(p.value, '$.started_at'),
-         json_extract(p.value, '$.ended_at'), json_extract(p.value, '$.mark')
-    FROM json_each(?2) p
-   WHERE NOT EXISTS (SELECT 1 FROM sessions WHERE id = json_extract(p.value, '$.id')))`
+  SELECT id, started_at, ended_at,
+         CASE WHEN NOT has_row OR lifted > COALESCE(row_mark, -1) THEN lifted ELSE row_mark END
+    FROM (SELECT p.id, COALESCE(r.started_at, p.started_at) AS started_at,
+                 COALESCE(r.ended_at, p.ended_at) AS ended_at,
+                 r.id IS NOT NULL AS has_row, r.delta_mark AS row_mark,
+                 CASE WHEN r.ended_at IS NULL THEN p.mark ELSE p.ended_mark END AS lifted
+            FROM p LEFT JOIN sessions r ON r.id = p.id
+           WHERE r.id IS NULL OR r.worktree = ?1))
+`
 
-// sessionJSON is how a pending session reaches sessionsOf: null for a missing
-// end or mark.
+// sessionJSON is how a pending session reaches sessionsWith: null for a
+// missing end or mark.
 type sessionJSON struct {
 	ID        string `json:"id"`
 	StartedAt int64  `json:"started_at"`
 	EndedAt   *int64 `json:"ended_at"`
 	Mark      *int64 `json:"mark"`
+	EndedMark *int64 `json:"ended_mark"`
 }
 
 func nullableInt64(v sql.NullInt64) *int64 {
@@ -398,7 +413,8 @@ func sessionsJSON(sessions []Session) (string, error) {
 	out := make([]sessionJSON, len(sessions))
 	for i, s := range sessions {
 		out[i] = sessionJSON{ID: s.ID, StartedAt: s.StartedAt,
-			EndedAt: nullableInt64(s.EndedAt), Mark: nullableInt64(s.Mark)}
+			EndedAt: nullableInt64(s.EndedAt), Mark: nullableInt64(s.Mark),
+			EndedMark: nullableInt64(s.EndedMark)}
 	}
 	b, err := json.Marshal(out)
 	return string(b), err
@@ -430,9 +446,9 @@ type ChangeRange struct {
 var afterRangeBaseline = func() {}
 
 // RecentRange reads, in one read transaction, the range of a block built now
-// in the latest session of worktree, counting the pending sessions, up to
-// limit changes. ok=false when no baseline exists: nothing is listed, and Read
-// is still set.
+// in the latest session of worktree, counting the pending sessions (at most
+// one entry per session id), up to limit changes. ok=false when no baseline
+// exists: nothing is listed, and Read is still set.
 func (e *Engine) RecentRange(ctx context.Context, worktree string, pending []Session, nowMs int64, limit int) (ChangeRange, bool, error) {
 	var r ChangeRange
 	ok := false
@@ -468,7 +484,7 @@ func baselineOf(ctx context.Context, c store.Conn, worktree string, pending []Se
 	}
 	var latest int64
 	if err := c.QueryRowContext(ctx,
-		`SELECT COALESCE(MAX(started_at), 0) FROM `+sessionsOf+` s`,
+		sessionsWith+`SELECT COALESCE(MAX(started_at), 0) FROM s`,
 		worktree, pendingJSON).Scan(&latest); err != nil {
 		return baseline{}, false, err
 	}
@@ -476,8 +492,8 @@ func baselineOf(ctx context.Context, c store.Conn, worktree string, pending []Se
 		return baseline{}, false, nil
 	}
 	var b baseline
-	err = c.QueryRowContext(ctx, `
-SELECT s.id, s.started_at, s.delta_mark FROM `+sessionsOf+` s
+	err = c.QueryRowContext(ctx, sessionsWith+`
+SELECT s.id, s.started_at, s.delta_mark FROM s
  WHERE s.started_at < ?3
    AND EXISTS (SELECT 1 FROM graph_deltas d
                 WHERE d.worktree = ?1
@@ -507,23 +523,23 @@ func tenthSessionStart(ctx context.Context, c store.Conn, worktree string) (int6
 
 // PruneUnreachableDeltas drops worktree's journal rows no baseline walk can
 // reach: those older than the 10th-most-recent session's start, never past the
-// current baseline (session id, started at startedAt, counted while its row is
-// not written). hold reports a session end still to be written, which makes it
-// delete nothing. Like PruneDeltas before it, it takes the write lock only when
-// the reads find ten sessions and no hold; it then decides again inside that
-// transaction, so an end written since the reads counts.
-func (e *Engine) PruneUnreachableDeltas(ctx context.Context, worktree, id string, startedAt, nowMs int64, hold func(c store.Conn) (bool, error)) error {
+// baseline of the range that counts pending. hold reports a session end still
+// to be written, which makes it delete nothing. Like PruneDeltas before it, it
+// takes the write lock only when the reads find ten sessions and no hold; it
+// then decides again inside that transaction, so an end written since the
+// reads counts.
+func (e *Engine) PruneUnreachableDeltas(ctx context.Context, worktree string, pending []Session, nowMs int64, hold func(c store.Conn) (bool, error)) error {
 	tenth, err := tenthSessionStart(ctx, e.st.DB, worktree)
 	if err != nil || tenth == 0 {
 		return err
 	}
-	pending, err := hold(e.st.DB)
-	if err != nil || pending {
+	held, err := hold(e.st.DB)
+	if err != nil || held {
 		return err
 	}
 	return e.st.WriteTx(ctx, func(c store.Conn) error {
-		pending, err := hold(c)
-		if err != nil || pending {
+		held, err := hold(c)
+		if err != nil || held {
 			return err
 		}
 		tenth, err := tenthSessionStart(ctx, c, worktree)
@@ -531,12 +547,12 @@ func (e *Engine) PruneUnreachableDeltas(ctx context.Context, worktree, id string
 			return err
 		}
 		cutoff := tenth
-		baseline, ok, err := deltaBaselineWith(ctx, c, worktree, id, startedAt, nowMs)
+		b, ok, err := baselineOf(ctx, c, worktree, pending, nowMs)
 		if err != nil {
 			return err
 		}
-		if ok && baseline < cutoff {
-			cutoff = baseline
+		if ok && b.since < cutoff {
+			cutoff = b.since
 		}
 		_, err = c.ExecContext(ctx,
 			`DELETE FROM graph_deltas WHERE worktree=? AND at<?`, worktree, cutoff)

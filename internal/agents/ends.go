@@ -663,8 +663,8 @@ func endTargets(roster []rosterRepo, covered []coveredRepo) ([]endTarget, error)
 // written, or only its end when the row exists and is open. The record's mark
 // is the conversation's latest block mark, and a row written before that block
 // read the journal holds a lower one, so an open row also takes the higher
-// mark. sessionsOf reads an open row a pending entry covers the same two ways,
-// so a range is the same before and after this write.
+// mark. graph's sessionsWith folds a pending end's entry into a missing or open
+// row the same two ways, so a range is the same before and after this write.
 func writeRepoEnd(ctx context.Context, st *store.Store, rec repoEndRecord) error {
 	return st.WriteTx(ctx, func(c store.Conn) error {
 		_, err := c.ExecContext(ctx,

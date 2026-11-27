@@ -272,7 +272,7 @@ func TestPruneUnreachableDeltasDecidesInItsTransaction(t *testing.T) {
 	wt := t.TempDir()
 	e := newTestEngine(t)
 	pruneFixture(t, e, wt, true)
-	if err := e.PruneUnreachableDeltas(ctx, wt, "current", 100, 110, func(store.Conn) (bool, error) { return true, nil }); err != nil {
+	if err := e.PruneUnreachableDeltas(ctx, wt, []Session{{ID: "current", StartedAt: 100}}, 110, func(store.Conn) (bool, error) { return true, nil }); err != nil {
 		t.Fatal(err)
 	}
 	if got := deltaTimes(t, e, wt); len(got) != 3 {
@@ -283,7 +283,7 @@ func TestPruneUnreachableDeltasDecidesInItsTransaction(t *testing.T) {
 		t.Fatalf("open baseline = %d %v %v, want 20 true", before, ok, err)
 	}
 	var holdCalls int
-	if err := e.PruneUnreachableDeltas(ctx, wt, "current", 100, 110, func(c store.Conn) (bool, error) {
+	if err := e.PruneUnreachableDeltas(ctx, wt, []Session{{ID: "current", StartedAt: 100}}, 110, func(c store.Conn) (bool, error) {
 		holdCalls++
 		if holdCalls == 2 {
 			_, err := c.ExecContext(ctx, `UPDATE sessions SET ended_at=25 WHERE id='B'`)
@@ -364,7 +364,7 @@ func TestPruneUnreachableDeltasTakesNoLockWhenMasterTookNone(t *testing.T) {
 			}
 			release := lock(t, e)
 			defer release()
-			if err := e.PruneUnreachableDeltas(ctx, wt, "", 0, 100, func(store.Conn) (bool, error) { return tc.hold, nil }); err != nil {
+			if err := e.PruneUnreachableDeltas(ctx, wt, nil, 100, func(store.Conn) (bool, error) { return tc.hold, nil }); err != nil {
 				t.Fatalf("did not skip the writer lock: %v", err)
 			}
 		})
@@ -378,7 +378,7 @@ func TestPruneUnreachableDeltasTakesNoLockWhenMasterTookNone(t *testing.T) {
 	}
 	release := lock(t, e)
 	defer release()
-	err := e.PruneUnreachableDeltas(ctx, wt, "", 0, 100, func(store.Conn) (bool, error) { return false, nil })
+	err := e.PruneUnreachableDeltas(ctx, wt, nil, 100, func(store.Conn) (bool, error) { return false, nil })
 	if !store.IsBusy(err) {
 		t.Fatalf("with ten sessions and no hold, error = %v, want busy", err)
 	}
@@ -670,21 +670,69 @@ func TestALateChangeIsInOneRange(t *testing.T) {
 			t.Errorf("after recovery, S4's range = %v; want %v", got, want)
 		}
 	})
-	t.Run("a baseline session without a mark", func(t *testing.T) {
-		f := newRangeFixture(t)
-		s1 := f.tick()
-		addSession(t, f.e, f.wt, "s1", s1, f.tick())
-		s2 := f.tick()
-		addSession(t, f.e, f.wt, "s2", s2, f.tick())
-		f.journal("y.go", s2, "Y")
-		f.journal("x.go", s1, "X")
-		f.start("s3")
-		r, got := f.rng()
-		want := changesSince(t, f.e, f.wt, r.Since)
-		if !mapsEqual(got, want) || mapsHave(got, "X") || !mapsHave(got, "Y") {
-			t.Errorf("S3's range = %v; want DeltasSince(%d) = %v", got, r.Since, want)
-		}
-	})
+	t.Run("an ended row takes an entry's EndedMark, not its Mark", testEndedRowTakesEndedMark)
+	t.Run("an entry over an ended row leaves its end", testEntryLeavesEndedRowsEnd)
+	t.Run("an entry whose row is in another worktree is not counted", testOtherWorktreeEntry)
+}
+
+func testEndedRowTakesEndedMark(t *testing.T) {
+	f := newRangeFixture(t)
+	s1 := f.start("s1")
+	f.end("s1")
+	s2 := f.start("s2")
+	f.journal("y.go", s2, "Y")
+	f.end("s2")
+	f.journal("x.go", s1, "X")
+	f.start("s3")
+	m := f.mark()
+	if got := f.block(Session{ID: "s2", StartedAt: s2, Mark: m}); !mapsHave(got, "X") || !mapsHave(got, "Y") {
+		t.Errorf("an entry's Mark reached an ended row: %v; want X and Y", got)
+	}
+	if got := f.block(Session{ID: "s2", StartedAt: s2, EndedMark: m}); mapsHave(got, "X") || !mapsHave(got, "Y") {
+		t.Errorf("an entry's EndedMark did not reach an ended row: %v; want Y only", got)
+	}
+}
+
+func testEntryLeavesEndedRowsEnd(t *testing.T) {
+	f := newRangeFixture(t)
+	s1 := f.start("s1")
+	f.journal("a.go", s1, "A")
+	f.end("s1")
+	s2 := f.start("s2")
+	f.end("s2")
+	f.journal("w.go", f.tick(), "W") // after S2's end, in no session
+	f.start("s3")
+	entry := Session{ID: "s2", StartedAt: s2, EndedAt: sql.NullInt64{Int64: f.now, Valid: true}}
+	r, got := f.rng(entry)
+	if r.Since != s1 || !mapsHave(got, "A") || !mapsHave(got, "W") {
+		t.Errorf("range = %+v, %v; want Since S1's start with A and W", r, got)
+	}
+}
+
+func testOtherWorktreeEntry(t *testing.T) {
+	f := newRangeFixture(t)
+	s1 := f.start("s1")
+	f.journal("a.go", s1, "A")
+	f.end("s1")
+	s2 := f.start("s2")
+	f.journal("b.go", s2, "B")
+	f.end("s2")
+	s9 := f.tick()
+	startSession(t, f.e, t.TempDir(), "s9", s9)
+	f.journal("c.go", f.tick(), "C")
+	f.start("s3")
+	rWith, gotWith := f.rng(Session{ID: "s9", StartedAt: s9})
+	rWithout, gotWithout := f.rng()
+	if rWith.Since != rWithout.Since || !mapsEqual(gotWith, gotWithout) {
+		t.Errorf("a row in another worktree changed the range: %+v %v vs %+v %v", rWith, gotWith, rWithout, gotWithout)
+	}
+	if rWithout.Since != s2 || !mapsHave(gotWithout, "B") || !mapsHave(gotWithout, "C") {
+		t.Errorf("range = %+v, %v; want Since S2's start with B and C", rWithout, gotWithout)
+	}
+	rNoRow, gotNoRow := f.rng(Session{ID: "s10", StartedAt: s9})
+	if rNoRow.Since != s9 || !mapsEqual(gotNoRow, map[string]string{"C": "added"}) {
+		t.Errorf("a no-row entry at %d gave %+v, %v; want Since it with C", s9, rNoRow, gotNoRow)
+	}
 }
 
 func TestRangeIsReadInOneSnapshot(t *testing.T) {
