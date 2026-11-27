@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -20,6 +21,7 @@ import (
 	"github.com/gerwim/recarto/internal/app"
 	"github.com/gerwim/recarto/internal/cache"
 	"github.com/gerwim/recarto/internal/gitctx"
+	"github.com/gerwim/recarto/internal/graph"
 	"github.com/gerwim/recarto/internal/store"
 )
 
@@ -102,6 +104,8 @@ type repoEndRecord struct {
 	Dir       string `json:"dir"`            // the conversation's folder
 	EndedAt   int64  `json:"ended_at,omitempty"`
 	Nonce     string `json:"nonce"` // unique to this file, so a removal can tell it from a later file at the same name
+	// BlockMark is the mark the row gets if this record writes it.
+	BlockMark sql.NullInt64 `json:"block_mark,omitzero"`
 }
 
 // valid checks r at name: a guard may wait for its time, a final end carries
@@ -606,10 +610,11 @@ func recoverInto(errp *error, what string) {
 
 // endTarget is one repository a conversation's session end goes to.
 type endTarget struct {
-	dir  string           // the repository's store directory in the cache
-	wt   string           // the conversation's checkout path of it (the roster entry)
-	root string           // the roster's root commit for it
-	rc   *app.RepoContext // the open checkout at wt, verified to be the roster's repository; nil otherwise
+	dir       string           // the repository's store directory in the cache
+	wt        string           // the conversation's checkout path of it (the roster entry)
+	root      string           // the roster's root commit for it
+	rc        *app.RepoContext // the open checkout at wt, verified to be the roster's repository; nil otherwise
+	blockMark sql.NullInt64    // the mark the row gets if this end writes it
 }
 
 // endTargets returns where the session end of each roster repo goes: its open
@@ -632,7 +637,7 @@ func endTargets(roster []rosterRepo, covered []coveredRepo) ([]endTarget, error)
 	for _, e := range roster {
 		i := slices.IndexFunc(covered, func(c coveredRepo) bool { return c.Git.Worktree == e.wt })
 		if i >= 0 && covered[i].isRoster() {
-			add(endTarget{storeDir(covered[i].Store), e.wt, e.root, covered[i].RepoContext})
+			add(endTarget{dir: storeDir(covered[i].Store), wt: e.wt, root: e.root, rc: covered[i].RepoContext, blockMark: e.blockMark})
 			continue
 		}
 		if e.id == "" {
@@ -649,20 +654,27 @@ func endTargets(roster []rosterRepo, covered []coveredRepo) ([]endTarget, error)
 			errs = append(errs, err)
 			continue
 		}
-		add(endTarget{filepath.Dir(p), e.wt, e.root, nil})
+		add(endTarget{dir: filepath.Dir(p), wt: e.wt, root: e.root, blockMark: e.blockMark})
 	}
 	return targets, errors.Join(errs...)
 }
 
 // writeRepoEnd writes rec's session end into st: the row the Stop would have
-// written, or only its end when the row exists and is open.
+// written, or only its end when the row exists and is open. The record's mark
+// is the conversation's latest block mark, and a row written before that block
+// read the journal holds a lower one, so an open row also takes the higher
+// mark. graph's sessionsWith folds a pending end's entry into a missing or open
+// row the same two ways, so a range is the same before and after this write.
 func writeRepoEnd(ctx context.Context, st *store.Store, rec repoEndRecord) error {
 	return st.WriteTx(ctx, func(c store.Conn) error {
 		_, err := c.ExecContext(ctx,
-			`INSERT INTO sessions(id, agent, branch, worktree, started_at, ended_at)
-			 VALUES (?, ?, ?, ?, ?, ?)
-			 ON CONFLICT(id) DO UPDATE SET ended_at = excluded.ended_at WHERE sessions.ended_at IS NULL`,
-			rec.Session, rec.Agent, nullable(rec.Branch), rec.Worktree, rec.StartedAt, rec.EndedAt)
+			`INSERT INTO sessions(id, agent, branch, worktree, started_at, ended_at, delta_mark)
+			 VALUES (?, ?, ?, ?, ?, ?, ?)
+			 ON CONFLICT(id) DO UPDATE SET ended_at = excluded.ended_at,
+			   delta_mark = CASE WHEN excluded.delta_mark > COALESCE(sessions.delta_mark, -1)
+			                     THEN excluded.delta_mark ELSE sessions.delta_mark END
+			 WHERE sessions.ended_at IS NULL`,
+			rec.Session, rec.Agent, nullable(rec.Branch), rec.Worktree, rec.StartedAt, rec.EndedAt, rec.BlockMark)
 		return err
 	})
 }
@@ -1022,7 +1034,7 @@ func (c *conversationEnding) guard(needFolder bool) (seen []int, guarding bool) 
 		}
 		guarding = true
 		g := repoEndRecord{Session: c.sessionID, Agent: c.row.agent, Worktree: t.wt, StartedAt: c.row.startedAt,
-			Root: t.root, Dir: c.a.Dir, Nonce: newNonce()}
+			Root: t.root, Dir: c.a.Dir, Nonce: newNonce(), BlockMark: t.blockMark}
 		if t.rc != nil {
 			g.Branch = t.rc.Git.Branch
 		}
@@ -1267,7 +1279,7 @@ func (c *conversationEnding) repoRecord(i int, stop bool) (repoEndRecord, bool) 
 func (c *conversationEnding) unguardedRecord(i int, at int64) repoEndRecord {
 	t := c.targets[i]
 	return repoEndRecord{Session: c.sessionID, Agent: c.row.agent, Branch: t.rc.Git.Branch, Worktree: t.wt,
-		StartedAt: c.row.startedAt, Dir: c.a.Dir, EndedAt: at}
+		StartedAt: c.row.startedAt, Dir: c.a.Dir, EndedAt: at, BlockMark: t.blockMark}
 }
 
 // writeStores writes every store side by side under the one deadline, so a
@@ -1800,6 +1812,52 @@ func endPendingRepoEnds(ctx context.Context, a *app.App) error {
 	return errors.Join(errs...)
 }
 
+// coveringFolderEnd returns the folder end that holds the time of g, a plain
+// guard beside the repository store in dir: the pending end of g's folder
+// conversation in the cache's shared folder, when it covers that repository.
+func coveringFolderEnd(fdir, dir string, g repoEndRecord) (folderEndRecord, bool, error) {
+	f, ok, err := readEnd[folderEndRecord](fdir, folderEndName(gitctx.NonGitID(g.Dir), g.Session))
+	if err != nil || !ok || !f.covers(repoID(dir)) {
+		return folderEndRecord{}, false, err
+	}
+	return f, true, nil
+}
+
+// pendingSessions returns the sessions of rc's worktree whose rows wait in a
+// pending end beside rc's store: each with its start, the end that holds for
+// it (as recovery writes it) and its block's mark. A record of another
+// repository at this store path is left out.
+func pendingSessions(rc *app.RepoContext) ([]graph.Session, error) {
+	pdir, recs, _, err := repoEndsOf(rc)
+	if err != nil {
+		return nil, err
+	}
+	var ids []string
+	for _, rec := range recs {
+		if !slices.Contains(ids, rec.Session) {
+			ids = append(ids, rec.Session)
+		}
+	}
+	var out []graph.Session
+	for _, id := range ids {
+		r := readRepoRecords(pdir, id)
+		rec, recorded := r.recorded()
+		if !recorded {
+			rec = r.g
+		}
+		s := graph.Session{ID: id, StartedAt: rec.StartedAt, Mark: rec.BlockMark}
+		if recorded {
+			s.EndedAt = sql.NullInt64{Int64: rec.EndedAt, Valid: true}
+		} else if f, ok, err := coveringFolderEnd(folderEndsDir(rc.Store), storeDir(rc.Store), r.g); err != nil {
+			return nil, err
+		} else if ok {
+			s.EndedAt = sql.NullInt64{Int64: f.EndedAt, Valid: true}
+		}
+		out = append(out, s)
+	}
+	return out, nil
+}
+
 // endRepoSession writes one session's pending end r recorded beside the store
 // in dir, which rc serves, and removes its records once the row is ended.
 // guardInfo is the guard's listing, for its age.
@@ -1823,9 +1881,9 @@ func endRepoSession(ctx context.Context, a *app.App, rc *app.RepoContext, dir st
 	}
 	var errs []error
 	if !recorded {
-		f, ok, err := readEnd[folderEndRecord](folderEndsDir(a.Store), folderEndName(gitctx.NonGitID(rec.Dir), rec.Session))
+		f, ok, err := coveringFolderEnd(folderEndsDir(a.Store), dir, rec)
 		errs = append(errs, err)
-		if !ok || !f.covers(repoID(dir)) {
+		if !ok {
 			// A guard no folder end covers waits for the conversation's next
 			// Stop until its Stop and background run are surely gone.
 			if guardInfo != nil && older(guardInfo, now) {
@@ -2020,21 +2078,41 @@ func EndRosterSessions(ctx context.Context, a *app.App, sessionID string) error 
 	}
 }
 
-// endsHoldFor returns the hold of a prune of rc's journal: whose repository a
-// record's root is, git decides now, outside the prune's transaction.
-func endsHoldFor(ctx context.Context, rc *app.RepoContext) func(c store.Conn) (bool, error) {
-	dir := repoEndsDir(storeDir(rc.Store))
-	recs, _, listErr := listEnds[repoEndRecord](dir)
+// repoEndsOf lists rc's pending end records: the worktree's records whose root
+// git says belongs to rc's repository, plus the folder they were read from and a
+// filter that knows the roots of that listing. A root the filter was not asked
+// about counts as unknown, so a record that appears later still holds a prune.
+func repoEndsOf(rc *app.RepoContext) (dir string, recs []repoEndRecord, isRepo func(root string) (same, known bool), err error) {
+	dir = repoEndsDir(storeDir(rc.Store))
+	all, _, err := listEnds[repoEndRecord](dir)
+	if err != nil {
+		return dir, nil, nil, err
+	}
 	same := map[string]bool{}
-	for _, r := range recs {
-		if _, ok := same[r.rec.Root]; !ok && r.rec.Worktree == rc.Git.Worktree {
-			same[r.rec.Root] = sameRepository(rc, r.rec.Root)
+	for _, r := range all {
+		if r.rec.Worktree != rc.Git.Worktree {
+			continue
+		}
+		v, ok := same[r.rec.Root]
+		if !ok {
+			v = sameRepository(rc, r.rec.Root)
+			same[r.rec.Root] = v
+		}
+		if v {
+			recs = append(recs, r.rec)
 		}
 	}
-	isRepo := func(root string) (bool, bool) {
+	isRepo = func(root string) (bool, bool) {
 		v, ok := same[root]
 		return v, ok
 	}
+	return dir, recs, isRepo, nil
+}
+
+// endsHoldFor returns the hold of a prune of rc's journal: whose repository a
+// record's root is, git decides now, outside the prune's transaction.
+func endsHoldFor(ctx context.Context, rc *app.RepoContext) func(c store.Conn) (bool, error) {
+	dir, _, isRepo, listErr := repoEndsOf(rc)
 	return func(c store.Conn) (bool, error) {
 		if listErr != nil {
 			return false, listErr

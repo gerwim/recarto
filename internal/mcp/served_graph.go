@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gerwim/recarto/internal/agents"
 	"github.com/gerwim/recarto/internal/app"
 	"github.com/gerwim/recarto/internal/graph"
 )
@@ -301,7 +302,6 @@ func getGraphDeltaServed(ctx context.Context, a *app.App, in GetGraphDeltaInput)
 		return GetGraphDeltaOutput{}, err
 	}
 	cap := effectiveLimit(in.Limit, graph.DefaultListLimit)
-	now := a.Clock.Now().UnixMilli()
 	sections := make([]DeltaSection, len(rs))
 	parts := make([][]graph.Delta, len(rs))
 	avail := make([]int, len(rs))
@@ -311,7 +311,7 @@ func getGraphDeltaServed(ctx context.Context, a *app.App, in GetGraphDeltaInput)
 			sections[i].Note = emptyRepoNote
 			continue
 		}
-		at, ok, err := s.rc.Graph.DeltaBaseline(ctx, s.rc.Git.Worktree, now)
+		r, ok, err := agents.LiveRange(ctx, a, s.rc, cap)
 		if err != nil {
 			return GetGraphDeltaOutput{}, fmt.Errorf("%s: %w", s.label, err)
 		}
@@ -319,11 +319,8 @@ func getGraphDeltaServed(ctx context.Context, a *app.App, in GetGraphDeltaInput)
 			sections[i].Note = noBaselineNote
 			continue
 		}
-		sections[i].BaselineAt = time.UnixMilli(at).Format(time.RFC3339)
-		parts[i], sections[i].Total, err = s.rc.Graph.DeltasSince(ctx, s.rc.Git.Worktree, at, cap)
-		if err != nil {
-			return GetGraphDeltaOutput{}, fmt.Errorf("%s: %w", s.label, err)
-		}
+		sections[i].BaselineAt = time.UnixMilli(r.Since).Format(time.RFC3339)
+		parts[i], sections[i].Total = r.Deltas, r.Total
 		avail[i] = sections[i].Total
 	}
 	shares := shareCap(avail, cap)

@@ -379,7 +379,7 @@ func TestSessionStartIndexEndsWhileTheMarksWait(t *testing.T) {
 		t.Fatal(r.err)
 	}
 	wantTier(t, r.res.Context, "map")
-	if n, err := ledger.New(conv).Get(ctx, "session:s1", blockMetric); err != nil || n != 1 {
+	if n, err := ledger.New(a.Store).Get(ctx, "session:s1", blockMetric); err != nil || n != 1 {
 		t.Errorf("block marker = %d, %v; want the mark landed after the wait", n, err)
 	}
 }

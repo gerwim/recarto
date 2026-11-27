@@ -20,12 +20,17 @@ func New(st *store.Store) *Ledger { return &Ledger{st: st} }
 // Incr atomically adds n to counters[scope, metric], inserting if absent.
 func (l *Ledger) Incr(ctx context.Context, scope, metric string, n int64) error {
 	return l.st.WriteTx(ctx, func(c store.Conn) error {
-		_, err := c.ExecContext(ctx,
-			`INSERT INTO counters(scope, metric, value) VALUES (?, ?, ?)
-			 ON CONFLICT(scope, metric) DO UPDATE SET value = value + excluded.value`,
-			scope, metric, n)
-		return err
+		return IncrIn(ctx, c, scope, metric, n)
 	})
+}
+
+// IncrIn adds n to counters[scope, metric] on c, inserting it if absent.
+func IncrIn(ctx context.Context, c store.Conn, scope, metric string, n int64) error {
+	_, err := c.ExecContext(ctx,
+		`INSERT INTO counters(scope, metric, value) VALUES (?, ?, ?)
+		 ON CONFLICT(scope, metric) DO UPDATE SET value = value + excluded.value`,
+		scope, metric, n)
+	return err
 }
 
 // Get returns the counter value, or 0 if it does not exist.

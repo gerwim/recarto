@@ -131,19 +131,28 @@ func sessionRows(t *testing.T, r *app.RepoContext, id string) []sessionRow {
 	return out
 }
 
+// appendFunc appends one empty function per name to file.
+func appendFunc(t *testing.T, file string, names ...string) {
+	t.Helper()
+	f, err := os.OpenFile(file, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range names {
+		if _, err := fmt.Fprintf(f, "\nfunc %s() {}\n", name); err != nil {
+			_ = f.Close() // the write failure is the one to report
+			t.Fatal(err)
+		}
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // editAdd appends a function to file in r's worktree and reports the edit.
 func (s *scratch) editAdd(a *app.App, file, fn string) {
 	s.t.Helper()
-	s.clk.Advance(time.Second)
-	f, err := os.OpenFile(file, os.O_APPEND|os.O_WRONLY, 0)
-	if err != nil {
-		s.t.Fatal(err)
-	}
-	if _, err := fmt.Fprintf(f, "\nfunc %s() {}\n", fn); err != nil {
-		s.t.Fatal(err)
-	}
-	_ = f.Close()
-	handle(s.t, a, Event{Kind: KindPostEdit, SessionID: "s", FilePath: file})
+	editIn(s.t, s, a, "s", file, fn)
 }
 
 // stop ends a turn of session id.
@@ -1077,5 +1086,426 @@ func TestScratchRosterRowFailureIsReported(t *testing.T) {
 	var ended bool
 	if err := a.Store.DB.QueryRow(`SELECT ended_at IS NOT NULL FROM sessions WHERE id='s'`).Scan(&ended); err != nil || !ended {
 		t.Fatalf("folder row not ended: %v", err)
+	}
+}
+
+// scratchLate is a folder app serving a repo whose index another process holds
+// at its listing.
+type scratchLate struct {
+	s       *scratch
+	a       *app.App
+	r       string
+	rr      *app.RepoContext
+	x, y    string
+	src     gatedSource
+	indexed chan error
+	cancel  context.CancelFunc
+	once    sync.Once
+}
+
+func newScratchLate(t *testing.T) *scratchLate {
+	t.Helper()
+	s := newScratch(t)
+	r := s.repo("recarto", map[string]string{
+		"pkg/x.go": "package pkg\n\nfunc XBase() {}\n",
+		"pkg/y.go": "package pkg\n\nfunc YBase() {}\n",
+	})
+	a := s.open(s.folder, r)
+	rr := rc(t, a, r)
+	index(t, rr)
+	s.clk.Advance(time.Second)
+	src := newGated(graph.FSSource{Root: r}, false)
+	indexed := make(chan error, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { indexed <- rr.Graph.ReconcileIfStale(ctx, r, src, "other-token") }()
+	await(t, "index", src.entered)
+	return &scratchLate{s: s, a: a, r: r, rr: rr,
+		x: filepath.Join(r, "pkg", "x.go"), y: filepath.Join(r, "pkg", "y.go"),
+		src: src, indexed: indexed, cancel: cancel}
+}
+
+func (f *scratchLate) release() {
+	f.s.t.Helper()
+	f.once.Do(func() {
+		close(f.src.gate)
+		if err := await(f.s.t, "index", f.indexed); err != nil {
+			f.s.t.Fatal(err)
+		}
+	})
+}
+
+func TestScratchLateIndexedEditShowsAtTheFirstStartAfterIt(t *testing.T) {
+	f := newScratchLate(t)
+	start(t, f.a, "S1", "startup")
+	editIn(t, f.s, f.a, "S1", f.x, "Extra")
+	f.s.stop(f.a, "S1")
+	start(t, f.a, "S2", "startup")
+	f.release()
+	editIn(t, f.s, f.a, "S2", f.y, "Other")
+	f.s.stop(f.a, "S2")
+	block := start(t, f.a, "S3", "startup")
+	for _, want := range []string{"Extra", "Other"} {
+		if !strings.Contains(block, want) {
+			t.Errorf("S3's block lacks %s:\n%s", want, block)
+		}
+	}
+	if got := toolRead(t, f.a, f.rr); got["Extra"] != "added" || got["Other"] != "added" {
+		t.Errorf("the tool in S3 = %v; want Extra and Other", got)
+	}
+}
+
+func TestScratchChangeIndexedWhileTheBlockIsBuiltShowsOnce(t *testing.T) {
+	f := newScratchLate(t)
+	start(t, f.a, "S1", "startup")
+	editIn(t, f.s, f.a, "S1", f.x, "Extra")
+	f.s.stop(f.a, "S1")
+	start(t, f.a, "S2", "startup")
+	editIn(t, f.s, f.a, "S2", f.y, "Other")
+	f.s.stop(f.a, "S2")
+	// S3's start reads its creation marks, then the background index records
+	// both edits before the block reads.
+	f.a.IndexIfCode = func(string) { f.release() }
+	block := start(t, f.a, "S3", "startup")
+	for _, want := range []string{"Extra", "Other"} {
+		if !strings.Contains(block, want) {
+			t.Errorf("S3's block lacks %s:\n%s", want, block)
+		}
+	}
+	if got := toolRead(t, f.a, f.rr); got["Extra"] != "added" {
+		t.Errorf("the tool in S3 = %v; want Extra", got)
+	}
+	editIn(t, f.s, f.a, "S3", f.y, "S3s")
+	f.s.stop(f.a, "S3") // its open row takes the Stop's raised mark
+	block4 := start(t, f.a, "S4", "startup")
+	if strings.Contains(block4, "Extra") || !strings.Contains(block4, "S3s") {
+		t.Errorf("S4's block = want S3s without Extra:\n%s", block4)
+	}
+	block5 := start(t, f.s.open(f.r), "S5", "startup")
+	if strings.Contains(block5, "Extra") || !strings.Contains(block5, "S3s") {
+		t.Errorf("S5's block = want S3s without Extra:\n%s", block5)
+	}
+}
+
+func TestScratchDeferredRepoRowKeepsItsMark(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		warm bool
+	}{{"warm", true}, {"Stop", false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newScratch(t)
+			r := s.goRepo("recarto")
+			a := s.open(s.folder, r)
+			rr := rc(t, a, r)
+			index(t, rr)
+			start(t, a, "S1", "startup")
+			editIn(t, s, a, "S1", filepath.Join(r, "recarto", "a.go"), "Extra")
+			s.stop(a, "S1")
+
+			release := holdWriter(t, rr.Store)
+			giveUp := sync.OnceFunc(release)
+			block := startOrGiveUp(t, a, "S2", "startup", giveUp)
+			if !strings.Contains(block, "Extra") {
+				t.Fatalf("S2's block lacks Extra:\n%s", block)
+			}
+			if rows := sessionRows(t, rr, "S2"); len(rows) != 0 {
+				t.Fatalf("S2 got a repo row while the writer was held: %+v", rows)
+			}
+			release()
+			if tc.warm {
+				if err := RecordRosterSessions(context.Background(), a, "S2"); err != nil {
+					t.Fatal(err)
+				}
+				if rows := sessionRows(t, rr, "S2"); len(rows) != 1 {
+					t.Fatalf("warm rows = %+v", rows)
+				}
+			}
+			editIn(t, s, a, "S2", filepath.Join(r, "recarto", "a.go"), "Other")
+			s.stop(a, "S2")
+			if rows := sessionRows(t, rr, "S2"); len(rows) != 1 || !rows[0].end.Valid {
+				t.Fatalf("S2's ended row = %+v", rows)
+			}
+			if rec := readRepoRecords(pendingDir(rr), "S2"); rec.mok || rec.gok {
+				t.Errorf("S2's pending end is still recorded")
+			}
+			block3 := start(t, a, "S3", "startup")
+			if strings.Contains(block3, "Extra") || !strings.Contains(block3, "Other") {
+				t.Errorf("S3's block = want Other without Extra:\n%s", block3)
+			}
+		})
+	}
+}
+
+// startS3InFolder starts S3 in the folder, either with its repo row already
+// written and the held index released during the start, or with the repo's
+// writer held so S3 has no row. Its block lists Extra and Other either way.
+func startS3InFolder(t *testing.T, f *scratchLate, row bool) {
+	t.Helper()
+	if row {
+		f.a.IndexIfCode = func(string) { f.release() }
+		block := start(t, f.a, "S3", "startup")
+		if !strings.Contains(block, "Extra") || !strings.Contains(block, "Other") {
+			t.Fatalf("S3's block lacks Extra or Other:\n%s", block)
+		}
+		if rows := sessionRows(t, f.rr, "S3"); len(rows) != 1 || rows[0].end.Valid {
+			t.Fatalf("S3's open repo row = %+v", rows)
+		}
+		return
+	}
+	release := holdWriter(t, f.rr.Store)
+	block := startOrGiveUp(t, f.a, "S3", "startup", sync.OnceFunc(release))
+	if !strings.Contains(block, "Extra") || !strings.Contains(block, "Other") {
+		t.Fatalf("S3's block lacks Extra or Other:\n%s", block)
+	}
+	if rows := sessionRows(t, f.rr, "S3"); len(rows) != 0 {
+		t.Fatalf("S3 got a repo row while the writer was held: %+v", rows)
+	}
+	release()
+}
+
+func TestScratchNextStartBeforeTheRowIsWritten(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		row  bool
+	}{{"no row", false}, {"a row with its start's mark", true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newScratchLate(t)
+			start(t, f.a, "S1", "startup")
+			editIn(t, f.s, f.a, "S1", f.x, "Extra")
+			f.s.stop(f.a, "S1")
+			start(t, f.a, "S2", "startup")
+			if !tc.row {
+				f.release()
+			}
+			editIn(t, f.s, f.a, "S2", f.y, "Other")
+			f.s.stop(f.a, "S2")
+
+			startS3InFolder(t, f, tc.row)
+
+			editIn(t, f.s, f.a, "S3", f.y, "Z")
+			release := holdWriter(t, f.rr.Store)
+			f.s.stop(f.a, "S3") // its end waits in a record
+			if rec := readRepoRecords(pendingDir(f.rr), "S3"); !rec.mok && !rec.gok {
+				t.Fatal("S3's Stop left no pending end")
+			}
+			block4 := startOrGiveUp(t, f.a, "S4", "startup", sync.OnceFunc(release))
+			if strings.Contains(block4, "Extra") || strings.Contains(block4, "Other") || !strings.Contains(block4, "Z") {
+				t.Errorf("S4's block = want Z without Extra or Other:\n%s", block4)
+			}
+			before := toolRead(t, f.a, f.rr)
+			if before["Extra"] != "" || before["Z"] != "added" {
+				t.Errorf("the tool in S4 = %v; want Z without Extra", before)
+			}
+			release()
+			if err := endPendingRepoEnds(context.Background(), f.a); err != nil {
+				t.Fatal(err)
+			}
+			if rows := sessionRows(t, f.rr, "S3"); len(rows) != 1 || !rows[0].end.Valid {
+				t.Fatalf("S3's ended row after recovery = %+v", rows)
+			}
+			if after := toolRead(t, f.a, f.rr); !mapsSame(after, before) {
+				t.Errorf("the tool changed after recovery: before %v, after %v", before, after)
+			}
+		})
+	}
+}
+
+func TestScratchOlderConversationStartedAgain(t *testing.T) {
+	f := newScratchLate(t)
+	start(t, f.a, "S1", "startup")
+	editIn(t, f.s, f.a, "S1", f.x, "Extra")
+	f.s.stop(f.a, "S1")
+	start(t, f.a, "S2", "startup")
+	editIn(t, f.s, f.a, "S2", f.y, "Other")
+	f.s.stop(f.a, "S2")
+	start(t, f.a, "S3", "startup")
+	f.s.stop(f.a, "S3")
+	f.release()
+
+	block := start(t, f.a, "S2", "compact")
+	for _, want := range []string{"Extra", "Other"} {
+		if !strings.Contains(block, want) {
+			t.Errorf("S2's compact block lacks %s:\n%s", want, block)
+		}
+	}
+	want := []string{"Extra", "Other"}
+	if got := sortedNames(toolRead(t, f.a, f.rr)); !slices.Equal(got, want) {
+		t.Errorf("the tool after S2's block = %v; want %v", got, want)
+	}
+	if err := RecordRosterSessions(context.Background(), f.a, "S2"); err != nil {
+		t.Fatal(err)
+	}
+	if got := sortedNames(toolRead(t, f.a, f.rr)); !slices.Equal(got, want) {
+		t.Errorf("the tool after warm = %v; want %v", got, want)
+	}
+}
+
+func sortedNames(m map[string]string) []string {
+	out := make([]string, 0, len(m))
+	for n := range m {
+		out = append(out, n)
+	}
+	slices.Sort(out)
+	return out
+}
+
+func mapsSame(a, b map[string]string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		if b[k] != v {
+			return false
+		}
+	}
+	return true
+}
+
+func TestScratchBlockAndToolCountTheSameFolderConversations(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		row  bool
+	}{{"row holds its start's mark", true}, {"no repo row", false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newScratchLate(t)
+			start(t, f.a, "S1", "startup")
+			editIn(t, f.s, f.a, "S1", f.x, "Extra")
+			f.s.stop(f.a, "S1")
+			start(t, f.a, "S2", "startup")
+			if !tc.row {
+				f.release()
+			}
+			editIn(t, f.s, f.a, "S2", f.y, "Other")
+			f.s.stop(f.a, "S2")
+			startS3InFolder(t, f, tc.row)
+			editIn(t, f.s, f.a, "S3", f.y, "S3Edit")
+			start(t, f.s.open(f.r), "S4", "startup")
+
+			block := start(t, f.a, "S2", "compact")
+			sec := recentSection(block)
+			if !strings.Contains(sec, "S3Edit") || strings.Contains(sec, "Extra") ||
+				strings.Contains(sec, "Other") || !strings.Contains(sec, "lists all 1)") {
+				t.Fatalf("S2's compact section = %q; want S3Edit only, all 1", sec)
+			}
+			if got := sortedNames(toolRead(t, f.a, f.rr)); !slices.Equal(got, []string{"S3Edit"}) {
+				t.Errorf("the tool right after = %v; want [S3Edit]", got)
+			}
+		})
+	}
+}
+
+func TestScratchRangeHoldsWhenARecordOverAnEndedRowIsDropped(t *testing.T) {
+	f := newScratchLate(t)
+	start(t, f.a, "S1", "startup")
+	editIn(t, f.s, f.a, "S1", f.x, "Extra")
+	f.s.stop(f.a, "S1")
+	start(t, f.a, "S2", "startup")
+	editIn(t, f.s, f.a, "S2", f.y, "Other")
+	f.s.stop(f.a, "S2")
+	f.a.IndexIfCode = func(string) { f.release() }
+	block := start(t, f.a, "S3", "startup")
+	if !strings.Contains(block, "Extra") || !strings.Contains(block, "Other") {
+		t.Fatalf("S3's block lacks Extra or Other:\n%s", block)
+	}
+	editIn(t, f.s, f.a, "S3", f.y, "S3Edit")
+
+	// S3's folder Stop leaves its end in a record while the repo's writer is busy.
+	release := holdWriter(t, f.rr.Store)
+	f.s.stop(f.a, "S3")
+	if rec := readRepoRecords(pendingDir(f.rr), "S3"); !rec.mok && !rec.gok {
+		t.Fatal("S3's folder Stop left no pending end")
+	}
+	release()
+
+	// A Stop run inside the repo ends the row directly, with its creation mark.
+	in := f.s.open(f.r)
+	f.s.stop(in, "S3")
+	if rows := sessionRows(t, f.rr, "S3"); len(rows) != 1 || !rows[0].end.Valid {
+		t.Fatalf("S3's ended row = %+v", rows)
+	}
+	if rec := readRepoRecords(pendingDir(f.rr), "S3"); !rec.mok && !rec.gok {
+		t.Fatal("the record is gone before recovery")
+	}
+	now := f.s.clk.Now().UnixMilli()
+	if _, err := f.rr.Store.DB.Exec(
+		`INSERT INTO sessions(id, agent, worktree, started_at) VALUES ('S4','test',?,?)`, f.r, now); err != nil {
+		t.Fatal(err)
+	}
+	folderRead := func() []string { return sortedNames(toolRead(t, f.a, f.rr)) }
+	repoRead := func() []string { return sortedNames(toolRead(t, in, rc(t, in, f.r))) }
+	if got := folderRead(); !slices.Equal(got, []string{"S3Edit"}) {
+		t.Errorf("the folder reads %v; want [S3Edit]", got)
+	}
+	if got := repoRead(); !slices.Equal(got, []string{"Extra", "Other", "S3Edit"}) {
+		t.Errorf("the repo reads %v; want [Extra Other S3Edit]", got)
+	}
+	if err := endPendingRepoEnds(context.Background(), f.a); err != nil {
+		t.Fatal(err)
+	}
+	if rec := readRepoRecords(pendingDir(f.rr), "S3"); rec.mok || rec.gok {
+		t.Error("recovery did not drop the record")
+	}
+	if got, want := folderRead(), []string{"S3Edit"}; !slices.Equal(got, want) {
+		t.Errorf("the folder reads %v after recovery; want %v", got, want)
+	}
+	if got, want := repoRead(), []string{"Extra", "Other", "S3Edit"}; !slices.Equal(got, want) {
+		t.Errorf("the repo reads %v after recovery; want %v", got, want)
+	}
+}
+
+func TestScratchPlainGuardTakesItsFolderEnd(t *testing.T) {
+	s := newScratch(t)
+	r := s.goRepo("recarto")
+	a := s.open(s.folder, r)
+	rr := rc(t, a, r)
+	index(t, rr)
+	start(t, a, "S1", "startup")
+	s.stop(a, "S1")
+	start(t, a, "S2", "startup")
+	editIn(t, s, a, "S2", filepath.Join(r, "recarto", "a.go"), "Other")
+	s.stop(a, "S2")
+
+	release := holdWriter(t, rr.Store)
+	block := startOrGiveUp(t, a, "S3", "startup", sync.OnceFunc(release))
+	if !strings.Contains(block, "Other") {
+		t.Fatalf("S3's block lacks Other:\n%s", block)
+	}
+	release()
+	publishDeadEnd(t, s, a, r, "S3")
+
+	// W is journaled after F's time and belongs to no session.
+	s.clk.Advance(time.Second)
+	appendFunc(t, filepath.Join(r, "recarto", "a.go"), "W")
+	if err := rr.Graph.Reconcile(context.Background(), r, graph.FSSource{Root: r}); err != nil {
+		t.Fatal(err)
+	}
+	s.clk.Advance(time.Second)
+	mark, err := graph.JournalMark(context.Background(), rr.Store.DB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	now := s.clk.Now().UnixMilli()
+	if _, err := rr.Store.DB.Exec(
+		`INSERT INTO sessions(id, agent, worktree, started_at, delta_mark) VALUES ('S4','test',?,?,?)`,
+		r, now, mark); err != nil {
+		t.Fatal(err)
+	}
+	rng, ok, err := LiveRange(ctx, a, rr, 0)
+	if err != nil || !ok {
+		t.Fatalf("LiveRange = %v, %v", ok, err)
+	}
+	var s2 int64
+	if err := rr.Store.DB.QueryRow(`SELECT started_at FROM sessions WHERE id='S2'`).Scan(&s2); err != nil {
+		t.Fatal(err)
+	}
+	if rng.Since != s2 {
+		t.Errorf("baseline = %d; want S2's start %d", rng.Since, s2)
+	}
+	got := map[string]bool{}
+	for _, d := range rng.Deltas {
+		got[d.QualifiedName] = true
+	}
+	if !got["Other"] || !got["W"] {
+		t.Errorf("the range = %v; want Other and W", got)
 	}
 }

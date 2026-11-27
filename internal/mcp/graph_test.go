@@ -5,9 +5,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/gerwim/recarto/internal/agents"
+	"github.com/gerwim/recarto/internal/app"
+	"github.com/gerwim/recarto/internal/clock"
 	"github.com/gerwim/recarto/internal/graph"
 )
 
@@ -788,5 +793,183 @@ func TestSearchContentHandlerOffset(t *testing.T) {
 	}
 	if out.Count != 1 || out.Matches[0].Line != 3 {
 		t.Fatalf("got %+v, want exactly the second match (line 3)", out.Matches)
+	}
+}
+
+func TestGetGraphDeltaListsALateChange(t *testing.T) {
+	seed := func(t *testing.T, rc *app.RepoContext, now int64) (priorStart, s2Start int64) {
+		t.Helper()
+		ctx := context.Background()
+		priorStart, priorEnd := now-10_000, now-8_000
+		s2Start, s2End := now-7_000, now-6_000
+		current := now - 1_000
+		if _, err := rc.Store.DB.ExecContext(ctx,
+			`INSERT INTO sessions(id, agent, branch, worktree, started_at, ended_at, delta_mark) VALUES
+			 ('prior','claude-code','main',?,?,?,0),
+			 ('S2','claude-code','main',?,?,?,5),
+			 ('current','claude-code','main',?,?,NULL,7)`,
+			rc.Git.Worktree, priorStart, priorEnd,
+			rc.Git.Worktree, s2Start, s2End,
+			rc.Git.Worktree, current); err != nil {
+			t.Fatal(err)
+		}
+		rows := []struct {
+			id, name string
+			at, seq  int64
+		}{
+			{"x", "X", priorStart + 100, 6}, // written after S2's mark 5: late
+			{"y", "Y", s2Start + 100, 7},
+			{"z", "Z", priorStart + 200, 4}, // covered by S2's mark 5
+			{"w", "W", priorStart + 300, 8}, // written after current's mark: late against S2's
+		}
+		for _, r := range rows {
+			if _, err := rc.Store.DB.ExecContext(ctx,
+				`INSERT INTO graph_deltas(id, worktree, path, qualified_name, kind, change, at, seq)
+				 VALUES (?, ?, 'a.go', ?, 'function', 'added', ?, ?)`,
+				r.id, rc.Git.Worktree, r.name, r.at, r.seq); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return priorStart, s2Start
+	}
+	names := func(out GetGraphDeltaOutput) []string {
+		var got []string
+		for _, d := range out.Deltas {
+			got = append(got, d.QualifiedName)
+		}
+		slices.Sort(got)
+		return got
+	}
+
+	t.Run("one repo", func(t *testing.T) {
+		a := newTestApp(t, "main")
+		wt := t.TempDir()
+		a.Git.Worktree = wt
+		now := a.Clock.Now().UnixMilli()
+		_, s2Start := seed(t, a.AllRepos()[0], now)
+		out, err := getGraphDelta(context.Background(), a, GetGraphDeltaInput{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := names(out), []string{"W", "X", "Y"}; !slices.Equal(got, want) {
+			t.Errorf("deltas = %v; want %v", got, want)
+		}
+		if want := time.UnixMilli(s2Start).Format(time.RFC3339); out.BaselineAt != want {
+			t.Errorf("BaselineAt = %q; want S2's start %q", out.BaselineAt, want)
+		}
+	})
+
+	t.Run("served", func(t *testing.T) {
+		_, recarto, _, a := servedGraphFixture(t, true)
+		var rr *app.RepoContext
+		for _, r := range a.Repos {
+			if r.Git.Worktree == recarto {
+				rr = r
+			}
+		}
+		if rr == nil {
+			t.Fatal("recarto is not served")
+		}
+		now := a.Clock.Now().UnixMilli()
+		_, s2Start := seed(t, rr, now)
+		out, err := getGraphDelta(context.Background(), a, GetGraphDeltaInput{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := names(out), []string{"W", "X", "Y"}; !slices.Equal(got, want) {
+			t.Errorf("deltas = %v; want %v", got, want)
+		}
+		var baseline string
+		for _, s := range out.Sections {
+			if strings.Contains(s.Repo, "recarto") {
+				baseline = s.BaselineAt
+			}
+		}
+		if want := time.UnixMilli(s2Start).Format(time.RFC3339); baseline != want {
+			t.Errorf("recarto's BaselineAt = %q; want S2's start %q", baseline, want)
+		}
+	})
+}
+
+func TestGetGraphDeltaCountsTheFolderConversation(t *testing.T) {
+	for _, several := range []bool{false, true} {
+		name := "one served repo"
+		if several {
+			name = "two served repos"
+		}
+		t.Run(name, func(t *testing.T) {
+			folder, recarto, second := routeRepos(t)
+			clk := clock.NewFake(time.UnixMilli(1_700_000_000_000))
+			repos := []string{recarto}
+			if several {
+				repos = append(repos, second)
+			}
+			a := codelessApp(t, folder, clk, repos...)
+			for _, r := range a.Repos {
+				indexRepo(t, r)
+			}
+			var rr *app.RepoContext
+			for _, r := range a.Repos {
+				if r.Git.Worktree == recarto {
+					rr = r
+				}
+			}
+			ctx := context.Background()
+			if _, err := agents.Handle(ctx, a, agents.Event{Kind: agents.KindSessionStart,
+				Agent: "claude-code", SessionID: "S1"}); err != nil {
+				t.Fatal(err)
+			}
+			p := filepath.Join(recarto, "internal", "one", "agent.go")
+			b, err := os.ReadFile(p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(p, append(b, []byte("\nfunc LateProbe() {}\n")...), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := rr.Graph.Reconcile(ctx, recarto, graph.FSSource{Root: recarto}); err != nil {
+				t.Fatal(err)
+			}
+			clk.Advance(time.Second)
+			if _, err := agents.Handle(ctx, a, agents.Event{Kind: agents.KindSessionStart,
+				Agent: "claude-code", SessionID: "S2"}); err != nil {
+				t.Fatal(err)
+			}
+			var s1 int64
+			if err := rr.Store.DB.QueryRow(`SELECT started_at FROM sessions WHERE id='S1'`).Scan(&s1); err != nil {
+				t.Fatal(err)
+			}
+			// A busy writer has not written S2's row yet.
+			if _, err := rr.Store.DB.Exec(`DELETE FROM sessions WHERE id='S2'`); err != nil {
+				t.Fatal(err)
+			}
+			out, err := getGraphDelta(ctx, a, GetGraphDeltaInput{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			found := false
+			for _, d := range out.Deltas {
+				if d.QualifiedName == "LateProbe" {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatalf("the tool does not list S1's change: %+v", out)
+			}
+			want := time.UnixMilli(s1).Format(time.RFC3339)
+			if several {
+				var baseline string
+				for _, s := range out.Sections {
+					if strings.Contains(s.Repo, "recarto") {
+						baseline = s.BaselineAt
+					}
+				}
+				if baseline != want {
+					t.Errorf("recarto's BaselineAt = %q; want S1's start %q", baseline, want)
+				}
+			} else if out.BaselineAt != want {
+				t.Errorf("BaselineAt = %q; want S1's start %q", out.BaselineAt, want)
+			}
+		})
 	}
 }

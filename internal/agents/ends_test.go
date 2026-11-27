@@ -725,18 +725,12 @@ type deferredEndReport struct {
 	baseline    int64
 }
 
-// editIn appends function name to file and reports the edit in session.
+// editIn advances the clock a second, appends an empty function name to file
+// and reports the edit in session.
 func editIn(t *testing.T, s *scratch, a *app.App, session, file, name string) {
 	t.Helper()
 	s.clk.Advance(time.Second)
-	f, err := os.OpenFile(file, os.O_APPEND|os.O_WRONLY, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := fmt.Fprintf(f, "\nfunc %s() {}\n", name); err != nil {
-		t.Fatal(err)
-	}
-	_ = f.Close()
+	appendFunc(t, file, name)
 	res, err := Handle(context.Background(), a, Event{Kind: KindPostEdit, SessionID: session, FilePath: file})
 	if err != nil || res.Failure != nil {
 		t.Fatalf("edit %s: result %+v, err %v", name, res, err)
@@ -835,7 +829,7 @@ func TestRosterKeepsRepoIdentity(t *testing.T) {
 	r := s.goRepo("repo")
 	a := s.open(s.folder, r)
 	ctx := context.Background()
-	want := []rosterRepo{{"/a:b/c", "id1", ""}, {"/plain", "id2", "abc123"}}
+	want := []rosterRepo{{wt: "/a:b/c", id: "id1"}, {wt: "/plain", id: "id2", root: "abc123"}}
 	if _, err := a.Store.DB.Exec(`INSERT INTO sessions(id, agent, worktree, started_at) VALUES ('k', 'test', ?, 1)`, s.folder); err != nil {
 		t.Fatal(err)
 	}
@@ -858,8 +852,8 @@ func TestRosterKeepsRepoIdentity(t *testing.T) {
 	}
 	gitIn(t, unborn, "init", "-q")
 	roster := rosterOf([]*app.RepoContext{rc(t, a, r), {Git: gitctx.Context{Worktree: unborn, RepoID: "u"}}})
-	if roster[0] != (rosterRepo{r, rc(t, a, r).Git.RepoID, rc(t, a, r).Git.RootCommit}) || roster[0].root == "" ||
-		roster[1] != (rosterRepo{unborn, "u", ""}) {
+	if roster[0] != (rosterRepo{wt: r, id: rc(t, a, r).Git.RepoID, root: rc(t, a, r).Git.RootCommit}) || roster[0].root == "" ||
+		roster[1] != (rosterRepo{wt: unborn, id: "u"}) {
 		t.Fatalf("roster of a repo and an unborn one = %+v", roster)
 	}
 }

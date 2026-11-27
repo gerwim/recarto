@@ -11,11 +11,12 @@ import (
 
 	"github.com/gerwim/recarto/internal/agents"
 	"github.com/gerwim/recarto/internal/app"
+	"github.com/gerwim/recarto/internal/clock"
 	"github.com/gerwim/recarto/internal/graph"
 	"github.com/gerwim/recarto/internal/memory"
 )
 
-func codelessApp(t *testing.T, folder string, repos ...string) *app.App {
+func codelessApp(t *testing.T, folder string, clk clock.Clock, repos ...string) *app.App {
 	t.Helper()
 	clearRecartoEnv(t)
 	t.Setenv("RECARTO_CACHE_DIR", t.TempDir())
@@ -24,7 +25,7 @@ func codelessApp(t *testing.T, folder string, repos ...string) *app.App {
 	if err := os.MkdirAll(folder, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	a, err := app.Open(app.Config{CWD: folder, DecideCodeless: true})
+	a, err := app.Open(app.Config{CWD: folder, DecideCodeless: true, Clock: clk})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -147,7 +148,7 @@ func fileRefs(rec *memory.Record) []string {
 
 func TestRouteWriteTwoIndexedRepos(t *testing.T) {
 	folder, recarto, second := routeRepos(t)
-	a := codelessApp(t, folder, recarto, second)
+	a := codelessApp(t, folder, nil, recarto, second)
 	indexRepo(t, a.Repos[0])
 	indexRepo(t, a.Repos[1])
 
@@ -237,7 +238,7 @@ func TestRouteWriteTwoIndexedRepos(t *testing.T) {
 func TestRouteWriteMatchesSymbolsLiterally(t *testing.T) {
 	folder, recarto, second := routeRepos(t)
 	commitRouteFile(t, second, "Methods.cs", "namespace Ns { class T { void DoXRun() {} void run() {} } }")
-	a := codelessApp(t, folder, recarto, second)
+	a := codelessApp(t, folder, nil, recarto, second)
 	indexRepo(t, a.Repos[0])
 	indexRepo(t, a.Repos[1])
 
@@ -261,7 +262,7 @@ func TestRouteWriteMatchesSymbolsLiterally(t *testing.T) {
 
 func TestRouteWriteSymlinksAndAliases(t *testing.T) {
 	folder, recarto, second := routeRepos(t)
-	a := codelessApp(t, folder, recarto, second)
+	a := codelessApp(t, folder, nil, recarto, second)
 	indexRepo(t, a.Repos[0])
 	indexRepo(t, a.Repos[1])
 	link := filepath.Join(recarto, "link-to-second.go")
@@ -298,7 +299,7 @@ func TestRouteWriteSymlinksAndAliases(t *testing.T) {
 
 func TestRouteWriteUnfinishedIndexBlocksOnlySymbols(t *testing.T) {
 	folder, recarto, second := routeRepos(t)
-	a := codelessApp(t, folder, recarto, second)
+	a := codelessApp(t, folder, nil, recarto, second)
 	indexRepo(t, a.Repos[0])
 
 	for i, tc := range []struct {
@@ -363,7 +364,7 @@ func TestRouteWriteColdAndDeletedCode(t *testing.T) {
 	})
 	gitRepoWith(t, docs, map[string]string{"README.md": "docs only"})
 	gitRepoWith(t, gone, map[string]string{"g.go": "package gone\nfunc GoneFunc() {}\n"})
-	a := codelessApp(t, folder, recarto, docs, gone)
+	a := codelessApp(t, folder, nil, recarto, docs, gone)
 	indexRepo(t, a.Repos[0])
 	indexRepo(t, a.Repos[2])
 	if err := os.Remove(filepath.Join(gone, "g.go")); err != nil {
@@ -389,7 +390,7 @@ func TestRouteWriteThreeReposAndNestedOwnership(t *testing.T) {
 	gitRepoWith(t, recarto, map[string]string{"README.md": "recarto", "go.mod": "module recarto\n", "internal/warm.go": "package internal\nfunc Warm() {}\n"})
 	gitRepoWith(t, second, map[string]string{"README.md": "second"})
 	gitRepoWith(t, third, map[string]string{"go.mod": "module third\n"})
-	a := codelessApp(t, folder, recarto, second, third)
+	a := codelessApp(t, folder, nil, recarto, second, third)
 	indexRepo(t, a.Repos[0])
 	for i, files := range [][]string{{"README.md", "go.mod"}, {"go.mod"}} {
 		out, err := recordRouted(t, a, 450+i, files, nil)
@@ -408,7 +409,7 @@ func TestRouteWriteThreeReposAndNestedOwnership(t *testing.T) {
 	}
 	gitRepoWith(t, inner, map[string]string{"x.go": "package inner\nfunc X() {}\n"})
 	_ = a.Close()
-	a = codelessApp(t, folder, recarto, second, third, inner)
+	a = codelessApp(t, folder, nil, recarto, second, third, inner)
 	indexRepo(t, a.Repos[0])
 	indexRepo(t, a.Repos[3])
 	innerRC := repoAt(a, inner)
@@ -449,7 +450,7 @@ func TestRouteWriteThreeReposAndNestedOwnership(t *testing.T) {
 
 func TestRouteWriteSupersedesOnlyWhereTheOldMemoryLives(t *testing.T) {
 	folder, recarto, second := routeRepos(t)
-	a := codelessApp(t, folder, recarto, second)
+	a := codelessApp(t, folder, nil, recarto, second)
 	indexRepo(t, a.Repos[0])
 	indexRepo(t, a.Repos[1])
 	oldID := recordRawLearning(t, a.Repos[0].Engine, "old fact about the route transaction and write ownership")
@@ -497,7 +498,7 @@ func TestRouteWriteSupersedesOnlyWhereTheOldMemoryLives(t *testing.T) {
 
 func TestExplicitRepoWriteDoesNotReplaceMemoryInAnotherStore(t *testing.T) {
 	folder, recarto, second := routeRepos(t)
-	a := codelessApp(t, folder, recarto, second)
+	a := codelessApp(t, folder, nil, recarto, second)
 	explicitID := recordRawLearning(t, a.Repos[0].Engine, "old fact for an explicit repo write")
 	out, err := recordMemory(context.Background(), a, RecordMemoryInput{Kind: "learning", Body: routeBody(507), Repo: "second", SupersedesID: explicitID})
 	if err != nil || out.Repo != "" {
@@ -517,7 +518,7 @@ func TestExplicitRepoWriteDoesNotReplaceMemoryInAnotherStore(t *testing.T) {
 
 func TestRouteWriteReplacementRechecksTheSelectedStore(t *testing.T) {
 	folder, recarto, second := routeRepos(t)
-	a := codelessApp(t, folder, recarto, second)
+	a := codelessApp(t, folder, nil, recarto, second)
 	indexRepo(t, a.Repos[0])
 	indexRepo(t, a.Repos[1])
 	ctx := context.Background()
@@ -601,7 +602,7 @@ func TestRouteWriteReplacementAcrossClones(t *testing.T) {
 	app2 := filepath.Join(base, "app-2")
 	gitRepoWith(t, app1, map[string]string{"README.md": "shared repo"})
 	gitClone(t, app1, app2)
-	a := codelessApp(t, folder, app1, app2)
+	a := codelessApp(t, folder, nil, app1, app2)
 	oldID := recordRawLearning(t, a.Repos[0].Engine, "memory shared by two local stores")
 	old := getRawRecord(t, a.Repos[0].Engine, oldID)
 	if _, _, err := a.Repos[1].Engine.SyncApply(context.Background(), memory.ToWireRecord(old)); err != nil {
@@ -642,7 +643,7 @@ func TestRepoSelectorsNameCollidingReposInReplies(t *testing.T) {
 	app1, app2 := filepath.Join(base, "a", "app"), filepath.Join(base, "b", "app")
 	gitRepoWith(t, app1, map[string]string{"README.md": "first app"})
 	gitRepoWith(t, app2, map[string]string{"README.md": "second app"})
-	a := codelessApp(t, folder, app1, app2)
+	a := codelessApp(t, folder, nil, app1, app2)
 	_, err := recordRouted(t, a, 540, []string{"README.md"}, nil)
 	if err == nil || !strings.Contains(err.Error(), app1) || !strings.Contains(err.Error(), app2) || strings.Contains(err.Error(), `"app"`) {
 		t.Fatalf("same-name refusal = %v", err)
@@ -682,7 +683,7 @@ func TestCodeLessFolderNameCollisionAndRepoErrors(t *testing.T) {
 	recarto, second := filepath.Join(base, "recarto"), filepath.Join(base, "repos", "second")
 	gitRepoWith(t, recarto, map[string]string{"internal/store/filelock.go": "package store\nfunc TryLockFile() {}\n"})
 	gitRepoWith(t, second, map[string]string{"store/filelock.go": "package store\nfunc TryLockFile() {}\n"})
-	a := codelessApp(t, folder, recarto, second)
+	a := codelessApp(t, folder, nil, recarto, second)
 	indexRepo(t, a.Repos[0])
 	indexRepo(t, a.Repos[1])
 
@@ -722,7 +723,7 @@ func TestCodeLessFolderNameCollisionAndRepoErrors(t *testing.T) {
 
 func TestCodeLessErrorsOmitFolderAndNoServedRepoKeepsFolderWrites(t *testing.T) {
 	folder, recarto, second := routeRepos(t)
-	a := codelessApp(t, folder, recarto, second)
+	a := codelessApp(t, folder, nil, recarto, second)
 	_, err := recordMemory(context.Background(), a, RecordMemoryInput{Kind: "learning", Body: routeBody(560), Repo: "nosuch"})
 	if err == nil || !strings.HasSuffix(err.Error(), "serving: recarto, second") || strings.Contains(err.Error(), folder) {
 		t.Fatalf("unknown repo response = %v", err)
@@ -762,7 +763,7 @@ func TestCodeLessErrorsOmitFolderAndNoServedRepoKeepsFolderWrites(t *testing.T) 
 
 func TestCodeLessWorkspaceAndExplicitRepoWritesStayExplicit(t *testing.T) {
 	folder, recarto, second := routeRepos(t)
-	a := codelessApp(t, folder, recarto, second)
+	a := codelessApp(t, folder, nil, recarto, second)
 	workspaceOut, err := recordMemory(context.Background(), a, RecordMemoryInput{Kind: "learning", Body: routeBody(565), Scope: scopeWorkspace})
 	if err != nil || workspaceOut.Repo != "" || getRawRecord(t, a.Workspace.Engine, workspaceOut.ID) == nil {
 		t.Fatalf("workspace write = %+v, %v", workspaceOut, err)
@@ -778,7 +779,7 @@ func TestCodeLessWorkspaceAndExplicitRepoWritesStayExplicit(t *testing.T) {
 
 func TestCodeLessWriteRoutesOneServedRepo(t *testing.T) {
 	folder, recarto, _ := routeRepos(t)
-	a := codelessApp(t, folder, recarto)
+	a := codelessApp(t, folder, nil, recarto)
 	out, err := recordRouted(t, a, 568, nil, nil)
 	if err != nil || out.Repo != "recarto" || assertOnlyStored(t, a, out.ID, a.Repos[0]) == nil {
 		t.Fatalf("one-repo write = %+v, %v", out, err)
@@ -792,7 +793,7 @@ func TestCodeLessWriteRoutesOneServedRepo(t *testing.T) {
 
 func TestCodeLessOneServedRepoResolvesFileAnchors(t *testing.T) {
 	folder, recarto, second := routeRepos(t)
-	a := codelessApp(t, folder, recarto)
+	a := codelessApp(t, folder, nil, recarto)
 	if err := os.Symlink(recarto, filepath.Join(folder, "link")); err != nil {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
@@ -1074,7 +1075,7 @@ func TestUnselectableRepoIsNamedButNeverOffered(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(base, "ReCaRtO")); err == nil {
 		t.Skip("case-insensitive file system")
 	}
-	a := codelessApp(t, folder, first, second)
+	a := codelessApp(t, folder, nil, first, second)
 	if _, ok := a.Selector(a.Repos[1]); ok {
 		t.Fatal("later case-colliding repo unexpectedly has a selector")
 	}
@@ -1152,7 +1153,7 @@ func commitRouteFile(t *testing.T, repo, path, src string) {
 func TestRouteWriteUsesIndexAsItStandsDuringRefresh(t *testing.T) {
 	t.Run("refreshed file has no symbol", func(t *testing.T) {
 		folder, recarto, second := routeRepos(t)
-		a := codelessApp(t, folder, recarto, second)
+		a := codelessApp(t, folder, nil, recarto, second)
 		indexRepo(t, a.Repos[0])
 		indexRepo(t, a.Repos[1])
 		appendRouteCode(t, second, "store/filelock.go", "\nfunc AddedDuringRefresh() {}\n")
@@ -1166,7 +1167,7 @@ func TestRouteWriteUsesIndexAsItStandsDuringRefresh(t *testing.T) {
 	t.Run("untouched file still has symbol", func(t *testing.T) {
 		folder, recarto, second := routeRepos(t)
 		commitRouteFile(t, second, "warm.go", "package second\nfunc Warm() {}\n")
-		a := codelessApp(t, folder, recarto, second)
+		a := codelessApp(t, folder, nil, recarto, second)
 		indexRepo(t, a.Repos[0])
 		indexRepo(t, a.Repos[1])
 		appendRouteCode(t, second, "store/filelock.go", "\nfunc AddedDuringRefresh() {}\n")

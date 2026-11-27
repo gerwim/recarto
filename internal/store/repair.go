@@ -121,7 +121,7 @@ var ErrRepairContended = errors.New("store: a repair of this store is already in
 // The FTS vocabulary view is likewise recreated from memories_fts.
 //
 // graph_deltas is precious despite its name: it is a historical journal of
-// symbol-level index changes read by graph.Engine.DeltaBaseline/DeltasSince
+// symbol-level index changes read by graph.Engine.RecentRange/DeltasSince
 // alongside sessions, NOT rebuildable graph state (migration v19 introduced it
 // specifically outside the wipe set).
 //
