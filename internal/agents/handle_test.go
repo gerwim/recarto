@@ -2,9 +2,11 @@ package agents
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -1042,5 +1044,343 @@ func TestSearchHintShowsUntitledBugBody(t *testing.T) {
 	got := grepHint(t, a, "s", "handleAugment")
 	if !strings.Contains(got, "\n- ⚠ Hint drops the last line.") || strings.Contains(got, "(untitled)") {
 		t.Errorf("untitled bug hint does not show its body:\n%s", got)
+	}
+}
+
+// lateIndex holds another process's index of a worktree, so a post-edit there
+// is deferred to it, and drives sessions on a fake clock.
+type lateIndex struct {
+	t       *testing.T
+	a       *app.App
+	ctx     context.Context
+	wt      string
+	clk     *clock.Fake
+	src     gatedSource
+	indexed chan error
+	cancel  context.CancelFunc
+}
+
+// newLateIndex indexes pkg/x.go and pkg/y.go, then starts an index another
+// process holds at its listing.
+func newLateIndex(t *testing.T) *lateIndex {
+	t.Helper()
+	return newLateIndexFiles(t, map[string]string{
+		"pkg/x.go": "package pkg\n\nfunc XBase() {}\n",
+		"pkg/y.go": "package pkg\n\nfunc YBase() {}\n",
+	})
+}
+
+// newLateIndexFiles indexes files, then starts an index another process holds
+// at its listing.
+func newLateIndexFiles(t *testing.T, files map[string]string) *lateIndex {
+	t.Helper()
+	a := newTestApp(t, "main")
+	wt := t.TempDir()
+	a.Git.Worktree = wt
+	for rel, src := range files {
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(wt, rel)), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(wt, rel), []byte(src), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	finishIndex(t, a, wt)
+	clk := a.Clock.(*clock.Fake)
+	clk.Advance(time.Second)
+	src := newGated(graph.FSSource{Root: wt}, false)
+	indexed := make(chan error, 1)
+	ctx := context.Background()
+	indexCtx, cancel := context.WithCancel(ctx)
+	go func() { indexed <- a.Graph.ReconcileIfStale(indexCtx, wt, src, "other-token") }()
+	await(t, "index", src.entered)
+	return &lateIndex{t: t, a: a, ctx: ctx, wt: wt, clk: clk, src: src, indexed: indexed, cancel: cancel}
+}
+
+// release lets the held index run and awaits it.
+func (f *lateIndex) release() {
+	f.t.Helper()
+	close(f.src.gate)
+	if err := await(f.t, "index", f.indexed); err != nil {
+		f.t.Fatal(err)
+	}
+}
+
+func (f *lateIndex) hook(kind EventKind, session, file, source string) Result {
+	f.t.Helper()
+	res, err := Handle(f.ctx, f.a, Event{Kind: kind, SessionID: session, Agent: "claude-code", FilePath: file, Source: source})
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	f.clk.Advance(time.Second)
+	return res
+}
+
+// edit appends functions to rel and reports the edit in session.
+func (f *lateIndex) edit(session, rel string, fns ...string) {
+	f.t.Helper()
+	p := filepath.Join(f.wt, rel)
+	b, err := os.ReadFile(p)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	for _, fn := range fns {
+		b = append(b, []byte("\nfunc "+fn+"() {}\n")...)
+	}
+	if err := os.WriteFile(p, b, 0o644); err != nil {
+		f.t.Fatal(err)
+	}
+	f.hook(KindPostEdit, session, p, "")
+}
+
+func (f *lateIndex) rc() *app.RepoContext { return f.a.AllRepos()[0] }
+
+// toolRead is the MCP tool's own range code: LiveRange + DeltasIn.
+func toolRead(t *testing.T, a *app.App, rc *app.RepoContext) map[string]string {
+	t.Helper()
+	ctx := context.Background()
+	r, ok, err := LiveRange(ctx, a, rc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := map[string]string{}
+	if !ok {
+		return out
+	}
+	ds, _, err := rc.Graph.DeltasIn(ctx, rc.Git.Worktree, r, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range ds {
+		out[d.QualifiedName] = d.Change
+	}
+	return out
+}
+
+func names(m map[string]string) []string {
+	out := make([]string, 0, len(m))
+	for n := range m {
+		out = append(out, n)
+	}
+	slices.Sort(out)
+	return out
+}
+
+// lateSetup runs S1's deferred edit of x.go (Extra) and S2's start while the
+// index is held.
+func lateSetup(t *testing.T) *lateIndex {
+	t.Helper()
+	f := newLateIndex(t)
+	f.hook(KindSessionStart, "s1", "", "")
+	f.edit("s1", "pkg/x.go", "Extra")
+	f.hook(KindStop, "s1", "", "")
+	f.hook(KindSessionStart, "s2", "", "")
+	return f
+}
+
+func TestLateIndexedEditShowsAtTheNextStart(t *testing.T) {
+	t.Run("S2 edits", func(t *testing.T) {
+		f := lateSetup(t)
+		f.release()
+		f.edit("s2", "pkg/y.go", "Other")
+		f.hook(KindStop, "s2", "", "")
+		block := f.hook(KindSessionStart, "s3", "", "").Context
+		for _, want := range []string{"Extra", "Other"} {
+			if !strings.Contains(block, want) {
+				t.Errorf("S3's block lacks %s:\n%s", want, block)
+			}
+		}
+		if got, want := names(toolRead(t, f.a, f.rc())), []string{"Extra", "Other"}; !slices.Equal(got, want) {
+			t.Errorf("the tool in S3 = %v; want %v", got, want)
+		}
+	})
+	t.Run("tool in S2", func(t *testing.T) {
+		f := lateSetup(t)
+		f.release()
+		if got := toolRead(t, f.a, f.rc()); got["Extra"] != "added" {
+			t.Errorf("the tool in S2 = %v; want Extra", got)
+		}
+		f.edit("s2", "pkg/y.go", "Other")
+		f.hook(KindStop, "s2", "", "")
+		block := f.hook(KindSessionStart, "s3", "", "").Context
+		for _, want := range []string{"Extra", "Other"} {
+			if !strings.Contains(block, want) {
+				t.Errorf("S3's block lacks %s:\n%s", want, block)
+			}
+		}
+	})
+	t.Run("killed index", func(t *testing.T) {
+		f := newLateIndex(t)
+		f.hook(KindSessionStart, "s1", "", "")
+		f.edit("s1", "pkg/x.go", "Extra")
+		f.hook(KindStop, "s1", "", "")
+		// The index dies before it writes the edit; its gate then lets it return.
+		f.cancel()
+		close(f.src.gate)
+		if err := await(t, "index", f.indexed); err != nil && !errors.Is(err, context.Canceled) {
+			t.Fatal(err)
+		}
+		if got := toolRead(t, f.a, f.rc()); len(got) != 0 {
+			t.Fatalf("the dead index journaled %v; want nothing", got)
+		}
+		f.hook(KindSessionStart, "s2", "", "")
+		// The background index S2's start launches.
+		if err := f.a.Graph.ReconcileIfStale(f.ctx, f.wt, graph.FSSource{Root: f.wt}, "warm-token"); err != nil {
+			t.Fatal(err)
+		}
+		f.edit("s2", "pkg/y.go", "Other")
+		f.hook(KindStop, "s2", "", "")
+		block := f.hook(KindSessionStart, "s3", "", "").Context
+		for _, want := range []string{"Extra", "Other"} {
+			if !strings.Contains(block, want) {
+				t.Errorf("S3's block lacks %s:\n%s", want, block)
+			}
+		}
+	})
+}
+
+func TestLateChangeCountedNotNamed(t *testing.T) {
+	files := map[string]string{
+		"xdir/x.go": "package xdir\n\nfunc XBase() {}\n",
+		"pkg/y.go":  "package pkg\n\nfunc YBase() {}\n",
+	}
+	for i := 1; i <= 6; i++ {
+		d := fmt.Sprintf("d%d", i)
+		files[d+"/a.go"] = "package " + d + "\n\nfunc Base() {}\n"
+	}
+	f := newLateIndexFiles(t, files)
+	f.hook(KindSessionStart, "s1", "", "")
+	f.edit("s1", "xdir/x.go", "Extra")
+	f.hook(KindStop, "s1", "", "")
+	f.hook(KindSessionStart, "s2", "", "")
+	f.release()
+	for i := 1; i <= 6; i++ {
+		d := fmt.Sprintf("d%d", i)
+		f.edit("s2", d+"/a.go", fmt.Sprintf("Added%dA", i), fmt.Sprintf("Added%dB", i))
+	}
+	f.hook(KindStop, "s2", "", "")
+	block := f.hook(KindSessionStart, "s3", "", "").Context
+	if strings.Contains(block, "Extra") {
+		t.Errorf("S3's section names the late symbol:\n%s", block)
+	}
+	if !strings.Contains(block, "more modules") || !strings.Contains(block, "lists all 13") {
+		t.Errorf("S3's section does not count all 13 changes:\n%s", block)
+	}
+	if got := toolRead(t, f.a, f.rc()); got["Extra"] != "added" {
+		t.Errorf("the tool in S3 = %v; want Extra", got)
+	}
+	f.edit("s3", "pkg/y.go", "S3s")
+	f.hook(KindStop, "s3", "", "")
+	block4 := f.hook(KindSessionStart, "s4", "", "").Context
+	if strings.Contains(block4, "Extra") || !strings.Contains(block4, "lists all 1") {
+		t.Errorf("S4's section still counts the late change:\n%s", block4)
+	}
+	if got := toolRead(t, f.a, f.rc()); got["Extra"] != "" {
+		t.Errorf("the tool in S4 = %v; want no Extra", got)
+	}
+}
+
+func TestLateChangeWithoutASection(t *testing.T) {
+	f := lateSetup(t)
+	f.release()
+	f.a.Features[features.RecentChanges] = false
+	defer func() { f.a.Features[features.RecentChanges] = true }()
+	block := f.hook(KindSessionStart, "s3", "", "").Context
+	if strings.Contains(block, "Changed since your last working session here") {
+		t.Errorf("S3's block has a recent-changes section:\n%s", block)
+	}
+	if got := toolRead(t, f.a, f.rc()); got["Extra"] != "added" {
+		t.Errorf("the tool in S3 = %v; want Extra", got)
+	}
+	f.edit("s3", "pkg/y.go", "S3s")
+	f.hook(KindStop, "s3", "", "")
+	f.a.Features[features.RecentChanges] = true
+	block4 := f.hook(KindSessionStart, "s4", "", "").Context
+	if strings.Contains(block4, "Extra") {
+		t.Errorf("S4's block repeats the late change:\n%s", block4)
+	}
+	if !strings.Contains(block4, "S3s") {
+		t.Errorf("S4's block lacks S3's change:\n%s", block4)
+	}
+}
+
+func TestChangeIndexedBeforeTheNextStartShowsOnce(t *testing.T) {
+	f := newLateIndex(t)
+	f.hook(KindSessionStart, "s1", "", "")
+	f.edit("s1", "pkg/x.go", "Extra")
+	f.hook(KindStop, "s1", "", "")
+	f.release()
+	block := f.hook(KindSessionStart, "s2", "", "").Context
+	if !strings.Contains(block, "Extra") {
+		t.Errorf("S2's block lacks Extra:\n%s", block)
+	}
+	f.edit("s2", "pkg/y.go", "Other")
+	f.hook(KindStop, "s2", "", "")
+	block3 := f.hook(KindSessionStart, "s3", "", "").Context
+	if strings.Contains(block3, "Extra") || !strings.Contains(block3, "Other") {
+		t.Errorf("S3's block = want Other without Extra:\n%s", block3)
+	}
+}
+
+func TestCompactBlockTakesANewMark(t *testing.T) {
+	f := lateSetup(t)
+	f.release()
+	block := f.hook(KindSessionStart, "s2", "", "compact").Context
+	if !strings.Contains(block, "Extra") {
+		t.Errorf("S2's compact block lacks Extra:\n%s", block)
+	}
+	f.edit("s2", "pkg/y.go", "Other")
+	f.hook(KindStop, "s2", "", "")
+	block3 := f.hook(KindSessionStart, "s3", "", "").Context
+	if strings.Contains(block3, "Extra") || !strings.Contains(block3, "Other") {
+		t.Errorf("S3's block repeats Extra or lacks Other:\n%s", block3)
+	}
+}
+
+func TestOlderConversationStartedAgainListsTheLateChange(t *testing.T) {
+	f := newLateIndex(t)
+	f.hook(KindSessionStart, "s1", "", "")
+	f.edit("s1", "pkg/x.go", "Extra")
+	f.hook(KindStop, "s1", "", "")
+	f.hook(KindSessionStart, "s2", "", "")
+	f.edit("s2", "pkg/y.go", "Other")
+	f.hook(KindStop, "s2", "", "")
+	f.hook(KindSessionStart, "s3", "", "")
+	f.hook(KindStop, "s3", "", "")
+	f.release()
+	block := f.hook(KindSessionStart, "s2", "", "compact").Context
+	if !strings.Contains(block, "Extra") {
+		t.Errorf("S2's compact block lacks Extra:\n%s", block)
+	}
+	if got := toolRead(t, f.a, f.rc()); got["Extra"] != "added" {
+		t.Errorf("the tool right after S2's block = %v; want Extra", got)
+	}
+	f.hook(KindStop, "s2", "", "")
+	block4 := f.hook(KindSessionStart, "s4", "", "").Context
+	if strings.Contains(block4, "Extra") {
+		t.Errorf("S4's block repeats Extra:\n%s", block4)
+	}
+}
+
+func TestPrunedLateChangeIsInNeitherTheBlockNorTheTool(t *testing.T) {
+	f := newLateIndex(t)
+	f.hook(KindSessionStart, "s1", "", "")
+	f.edit("s1", "pkg/x.go", "Extra")
+	f.hook(KindStop, "s1", "", "")
+	for i := 2; i <= 10; i++ {
+		id := fmt.Sprintf("s%d", i)
+		f.hook(KindSessionStart, id, "", "")
+		f.hook(KindStop, id, "", "")
+	}
+	f.hook(KindSessionStart, "s11", "", "")
+	f.release()
+	f.edit("s11", "pkg/y.go", "Other")
+	f.hook(KindStop, "s11", "", "")
+	block := f.hook(KindSessionStart, "s12", "", "").Context
+	if strings.Contains(block, "Extra") || !strings.Contains(block, "Other") {
+		t.Errorf("S12's block = want Other without Extra:\n%s", block)
+	}
+	if got := toolRead(t, f.a, f.rc()); got["Extra"] != "" {
+		t.Errorf("the tool in S12 = %v; want the pruned change gone", got)
 	}
 }

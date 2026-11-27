@@ -494,7 +494,7 @@ func shareSources(ctx, skip context.Context, a *app.App, now int64, resumed bool
 		if c.sel == "" {
 			fr = withoutTools(f)
 		}
-		deltas, total, baseline := recentChanges(ctx, skip, a, c.RepoContext, session, since, now)
+		deltas, total, baseline := recentChanges(ctx, skip, a, c.RepoContext, session, since, now, c.upto)
 		if !resumed {
 			arch, line := tiers[i].result()
 			if line == "" && len(arch.Modules) > 0 {

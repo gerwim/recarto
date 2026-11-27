@@ -6,6 +6,7 @@ import (
 	"math"
 	"time"
 
+	"github.com/gerwim/recarto/internal/agents"
 	"github.com/gerwim/recarto/internal/app"
 	"github.com/gerwim/recarto/internal/graph"
 )
@@ -911,8 +912,7 @@ func getGraphDelta(ctx context.Context, a *app.App, in GetGraphDeltaInput) (GetG
 }
 
 func graphDeltaIn(ctx context.Context, a *app.App, t *app.RepoContext, in GetGraphDeltaInput, fresh string) (GetGraphDeltaOutput, error) {
-	now := a.Clock.Now().UnixMilli()
-	at, ok, err := t.Graph.DeltaBaseline(ctx, t.Git.Worktree, now)
+	r, ok, err := agents.LiveRange(ctx, a, t)
 	if err != nil {
 		return GetGraphDeltaOutput{}, err
 	}
@@ -922,12 +922,12 @@ func graphDeltaIn(ctx context.Context, a *app.App, t *app.RepoContext, in GetGra
 			Hint: fresh, Deltas: []GraphDeltaEntry{},
 		}, nil
 	}
-	deltas, total, err := t.Graph.DeltasSince(ctx, t.Git.Worktree, at, in.Limit)
+	deltas, total, err := t.Graph.DeltasIn(ctx, t.Git.Worktree, r, in.Limit)
 	if err != nil {
 		return GetGraphDeltaOutput{}, err
 	}
 	out := GetGraphDeltaOutput{
-		BaselineAt: time.UnixMilli(at).Format(time.RFC3339),
+		BaselineAt: time.UnixMilli(r.Since).Format(time.RFC3339),
 		Count:      len(deltas), Total: total, Truncated: total > len(deltas),
 		Deltas: make([]GraphDeltaEntry, 0, len(deltas)), Hint: fresh,
 	}

@@ -8,7 +8,7 @@ import (
 )
 
 // schemaVersion is the number of applied migrations.
-const schemaVersion = 28
+const schemaVersion = 29
 
 // migration is one schema step. sql runs first; run, when set, then runs Go
 // code on the same connection, for a step SQL alone cannot express (see
@@ -629,6 +629,30 @@ DROP TABLE _v27;
 		}
 		_, err := c.ExecContext(ctx, `ALTER TABLE graph_deltas ADD COLUMN seen_at INTEGER`)
 		return err
+	}},
+	// v29: seq orders journal writes (the counter is meta graph_delta_seq);
+	// delta_mark is the journal seq a session's latest full block took its range
+	// at (see graph.RecentRange). Existing rows stay NULL: an older binary's rows
+	// are never late and its sessions never cap a listing.
+	{run: func(ctx context.Context, c Conn) error {
+		for _, col := range []struct{ table, name string }{
+			{"graph_deltas", "seq"},
+			{"sessions", "delta_mark"},
+		} {
+			var n int
+			if err := c.QueryRowContext(ctx,
+				`SELECT COUNT(*) FROM pragma_table_info('`+col.table+`') WHERE name = ?`, col.name).Scan(&n); err != nil {
+				return err
+			}
+			if n > 0 {
+				continue
+			}
+			if _, err := c.ExecContext(ctx,
+				`ALTER TABLE `+col.table+` ADD COLUMN `+col.name+` INTEGER`); err != nil {
+				return err
+			}
+		}
+		return nil
 	}},
 }
 

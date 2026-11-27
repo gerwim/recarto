@@ -325,8 +325,8 @@ func assertOrdinaryOpenDoesNotReindex(t *testing.T, st *store.Store) {
 	if err := reopened.DB.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 28 {
-		t.Fatalf("reopened user_version = %d, want 28", version)
+	if version != 29 {
+		t.Fatalf("reopened user_version = %d, want 29", version)
 	}
 	if after := graphStateSnapshot(t, reopened.DB); !slices.Equal(after, before) {
 		t.Fatalf("ordinary open changed indexed graph state:\n got: %v\nwant: %v", after, before)

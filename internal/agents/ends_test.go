@@ -835,7 +835,7 @@ func TestRosterKeepsRepoIdentity(t *testing.T) {
 	r := s.goRepo("repo")
 	a := s.open(s.folder, r)
 	ctx := context.Background()
-	want := []rosterRepo{{"/a:b/c", "id1", ""}, {"/plain", "id2", "abc123"}}
+	want := []rosterRepo{{wt: "/a:b/c", id: "id1"}, {wt: "/plain", id: "id2", root: "abc123"}}
 	if _, err := a.Store.DB.Exec(`INSERT INTO sessions(id, agent, worktree, started_at) VALUES ('k', 'test', ?, 1)`, s.folder); err != nil {
 		t.Fatal(err)
 	}
@@ -858,8 +858,8 @@ func TestRosterKeepsRepoIdentity(t *testing.T) {
 	}
 	gitIn(t, unborn, "init", "-q")
 	roster := rosterOf([]*app.RepoContext{rc(t, a, r), {Git: gitctx.Context{Worktree: unborn, RepoID: "u"}}})
-	if roster[0] != (rosterRepo{r, rc(t, a, r).Git.RepoID, rc(t, a, r).Git.RootCommit}) || roster[0].root == "" ||
-		roster[1] != (rosterRepo{unborn, "u", ""}) {
+	if roster[0] != (rosterRepo{wt: r, id: rc(t, a, r).Git.RepoID, root: rc(t, a, r).Git.RootCommit}) || roster[0].root == "" ||
+		roster[1] != (rosterRepo{wt: unborn, id: "u"}) {
 		t.Fatalf("roster of a repo and an unborn one = %+v", roster)
 	}
 }

@@ -383,3 +383,386 @@ func TestPruneUnreachableDeltasTakesNoLockWhenMasterTookNone(t *testing.T) {
 		t.Fatalf("with ten sessions and no hold, error = %v, want busy", err)
 	}
 }
+
+// --- Recent range: a change indexed after a later session started ---
+
+// startSession writes a session of wt whose mark is the journal's mark now.
+func startSession(t *testing.T, e *Engine, wt, id string, start int64) {
+	t.Helper()
+	mark, err := JournalMark(context.Background(), e.st.DB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.st.DB.Exec(
+		`INSERT INTO sessions(id, worktree, started_at, delta_mark) VALUES (?,?,?,?)`,
+		id, wt, start, mark); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// endSession ends a session written by startSession or addSession.
+func endSession(t *testing.T, e *Engine, id string, end int64) {
+	t.Helper()
+	if _, err := e.st.DB.Exec(`UPDATE sessions SET ended_at=? WHERE id=?`, end, id); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// journalDeltasAt journals added rows for names at at, as a credited write does.
+func journalDeltasAt(t *testing.T, e *Engine, wt, path string, at int64, names ...string) {
+	t.Helper()
+	err := e.st.WriteTx(context.Background(), func(c store.Conn) error {
+		rows := make([]deltaRow, len(names))
+		for i, n := range names {
+			rows[i] = deltaRow{qn: n, kind: "function", change: "added"}
+		}
+		return insertDeltas(context.Background(), c, wt, path, rows, stamp{at: at, seen: at, now: at})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+// inRange returns RecentRange + DeltasIn as name → change.
+func inRange(t *testing.T, e *Engine, wt string, of RangeOf) map[string]string {
+	t.Helper()
+	r, ok, err := e.RecentRange(context.Background(), wt, of, e.clk.Now().UnixMilli())
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := map[string]string{}
+	if !ok {
+		return out
+	}
+	ds, _, err := e.DeltasIn(context.Background(), wt, r, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range ds {
+		out[d.QualifiedName] = d.Change
+	}
+	return out
+}
+
+// journalMark reads e's journal mark as a block start would.
+func journalMark(t *testing.T, e *Engine) sql.NullInt64 {
+	t.Helper()
+	mark, err := JournalMark(context.Background(), e.st.DB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sql.NullInt64{Int64: mark, Valid: true}
+}
+
+// rangeFixture drives one worktree's sessions and journal with explicit times.
+type rangeFixture struct {
+	t   *testing.T
+	e   *Engine
+	wt  string
+	now int64
+}
+
+func newRangeFixture(t *testing.T) *rangeFixture {
+	t.Helper()
+	return &rangeFixture{t: t, e: newTestEngine(t), wt: t.TempDir(), now: 1_000}
+}
+
+func (f *rangeFixture) tick() int64 {
+	f.now += 1_000
+	return f.now
+}
+
+// start writes session id starting now and returns its start.
+func (f *rangeFixture) start(id string) int64 {
+	at := f.tick()
+	startSession(f.t, f.e, f.wt, id, at)
+	return at
+}
+
+// end ends session id now.
+func (f *rangeFixture) end(id string) {
+	endSession(f.t, f.e, id, f.tick())
+}
+
+func (f *rangeFixture) journal(path string, at int64, names ...string) {
+	journalDeltasAt(f.t, f.e, f.wt, path, at, names...)
+}
+
+func (f *rangeFixture) mark() sql.NullInt64 { return journalMark(f.t, f.e) }
+
+func (f *rangeFixture) block(upto sql.NullInt64, pending ...Session) map[string]string {
+	return inRange(f.t, f.e, f.wt, RangeOf{Pending: pending, Upto: upto})
+}
+
+func (f *rangeFixture) live(recorded map[string]int64) map[string]string {
+	return inRange(f.t, f.e, f.wt, RangeOf{Recorded: recorded})
+}
+
+func TestJournalSeqOnlyGrows(t *testing.T) {
+	e := newTestEngine(t)
+	wt := t.TempDir()
+	ctx := context.Background()
+	journalDeltasAt(t, e, wt, "a.go", 1000, "First")
+	m, err := JournalMark(ctx, e.st.DB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := e.PruneDeltas(ctx, wt, 1<<62); err != nil {
+		t.Fatal(err)
+	}
+	journalDeltasAt(t, e, wt, "a.go", 2000, "Second")
+	var seq int64
+	if err := e.st.DB.QueryRow(
+		`SELECT seq FROM graph_deltas WHERE worktree=? ORDER BY seq DESC LIMIT 1`, wt).Scan(&seq); err != nil {
+		t.Fatal(err)
+	}
+	after, err := JournalMark(ctx, e.st.DB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if seq <= m || after <= m {
+		t.Errorf("after pruning and a new write: seq = %d, mark = %d; want both > %d", seq, after, m)
+	}
+}
+
+func TestALateChangeIsInOneRange(t *testing.T) {
+	t.Run("late after S2's start", func(t *testing.T) {
+		f := newRangeFixture(t)
+		s1 := f.start("s1")
+		f.end("s1")
+		f.start("s2")
+		f.journal("a.go", s1, "Extra")
+		s2 := f.tick() // S2's own window
+		f.journal("b.go", s2, "Other")
+		f.end("s2")
+		f.start("s3")
+		if got, want := f.block(f.mark(), Session{ID: "s3", StartedAt: f.now}), map[string]string{
+			"Extra": "added", "Other": "added"}; !mapsEqual(got, want) {
+			t.Errorf("S3's block = %v; want %v", got, want)
+		}
+		s3 := f.now
+		f.journal("c.go", s3, "Later")
+		f.end("s3")
+		f.start("s4")
+		s4 := f.now
+		f.journal("d.go", s4, "S4s")
+		f.end("s4")
+		f.start("s5")
+		if got := f.block(f.mark()); mapsHave(got, "Extra") {
+			t.Errorf("S5's block = %v; want no Extra", got)
+		}
+	})
+	t.Run("indexed before S2's start", func(t *testing.T) {
+		f := newRangeFixture(t)
+		s1 := f.start("s1")
+		f.journal("a.go", s1, "Extra")
+		f.end("s1")
+		f.start("s2")
+		s2 := f.tick()
+		f.journal("b.go", s2, "Other")
+		f.end("s2")
+		f.start("s3")
+		if got, want := f.block(f.mark()), map[string]string{"Other": "added"}; !mapsEqual(got, want) {
+			t.Errorf("S3's block = %v; want %v", got, want)
+		}
+	})
+	t.Run("written while S3 builds its block", func(t *testing.T) {
+		f := newRangeFixture(t)
+		s1 := f.start("s1")
+		f.journal("a.go", s1, "A")
+		f.end("s1")
+		f.start("s2")
+		f.end("s2")
+		s3 := f.start("s3")
+		upto := f.mark()
+		f.journal("b.go", s1, "Extra")
+		f.journal("c.go", s3, "InS3")
+		if got := f.block(upto); mapsHave(got, "Extra") {
+			t.Errorf("S3's block as of its mark = %v; want no Extra", got)
+		}
+		if got := f.live(nil); !mapsHave(got, "Extra") {
+			t.Errorf("S3's live range = %v; want Extra", got)
+		}
+		f.end("s3")
+		s4 := f.start("s4")
+		if got := f.block(f.mark()); !mapsHave(got, "Extra") {
+			t.Errorf("S4's block = %v; want Extra", got)
+		}
+		f.journal("d.go", s4, "InS4")
+		f.end("s4")
+		f.start("s5")
+		if got := f.block(f.mark()); mapsHave(got, "Extra") {
+			t.Errorf("S5's block = %v; want no Extra", got)
+		}
+	})
+	t.Run("S2's change recorded while S3 builds its block", func(t *testing.T) {
+		f := newRangeFixture(t)
+		s1 := f.start("s1")
+		f.journal("a.go", s1, "A")
+		f.end("s1")
+		s2 := f.start("s2")
+		f.end("s2")
+		s3 := f.start("s3")
+		upto := f.mark()
+		f.journal("b.go", s2, "B")
+		if got, want := f.block(upto), map[string]string{"A": "added"}; !mapsEqual(got, want) {
+			t.Errorf("S3's block as of its mark = %v; want %v", got, want)
+		}
+		if got, want := f.live(nil), map[string]string{"B": "added"}; !mapsEqual(got, want) {
+			t.Errorf("S3's live range = %v; want %v", got, want)
+		}
+		f.journal("c.go", s3, "C")
+		f.end("s3")
+		f.start("s4")
+		if got, want := f.block(f.mark()), map[string]string{"B": "added", "C": "added"}; !mapsEqual(got, want) {
+			t.Errorf("S4's block = %v; want %v", got, want)
+		}
+	})
+	t.Run("an older session's new mark", func(t *testing.T) {
+		f := newRangeFixture(t)
+		s1 := f.start("s1")
+		f.end("s1")
+		f.start("s2")
+		s2 := f.tick()
+		f.journal("a.go", s2, "Other")
+		f.end("s2")
+		f.start("s3")
+		f.end("s3")
+		f.journal("b.go", s1, "Extra")
+		raised := f.mark()
+		if _, err := f.e.st.DB.Exec(`UPDATE sessions SET delta_mark=? WHERE id='s2'`, raised.Int64); err != nil {
+			t.Fatal(err)
+		}
+		if got := f.block(raised); !mapsHave(got, "Extra") {
+			t.Errorf("S2's block with the raised mark = %v; want Extra", got)
+		}
+		if got := f.live(nil); !mapsHave(got, "Extra") {
+			t.Errorf("the live range = %v; want Extra", got)
+		}
+		f.start("s4")
+		if got := f.block(f.mark()); mapsHave(got, "Extra") {
+			t.Errorf("S4's block = %v; want no Extra", got)
+		}
+	})
+	t.Run("the last block before its raise lands", func(t *testing.T) {
+		f := newRangeFixture(t)
+		s1 := f.start("s1")
+		f.end("s1")
+		f.start("s2")
+		s2 := f.tick()
+		f.journal("a.go", s2, "Other")
+		f.end("s2")
+		f.start("s3")
+		f.end("s3")
+		f.journal("b.go", s1, "Extra")
+		if got := f.block(f.mark()); !mapsHave(got, "Extra") {
+			t.Errorf("S2's block = %v; want Extra", got)
+		}
+		if got := f.live(nil); !mapsHave(got, "Extra") {
+			t.Errorf("the live range = %v; want Extra", got)
+		}
+	})
+	t.Run("a recorded mark over a lower row mark", func(t *testing.T) {
+		f := newRangeFixture(t)
+		s1 := f.start("s1")
+		f.end("s1")
+		f.start("s2")
+		s2 := f.tick()
+		f.journal("a.go", s1, "X")
+		f.journal("b.go", s2, "Y")
+		f.start("s3")
+		s3 := f.tick()
+		f.journal("c.go", s3, "Z")
+		f.end("s3")
+		recorded := map[string]int64{"s2": 3}
+		want := map[string]string{"Y": "added", "Z": "added"}
+		if got := inRange(t, f.e, f.wt, RangeOf{Recorded: recorded, Upto: sql.NullInt64{Int64: 3, Valid: true}}); !mapsEqual(got, want) {
+			t.Errorf("S2's block with a low row = %v; want %v", got, want)
+		}
+		if got := f.block(f.mark()); !mapsHave(got, "X") {
+			t.Errorf("the range without the recorded mark = %v; want X", got)
+		}
+		if got := f.live(recorded); !mapsEqual(got, want) {
+			t.Errorf("the live range with the recorded mark = %v; want %v", got, want)
+		}
+		if _, err := f.e.st.DB.Exec(`UPDATE sessions SET delta_mark=3 WHERE id='s2'`); err != nil {
+			t.Fatal(err)
+		}
+		if got := inRange(t, f.e, f.wt, RangeOf{Recorded: recorded, Upto: sql.NullInt64{Int64: 3, Valid: true}}); !mapsEqual(got, want) {
+			t.Errorf("S2's block with a raised row = %v; want %v", got, want)
+		}
+		if got := f.live(recorded); !mapsEqual(got, want) {
+			t.Errorf("the live range after the raise = %v; want %v", got, want)
+		}
+	})
+	t.Run("a session pending in a record", func(t *testing.T) {
+		f := newRangeFixture(t)
+		s1 := f.start("s1")
+		f.end("s1")
+		f.start("s2")
+		f.end("s2")
+		f.journal("a.go", s1, "Extra")
+		s3 := f.start("s3") // no row: its end waits in a record
+		f.end("s3")
+		if _, err := f.e.st.DB.Exec(`DELETE FROM sessions WHERE id='s3'`); err != nil {
+			t.Fatal(err)
+		}
+		pending := Session{ID: "s3", StartedAt: s3, EndedAt: sql.NullInt64{Int64: f.now, Valid: true}, Mark: f.mark()}
+		f.journal("b.go", s3, "Z")
+		f.start("s4")
+		if got, want := f.block(f.mark(), pending), map[string]string{"Z": "added"}; !mapsEqual(got, want) {
+			t.Errorf("S4's block = %v; want %v", got, want)
+		}
+	})
+	t.Run("S2 without a mark", func(t *testing.T) {
+		f := newRangeFixture(t)
+		s1 := f.start("s1")
+		f.end("s1")
+		s2 := f.tick()
+		addSession(t, f.e, f.wt, "s2", s2, f.tick())
+		f.journal("a.go", s1, "Extra")
+		f.start("s3")
+		if got := f.block(f.mark()); !mapsHave(got, "Extra") {
+			t.Errorf("S3's block = %v; want Extra", got)
+		}
+	})
+	t.Run("no earlier session has a mark", func(t *testing.T) {
+		f := newRangeFixture(t)
+		s1 := f.tick()
+		addSession(t, f.e, f.wt, "s1", s1, f.tick())
+		s2 := f.tick()
+		addSession(t, f.e, f.wt, "s2", s2, f.tick())
+		f.journal("b.go", s2, "Normal")
+		f.journal("a.go", s1, "Extra")
+		f.start("s3")
+		upto := f.mark()
+		r, ok, err := f.e.RecentRange(context.Background(), f.wt, RangeOf{Upto: upto}, f.e.clk.Now().UnixMilli())
+		if err != nil || !ok {
+			t.Fatalf("RecentRange = %v, %v", ok, err)
+		}
+		got := f.block(upto)
+		want := changesSince(t, f.e, f.wt, r.Since)
+		if !mapsEqual(got, want) || mapsHave(got, "Extra") {
+			t.Errorf("S3's range = %v; want DeltasSince(%d) = %v without Extra", got, r.Since, want)
+		}
+	})
+}
+
+// mapsEqual reports whether a and b hold the same names and changes.
+func mapsEqual(a, b map[string]string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		if b[k] != v {
+			return false
+		}
+	}
+	return true
+}
+
+// mapsHave reports whether m holds name.
+func mapsHave(m map[string]string, name string) bool {
+	_, ok := m[name]
+	return ok
+}

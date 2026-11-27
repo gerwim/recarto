@@ -24,7 +24,7 @@ func TestServedSnippetResolvesFileAfterFreshness(t *testing.T) {
 	prevWait := freshWait
 	freshWait = time.Minute
 	t.Cleanup(func() { freshWait = prevWait })
-	a := codelessApp(t, folder, recarto, second)
+	a := codelessApp(t, folder, nil, recarto, second)
 	indexRepo(t, repoAt(a, recarto))
 	r.Hold(t, true)
 

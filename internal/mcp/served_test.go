@@ -19,7 +19,7 @@ func TestGraphToolsRejectCodeLessFolderWithoutRepos(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(folder, "notes.md"), []byte("hello-marker\nhello-marker\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	a := codelessApp(t, folder)
+	a := codelessApp(t, folder, nil)
 	calls := []struct {
 		name string
 		err  error
@@ -122,7 +122,7 @@ func servedGraphFixture(t *testing.T, several bool) (folder, recarto, second str
 	if several {
 		served = append(served, second)
 	}
-	a = codelessApp(t, folder, served...)
+	a = codelessApp(t, folder, nil, served...)
 	for _, rc := range a.Repos {
 		indexRepo(t, rc)
 	}
@@ -200,7 +200,7 @@ func assertJoinedSearchMatchesRepos(t *testing.T, joined SearchGraphOutput, repo
 
 func TestServedSearchGraphListsExactMatchesFirst(t *testing.T) {
 	folder, alpha, beta := searchOrderRepos(t)
-	a := codelessApp(t, folder, alpha, beta)
+	a := codelessApp(t, folder, nil, alpha, beta)
 	for _, rc := range a.Repos {
 		indexRepo(t, rc)
 	}
@@ -318,7 +318,7 @@ func TestServedSearchGraphListsExactMatchesFirst(t *testing.T) {
 
 func TestOneServedRepoSearchKeepsRepoOrder(t *testing.T) {
 	folder, alpha, _ := searchOrderRepos(t)
-	a := codelessApp(t, folder, alpha)
+	a := codelessApp(t, folder, nil, alpha)
 	for _, rc := range a.Repos {
 		indexRepo(t, rc)
 	}

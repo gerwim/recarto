@@ -2,6 +2,7 @@ package agents
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1985,7 +1986,7 @@ func TestRecoveryFinishesARecordedTime(t *testing.T) {
 	publish := publishDeadEnd
 	t.Run("a publisher that died after F", func(t *testing.T) {
 		s, f, r := setup(t)
-		fe := publish(t, s, f, r)
+		fe := publish(t, s, f, r, "s")
 		start(t, s.open(r), "in", "startup")
 		requireSessionEnd(t, rc(t, f, r), "s", true, fe.EndedAt)
 		if err := EndRosterSessions(context.Background(), f, "s"); err != nil {
@@ -1997,7 +1998,7 @@ func TestRecoveryFinishesARecordedTime(t *testing.T) {
 
 	t.Run("a writer killed after committing the folder row", func(t *testing.T) {
 		s, f, r := setup(t)
-		fe := publish(t, s, f, r)
+		fe := publish(t, s, f, r, "s")
 		if _, err := f.Store.DB.Exec(`UPDATE sessions SET ended_at=? WHERE id='s'`, fe.EndedAt); err != nil {
 			t.Fatal(err)
 		}
@@ -2011,7 +2012,7 @@ func TestRecoveryFinishesARecordedTime(t *testing.T) {
 
 	t.Run("an F abandoned with its folder row open", func(t *testing.T) {
 		s, f, r := setup(t)
-		fe := publish(t, s, f, r)
+		fe := publish(t, s, f, r, "s")
 		u := s.goRepo("unrelated")
 		ua := s.open(u)
 		fpath := folderEndPath(f, s.folder, "s")
@@ -2030,22 +2031,32 @@ func TestRecoveryFinishesARecordedTime(t *testing.T) {
 	t.Run("a covered guard whose time cannot be copied", testCoveredGuardTimeNotCopied)
 }
 
-// publishDeadEnd writes a plain guard of s and an F covering it, as a Stop that
-// died after publishing F leaves them, and returns F.
-func publishDeadEnd(t *testing.T, s *scratch, f *app.App, r string) folderEndRecord {
+// publishDeadEnd writes a plain guard of session and an F covering it, as a
+// Stop that died after publishing F leaves them, and returns F.
+func publishDeadEnd(t *testing.T, s *scratch, f *app.App, r, session string) folderEndRecord {
 	t.Helper()
-	row, _, err := folderSession(context.Background(), f.Store, "s")
+	row, _, err := folderSession(context.Background(), f.Store, session)
 	if err != nil {
 		t.Fatal(err)
 	}
 	repo := rc(t, f, r)
-	g := repoEndRecord{Session: "s", Agent: row.agent, Worktree: r, StartedAt: row.startedAt,
-		Root: repo.Git.RootCommit, Dir: s.folder, Nonce: newNonce()}
-	if _, _, err := claimEnd(pendingDir(repo), guardName("s"), g); err != nil {
+	roster, err := readRoster(context.Background(), f.Ledger, session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mark sql.NullInt64
+	for _, e := range roster {
+		if e.wt == r {
+			mark = e.blockMark
+		}
+	}
+	g := repoEndRecord{Session: session, Agent: row.agent, Worktree: r, StartedAt: row.startedAt,
+		Root: repo.Git.RootCommit, Dir: s.folder, Nonce: newNonce(), BlockMark: mark}
+	if _, _, err := claimEnd(pendingDir(repo), guardName(session), g); err != nil {
 		t.Fatal(err)
 	}
 	s.clk.Advance(time.Second)
-	return deadFolderEnd(t, folderEndsDir(f.Store), folderEndRecord{Session: "s", Dir: s.folder,
+	return deadFolderEnd(t, folderEndsDir(f.Store), folderEndRecord{Session: session, Dir: s.folder,
 		EndedAt: s.clk.Now().UnixMilli(), Covered: []string{repo.Git.RepoID}})
 }
 
@@ -2090,7 +2101,7 @@ func testCoveredGuardTimeNotCopied(t *testing.T) {
 	ctx := context.Background()
 	t.Run("in-repo start", func(t *testing.T) {
 		s, f, r := directWriteSetup(t)
-		fe := publishDeadEnd(t, s, f, r)
+		fe := publishDeadEnd(t, s, f, r, "s")
 		repo := rc(t, f, r)
 		restore := failCopies(t, pendingDir(repo))
 		in := s.open(r)
@@ -2109,7 +2120,7 @@ func testCoveredGuardTimeNotCopied(t *testing.T) {
 			t.Skip("needs a folder its user may not write")
 		}
 		s, f, r := directWriteSetup(t)
-		fe := publishDeadEnd(t, s, f, r)
+		fe := publishDeadEnd(t, s, f, r, "s")
 		repo := rc(t, f, r)
 		pdir := pendingDir(repo)
 		if err := os.Chmod(pdir, 0o555); err != nil {
@@ -2132,7 +2143,7 @@ func testCoveredGuardTimeNotCopied(t *testing.T) {
 	})
 	t.Run("abandoned F swept elsewhere", func(t *testing.T) {
 		s, f, r := directWriteSetup(t)
-		fe := publishDeadEnd(t, s, f, r)
+		fe := publishDeadEnd(t, s, f, r, "s")
 		repo := rc(t, f, r)
 		restore := failCopies(t, pendingDir(repo))
 		age(t, s, folderEndPath(f, s.folder, "s"), EndRunLimit+time.Second)
