@@ -523,11 +523,16 @@ func tenthSessionStart(ctx context.Context, c store.Conn, worktree string) (int6
 
 // PruneUnreachableDeltas drops worktree's journal rows no baseline walk can
 // reach: those older than the 10th-most-recent session's start, never past the
-// baseline of the range that counts pending. hold reports a session end still
-// to be written, which makes it delete nothing. Like PruneDeltas before it, it
-// takes the write lock only when the reads find ten sessions and no hold; it
-// then decides again inside that transaction, so an end written since the
-// reads counts.
+// baseline worktree's rows alone give, nor, when they give none, past the
+// baseline of the range that counts pending. While no session end is still to
+// be written (hold), the rows' baseline is the earliest any range takes: the
+// sessions a range adds beside the rows (Session) can only move its baseline
+// later, and only a pending end can give a row an end. So no reader's
+// baseline moves while the rows give one, and the caller's does not when they
+// give none. hold reports a session end still to be written, which makes it
+// delete nothing. Like PruneDeltas before it, it takes the write lock only
+// when the reads find ten sessions and no hold; it then decides again inside
+// that transaction, so an end written since the reads counts.
 func (e *Engine) PruneUnreachableDeltas(ctx context.Context, worktree string, pending []Session, nowMs int64, hold func(c store.Conn) (bool, error)) error {
 	tenth, err := tenthSessionStart(ctx, e.st.DB, worktree)
 	if err != nil || tenth == 0 {
@@ -547,7 +552,10 @@ func (e *Engine) PruneUnreachableDeltas(ctx context.Context, worktree string, pe
 			return err
 		}
 		cutoff := tenth
-		b, ok, err := baselineOf(ctx, c, worktree, pending, nowMs)
+		b, ok, err := baselineOf(ctx, c, worktree, nil, nowMs)
+		if err == nil && !ok && len(pending) > 0 {
+			b, ok, err = baselineOf(ctx, c, worktree, pending, nowMs)
+		}
 		if err != nil {
 			return err
 		}

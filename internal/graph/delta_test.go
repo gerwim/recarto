@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -384,6 +385,85 @@ func TestPruneUnreachableDeltasTakesNoLockWhenMasterTookNone(t *testing.T) {
 	}
 }
 
+func TestPruneKeepsEveryReadersBaseline(t *testing.T) {
+	t.Run("the rows give a baseline", testPruneWithRowsBaseline)
+	t.Run("the rows give none", testPruneWithListBaseline)
+}
+
+func testPruneWithRowsBaseline(t *testing.T) {
+	ctx := context.Background()
+	e := newTestEngine(t)
+	wt := t.TempDir()
+	pruneFixture(t, e, wt, false)
+	pending := []Session{{ID: "unbackfilled-folder-session", StartedAt: 26}}
+	before, ok, err := e.RecentRange(ctx, wt, pending, 110, 0)
+	if err != nil || !ok || before.Since != 26 {
+		t.Fatalf("folder range before the prune = %+v, %v, %v; want Since 26", before, ok, err)
+	}
+	if b, ok, err := e.DeltaBaseline(ctx, wt, 110); err != nil || !ok || b != 10 {
+		t.Fatalf("worktree baseline before the prune = %d, %v, %v; want 10", b, ok, err)
+	}
+	if err := e.PruneUnreachableDeltas(ctx, wt, pending, 110, func(store.Conn) (bool, error) { return false, nil }); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := deltaTimes(t, e, wt), []int64{15, 27}; !slices.Equal(got, want) {
+		t.Errorf("kept journal timestamps = %v; want %v", got, want)
+	}
+	if b, ok, err := e.DeltaBaseline(ctx, wt, 110); err != nil || !ok || b != 10 {
+		t.Errorf("worktree baseline after the folder prune = %d, %v, %v; want 10", b, ok, err)
+	}
+	after, ok, err := e.RecentRange(ctx, wt, pending, 110, 0)
+	if err != nil || !ok || after.Since != before.Since || !mapsEqual(rangeNames(after), rangeNames(before)) {
+		t.Errorf("folder range after the prune = %+v, %v, %v; want Since %d and %v", after, ok, err, before.Since, rangeNames(before))
+	}
+}
+
+func testPruneWithListBaseline(t *testing.T) {
+	ctx := context.Background()
+	e := newTestEngine(t)
+	wt := t.TempDir()
+	for i := int64(1); i <= 10; i++ {
+		start, end := i*10, i*10+1
+		if _, err := e.st.DB.Exec(
+			`INSERT INTO sessions(id, worktree, started_at, ended_at) VALUES (?, ?, ?, ?)`,
+			fmt.Sprintf("s%d", start), wt, start, end); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := e.st.DB.Exec(
+		`INSERT INTO graph_deltas(id, worktree, path, qualified_name, kind, change, at)
+		 VALUES ('x', ?, 'a.go', 'X', 'function', 'changed', 5)`, wt); err != nil {
+		t.Fatal(err)
+	}
+	pending := []Session{{ID: "unbackfilled-folder-session", StartedAt: 1}}
+	if _, ok, err := e.DeltaBaseline(ctx, wt, 200); err != nil || ok {
+		t.Fatalf("worktree baseline = %v, %v; want none", ok, err)
+	}
+	before, ok, err := e.RecentRange(ctx, wt, pending, 200, 0)
+	if err != nil || !ok || before.Since != 1 || !mapsHave(rangeNames(before), "X") {
+		t.Fatalf("folder range before the prune = %+v, %v, %v; want Since 1 with X", before, ok, err)
+	}
+	if err := e.PruneUnreachableDeltas(ctx, wt, pending, 200, func(store.Conn) (bool, error) { return false, nil }); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := deltaTimes(t, e, wt), []int64{5}; !slices.Equal(got, want) {
+		t.Errorf("kept journal timestamps = %v; want %v", got, want)
+	}
+	after, ok, err := e.RecentRange(ctx, wt, pending, 200, 0)
+	if err != nil || !ok || after.Since != 1 || !mapsEqual(rangeNames(after), rangeNames(before)) {
+		t.Errorf("folder range after the prune = %+v, %v, %v; want Since 1 and %v", after, ok, err, rangeNames(before))
+	}
+}
+
+// rangeNames returns a ChangeRange's changes as name → change.
+func rangeNames(r ChangeRange) map[string]string {
+	out := map[string]string{}
+	for _, d := range r.Deltas {
+		out[d.QualifiedName] = d.Change
+	}
+	return out
+}
+
 // --- Recent range: a change indexed after a later session started ---
 
 // startSession writes a session of wt whose mark is the journal's mark now.
@@ -673,6 +753,21 @@ func TestALateChangeIsInOneRange(t *testing.T) {
 	t.Run("an ended row takes an entry's EndedMark, not its Mark", testEndedRowTakesEndedMark)
 	t.Run("an entry over an ended row leaves its end", testEntryLeavesEndedRowsEnd)
 	t.Run("an entry whose row is in another worktree is not counted", testOtherWorktreeEntry)
+	t.Run("a baseline session without a mark", func(t *testing.T) {
+		f := newRangeFixture(t)
+		s1 := f.tick()
+		addSession(t, f.e, f.wt, "s1", s1, f.tick())
+		s2 := f.tick()
+		addSession(t, f.e, f.wt, "s2", s2, f.tick())
+		f.journal("y.go", s2, "Y")
+		f.journal("x.go", s1, "X")
+		f.start("s3")
+		r, got := f.rng()
+		want := changesSince(t, f.e, f.wt, r.Since)
+		if !mapsEqual(got, want) || mapsHave(got, "X") || !mapsHave(got, "Y") {
+			t.Errorf("S3's range = %v; want DeltasSince(%d) = %v", got, r.Since, want)
+		}
+	})
 }
 
 func testEndedRowTakesEndedMark(t *testing.T) {
