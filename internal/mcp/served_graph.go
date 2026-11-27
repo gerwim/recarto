@@ -311,7 +311,7 @@ func getGraphDeltaServed(ctx context.Context, a *app.App, in GetGraphDeltaInput)
 			sections[i].Note = emptyRepoNote
 			continue
 		}
-		at, ok, err := agents.LiveRange(ctx, a, s.rc)
+		r, ok, err := agents.LiveRange(ctx, a, s.rc, cap)
 		if err != nil {
 			return GetGraphDeltaOutput{}, fmt.Errorf("%s: %w", s.label, err)
 		}
@@ -319,8 +319,8 @@ func getGraphDeltaServed(ctx context.Context, a *app.App, in GetGraphDeltaInput)
 			sections[i].Note = noBaselineNote
 			continue
 		}
-		sections[i].BaselineAt = time.UnixMilli(at.Since).Format(time.RFC3339)
-		parts[i], sections[i].Total, err = s.rc.Graph.DeltasIn(ctx, s.rc.Git.Worktree, at, cap)
+		sections[i].BaselineAt = time.UnixMilli(r.Since).Format(time.RFC3339)
+		parts[i], sections[i].Total = r.Deltas, r.Total
 		if err != nil {
 			return GetGraphDeltaOutput{}, fmt.Errorf("%s: %w", s.label, err)
 		}

@@ -265,11 +265,11 @@ func conversation(ev Event) string {
 // ranks its memories against the graph as it stands when the wait ends.
 //
 // Writes that can be skipped (statistics, sync, snapshot import, compaction,
-// recall stamps, the map cache, the journal mark of a later full block) run
-// under skip: while another process holds the store's writer, such as an index
-// finishing, they wait at most writeGrace and are skipped, to be redone by the
-// next session start or Stop. Conversation state (a new conversation's row, a
-// clear or compact reset, the block and shown marks) waits for the writer.
+// recall stamps, the map cache) run under skip: while another process holds
+// the store's writer, such as an index finishing, they wait at most writeGrace
+// and are skipped, to be redone by the next session start or Stop. Conversation
+// state (a new conversation's row, a clear or compact reset, the block mark
+// with the journal marks the block read, the shown marks) waits for the writer.
 func handleSessionStart(ctx context.Context, a *app.App, ev Event) (res Result, err error) {
 	now := a.Clock.Now().UnixMilli()
 	skip := store.WithWriteDeadline(ctx, time.Now().Add(writeGrace))
@@ -309,18 +309,9 @@ func handleSessionStart(ctx context.Context, a *app.App, ev Event) (res Result, 
 		for _, rc := range a.Repos {
 			names = append(names, rc.Git.RepoName)
 		}
-		upto, markErr := conv.mark, error(nil)
-		if !resumed && !conv.first && ev.SessionID != "" {
-			upto, markErr = markBlock(ctx, store.WithWriteDeadline(ctx, time.Now().Add(writeGrace)), a.Store, ev.SessionID)
-		}
-		res, err := repoBlock(ctx, skip, a, now, scope, resumed, wait, subject{
-			rc: a.AllRepos()[0], served: true, tools: true, header: memoryHeader, reposLine: alsoServing(names), upto: upto})
-		if err != nil {
-			return Result{}, errors.Join(err, markErr)
-		}
-		// A failed mark does not spoil the block.
-		res.Failure = errors.Join(res.Failure, markErr)
-		return res, nil
+		return repoBlock(ctx, skip, a, now, scope, resumed, wait, subject{
+			rc: a.AllRepos()[0], served: true, tools: true, header: memoryHeader, reposLine: alsoServing(names),
+			marks: blockMarks{session: ev.SessionID}})
 	}
 	// A later start of a known conversation resumes it, whether or not its first
 	// block was delivered.
@@ -331,18 +322,6 @@ func handleSessionStart(ctx context.Context, a *app.App, ev Event) (res Result, 
 	}
 	covered, gone, done := cover(a, conv.roster)
 	defer done()
-	// The blocks read each repo as of the marks recorded before them; rows are
-	// raised to those marks beside the wait.
-	var markErr error
-	switch {
-	case resumed || ev.SessionID == "":
-	case conv.first:
-		for i := range covered {
-			covered[i].upto = covered[i].blockMark
-		}
-	default:
-		markErr = refreshMarks(ctx, store.WithWriteDeadline(ctx, time.Now().Add(writeGrace)), a, ev.SessionID, covered)
-	}
 	// The block does not need the repos' session rows (it counts this session's
 	// changes as if they were written), so they are written beside the wait.
 	var bg sync.WaitGroup
@@ -363,11 +342,11 @@ func handleSessionStart(ctx context.Context, a *app.App, ev Event) (res Result, 
 	}
 	bg.Wait()
 	if err != nil {
-		return Result{}, errors.Join(err, rowErr, markErr, conv.markErr)
+		return Result{}, errors.Join(err, rowErr, conv.markErr)
 	}
 	// A session row that could not be written does not spoil the block: the
 	// block is delivered and the failure reported.
-	res.Failure = errors.Join(rowErr, markErr, conv.markErr)
+	res.Failure = errors.Join(rowErr, conv.markErr)
 	return res, nil
 }
 
@@ -378,9 +357,54 @@ type subject struct {
 	tools     bool          // the repo argument reaches it: the block points at tools
 	header    string        // the memory tier's header
 	reposLine string        // the line naming served repos, "" for none
-	session   string        // the conversation's id, counted as a session in rc before its row is written; "" in a session's own worktree
-	since     int64         // that session's start
-	upto      sql.NullInt64 // the journal mark the block takes its range at; invalid means as the journal stands
+	caller    graph.Session // the conversation, counted as a session in rc while its row there is not written: its id ("" in a session's own worktree, whose row is written before the block), start and roster mark
+	marks     blockMarks    // where the block records the journal mark it read
+}
+
+// blockMarks is where a full block records the journal marks it read:
+// session's row in the block's own worktree, or, with roster, session's
+// roster marks in the folder's ledger. An empty session records none.
+type blockMarks struct {
+	session string
+	roster  bool
+}
+
+// repoRead is the journal mark a full block read one repo's range at.
+type repoRead struct {
+	wt   string
+	mark int64
+}
+
+// recordBlock records, in one write on a's store, that scope's conversation
+// got its full block and the journal marks the block read, so a mark is only
+// raised for a block that read its range.
+func recordBlock(ctx context.Context, a *app.App, scope string, to blockMarks, reads []repoRead) error {
+	if scope == "" && (to.session == "" || len(reads) == 0) {
+		return nil
+	}
+	return a.Store.WriteTx(ctx, func(c store.Conn) error {
+		if scope != "" {
+			if err := ledger.IncrIn(ctx, c, scope, blockMetric, 1); err != nil {
+				return err
+			}
+		}
+		if to.session == "" {
+			return nil
+		}
+		if to.roster {
+			roster := make([]rosterRepo, len(reads))
+			for i, r := range reads {
+				roster[i] = rosterRepo{wt: r.wt, blockMark: sql.NullInt64{Int64: r.mark, Valid: true}}
+			}
+			return putRosterMarks(ctx, c, to.session, roster)
+		}
+		for _, r := range reads {
+			if err := raiseMark(ctx, c, to.session, r.mark); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 // repoBlock builds the session-start block of one repo, s: the block a session
@@ -435,7 +459,12 @@ func repoBlock(ctx, skip context.Context, a *app.App, now int64, scope string, r
 		isTodo := func(r memory.RecallResult) bool { return r.Record.Kind == memory.KindTodo }
 		results, wsResults = slices.DeleteFunc(results, isTodo), slices.DeleteFunc(wsResults, isTodo)
 	}
-	deltas, deltaTotal, deltaBaseline := recentChanges(ctx, skip, a, rc, s.session, s.since, now, s.upto)
+	r, read := recentChanges(ctx, skip, a, rc, s.caller, now)
+	deltas, deltaTotal, deltaBaseline := r.Deltas, r.Total, r.Since
+	var reads []repoRead
+	if read && r.Base != s.marks.session {
+		reads = []repoRead{{wt: rc.Git.Worktree, mark: r.Read}}
+	}
 
 	wsName := ""
 	if a.Workspace != nil {
@@ -461,10 +490,9 @@ func repoBlock(ctx, skip context.Context, a *app.App, now int64, scope string, r
 	// already see here. Memories dropped under budget stay unmarked and still surface
 	// when their code is touched.
 	markSurfaced(ctx, a, scope, emitted)
-	if scope != "" {
-		// A lost mark only costs the next resume a full block, as before.
-		_ = a.Ledger.Incr(ctx, scope, blockMetric, 1)
-	}
+	// A lost write only costs the next resume a full block, and the next start
+	// may list a change of this block again; it never hides one.
+	_ = recordBlock(ctx, a, scope, s.marks, reads)
 	// An index can finish while the marks wait for its writer, and the block must
 	// not then say the graph is still being indexed. The tier takes no part of
 	// the memory budget, so the marks just written match the block rendered again.
@@ -475,65 +503,54 @@ func repoBlock(ctx, skip context.Context, a *app.App, now int64, scope string, r
 	return Result{Context: out}, nil
 }
 
-// recentChanges returns rc's changes since its baseline, counting session id,
-// started at since, as written in rc, and prunes rc's journal past what any
-// baseline walk can reach. The block takes the range as of upto, the journal
-// mark of its start; invalid reads the journal as it stands.
-func recentChanges(ctx, skip context.Context, a *app.App, rc *app.RepoContext, id string, since, now int64, upto sql.NullInt64) ([]graph.Delta, int, int64) {
-	var deltas []graph.Delta
-	var deltaTotal int
-	var deltaBaseline int64
+// recentChanges prunes rc's journal past what any baseline walk can reach,
+// then reads the range a block built now in rc reports, counting caller while
+// its row there is not written. read is false when the range could not be
+// read. With the recent-changes feature off the range carries no changes,
+// but it is still read: the block has had it all the same.
+func recentChanges(ctx, skip context.Context, a *app.App, rc *app.RepoContext, caller graph.Session, now int64) (r graph.ChangeRange, read bool) {
 	// Pruned before the read, so every row the block reports stays for
 	// get_graph_delta in this session. A prune that fails or is skipped only keeps
 	// rows longer; a later start prunes them. Recent changes are a best-effort
 	// tier like the map and bugs: a journal or pending-ends folder that cannot be
 	// read leaves the tier out of the block.
-	_ = rc.Graph.PruneUnreachableDeltas(skip, rc.Git.Worktree, id, since, now, endsHoldFor(ctx, rc))
-	of, err := rangeOf(ctx, a, rc, graph.Session{ID: id, StartedAt: since}, upto)
+	_ = rc.Graph.PruneUnreachableDeltas(skip, rc.Git.Worktree, caller.ID, caller.StartedAt, now, endsHoldFor(ctx, rc))
+	pending, err := pendingIn(rc, caller)
 	if err != nil {
-		return nil, 0, 0
+		return graph.ChangeRange{}, false
 	}
-	if r, ok, err := rc.Graph.RecentRange(ctx, rc.Git.Worktree, of, now); err == nil && ok {
-		deltaBaseline = r.Since
-		if a.Features.On(features.RecentChanges) {
-			deltas, deltaTotal, _ = rc.Graph.DeltasIn(ctx, rc.Git.Worktree, r, 200)
-		}
+	r, ok, err := rc.Graph.RecentRange(ctx, rc.Git.Worktree, pending, now, 200)
+	if err != nil || !ok {
+		return graph.ChangeRange{}, false
 	}
-	return deltas, deltaTotal, deltaBaseline
+	if !a.Features.On(features.RecentChanges) {
+		r.Deltas, r.Total = nil, 0
+	}
+	return r, true
 }
 
-// rangeOf is what the range of a block or tool call in rc counts: caller, the
-// calling conversation with its start, counted while its row is not written
-// (none when its id is ""); the sessions whose rows wait in rc's pending ends
-// (one entry per id; a pending end wins over the caller's own entry, as it
-// holds the end); and the marks a's folder ledger records for rc. upto is the
-// block's mark.
-func rangeOf(ctx context.Context, a *app.App, rc *app.RepoContext, caller graph.Session, upto sql.NullInt64) (graph.RangeOf, error) {
+// pendingIn returns the sessions a range in rc counts while their rows are
+// not written, or not yet ended: those whose ends wait in rc's pending ends,
+// and caller unless its id is "" or a pending end holds it (that end holds
+// its end).
+func pendingIn(rc *app.RepoContext, caller graph.Session) ([]graph.Session, error) {
 	pending, err := pendingSessions(rc)
 	if err != nil {
-		return graph.RangeOf{}, err
-	}
-	recorded, err := recordedMarks(ctx, a, rc)
-	if err != nil {
-		return graph.RangeOf{}, err
+		return nil, err
 	}
 	if caller.ID != "" && !slices.ContainsFunc(pending, func(s graph.Session) bool { return s.ID == caller.ID }) {
 		pending = append(pending, caller)
 	}
-	for i := range pending {
-		if mark, ok := recorded[pending[i].ID]; ok && (!pending[i].Mark.Valid || mark > pending[i].Mark.Int64) {
-			pending[i].Mark = sql.NullInt64{Int64: mark, Valid: true}
-		}
-	}
-	return graph.RangeOf{Pending: pending, Recorded: recorded, Upto: upto}, nil
+	return pending, nil
 }
 
-// LiveRange returns the range get_graph_delta reports in rc: the range a full
-// block built now in the calling session would report there, read as the
-// journal stands. The calling session is the latest one: in a folder outside
-// git the folder's latest conversation, counted in a repo its roster covers
-// while its row there is not written. ok=false when rc has no baseline.
-func LiveRange(ctx context.Context, a *app.App, rc *app.RepoContext) (graph.ChangeRange, bool, error) {
+// LiveRange returns what get_graph_delta reports in rc, up to limit changes:
+// the range a full block built now in the calling session would report there,
+// read as the journal stands. The calling session is the latest one: in a
+// folder outside git the folder's latest conversation, counted in a repo its
+// roster covers while its row there is not written. ok=false when rc has no
+// baseline. It writes nothing.
+func LiveRange(ctx context.Context, a *app.App, rc *app.RepoContext, limit int) (graph.ChangeRange, bool, error) {
 	caller, ok, err := rosterSession(ctx, a, rc)
 	if err != nil {
 		return graph.ChangeRange{}, false, err
@@ -541,11 +558,11 @@ func LiveRange(ctx context.Context, a *app.App, rc *app.RepoContext) (graph.Chan
 	if !ok {
 		caller = graph.Session{}
 	}
-	of, err := rangeOf(ctx, a, rc, caller, sql.NullInt64{})
+	pending, err := pendingIn(rc, caller)
 	if err != nil {
 		return graph.ChangeRange{}, false, err
 	}
-	return rc.Graph.RecentRange(ctx, rc.Git.Worktree, of, a.Clock.Now().UnixMilli())
+	return rc.Graph.RecentRange(ctx, rc.Git.Worktree, pending, a.Clock.Now().UnixMilli(), limit)
 }
 
 // applySource applies a session start's source to the record of what scope's

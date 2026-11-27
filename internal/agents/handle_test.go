@@ -1120,41 +1120,37 @@ func (f *lateIndex) hook(kind EventKind, session, file, source string) Result {
 func (f *lateIndex) edit(session, rel string, fns ...string) {
 	f.t.Helper()
 	p := filepath.Join(f.wt, rel)
-	b, err := os.ReadFile(p)
-	if err != nil {
-		f.t.Fatal(err)
-	}
-	for _, fn := range fns {
-		b = append(b, []byte("\nfunc "+fn+"() {}\n")...)
-	}
-	if err := os.WriteFile(p, b, 0o644); err != nil {
-		f.t.Fatal(err)
-	}
+	appendFunc(f.t, p, fns...)
 	f.hook(KindPostEdit, session, p, "")
 }
 
 func (f *lateIndex) rc() *app.RepoContext { return f.a.AllRepos()[0] }
 
-// toolRead is the MCP tool's own range code: LiveRange + DeltasIn.
+// toolRead is the MCP tool's own range code: LiveRange.
 func toolRead(t *testing.T, a *app.App, rc *app.RepoContext) map[string]string {
 	t.Helper()
-	ctx := context.Background()
-	r, ok, err := LiveRange(ctx, a, rc)
+	r, _, err := LiveRange(context.Background(), a, rc, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	out := map[string]string{}
-	if !ok {
-		return out
-	}
-	ds, _, err := rc.Graph.DeltasIn(ctx, rc.Git.Worktree, r, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, d := range ds {
+	for _, d := range r.Deltas {
 		out[d.QualifiedName] = d.Change
 	}
 	return out
+}
+
+// recentSection is the block's recent-changes section, or "" when it has none.
+func recentSection(block string) string {
+	const head = "\nChanged since your last working session here"
+	i := strings.Index(block, head)
+	if i < 0 {
+		return ""
+	}
+	if j := strings.Index(block[i+1:], "\n\n"); j >= 0 {
+		return block[i : i+1+j]
+	}
+	return block[i:]
 }
 
 func names(m map[string]string) []string {
@@ -1179,34 +1175,44 @@ func lateSetup(t *testing.T) *lateIndex {
 }
 
 func TestLateIndexedEditShowsAtTheNextStart(t *testing.T) {
-	t.Run("S2 edits", func(t *testing.T) {
+	run := func(t *testing.T, toolInS2 bool) (block string, tool map[string]string) {
+		t.Helper()
 		f := lateSetup(t)
 		f.release()
+		if toolInS2 {
+			if got := toolRead(t, f.a, f.rc()); got["Extra"] != "added" {
+				t.Errorf("the tool in S2 = %v; want Extra", got)
+			}
+		}
 		f.edit("s2", "pkg/y.go", "Other")
 		f.hook(KindStop, "s2", "", "")
-		block := f.hook(KindSessionStart, "s3", "", "").Context
+		block = f.hook(KindSessionStart, "s3", "", "").Context
+		return block, toolRead(t, f.a, f.rc())
+	}
+	t.Run("S2 edits", func(t *testing.T) {
+		block, tool := run(t, false)
 		for _, want := range []string{"Extra", "Other"} {
 			if !strings.Contains(block, want) {
 				t.Errorf("S3's block lacks %s:\n%s", want, block)
 			}
 		}
-		if got, want := names(toolRead(t, f.a, f.rc())), []string{"Extra", "Other"}; !slices.Equal(got, want) {
+		if got, want := names(tool), []string{"Extra", "Other"}; !slices.Equal(got, want) {
 			t.Errorf("the tool in S3 = %v; want %v", got, want)
 		}
 	})
 	t.Run("tool in S2", func(t *testing.T) {
-		f := lateSetup(t)
-		f.release()
-		if got := toolRead(t, f.a, f.rc()); got["Extra"] != "added" {
-			t.Errorf("the tool in S2 = %v; want Extra", got)
+		without, _ := run(t, false)
+		with, tool := run(t, true)
+		if got, want := recentSection(with), recentSection(without); got != want {
+			t.Errorf("S3's section after the tool call = %q; want %q", got, want)
 		}
-		f.edit("s2", "pkg/y.go", "Other")
-		f.hook(KindStop, "s2", "", "")
-		block := f.hook(KindSessionStart, "s3", "", "").Context
 		for _, want := range []string{"Extra", "Other"} {
-			if !strings.Contains(block, want) {
-				t.Errorf("S3's block lacks %s:\n%s", want, block)
+			if !strings.Contains(recentSection(with), want) {
+				t.Errorf("S3's section lacks %s:\n%s", want, with)
 			}
+		}
+		if got, want := names(tool), []string{"Extra", "Other"}; !slices.Equal(got, want) {
+			t.Errorf("the tool in S3 = %v; want %v", got, want)
 		}
 	})
 	t.Run("killed index", func(t *testing.T) {
@@ -1354,11 +1360,6 @@ func TestOlderConversationStartedAgainListsTheLateChange(t *testing.T) {
 	}
 	if got := toolRead(t, f.a, f.rc()); got["Extra"] != "added" {
 		t.Errorf("the tool right after S2's block = %v; want Extra", got)
-	}
-	f.hook(KindStop, "s2", "", "")
-	block4 := f.hook(KindSessionStart, "s4", "", "").Context
-	if strings.Contains(block4, "Extra") {
-		t.Errorf("S4's block repeats Extra:\n%s", block4)
 	}
 }
 

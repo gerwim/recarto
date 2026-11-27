@@ -409,7 +409,7 @@ func sharedBlock(ctx, skip context.Context, a *app.App, now int64, scope string,
 	sessionStartUpkeep(skip, a, rcs)
 
 	f := toolFeatures(a)
-	ws, srcs, empty, err := shareSources(ctx, skip, a, now, resumed, session, since, covered, tiers, f)
+	ws, srcs, reads, empty, err := shareSources(ctx, skip, a, now, resumed, session, since, covered, tiers, f)
 	if err != nil {
 		return Result{}, err
 	}
@@ -442,10 +442,9 @@ func sharedBlock(ctx, skip context.Context, a *app.App, now int64, scope string,
 		ids = append(ids, l.r.Record.ID)
 	}
 	markSurfaced(ctx, a, scope, append(ids, res.bugIDs...))
-	if scope != "" {
-		// A lost mark only costs the next resume a full block.
-		_ = a.Ledger.Incr(ctx, scope, blockMetric, 1)
-	}
+	// A lost write only costs the next resume a full block, and the next start
+	// may list a change of this block again; it never hides one.
+	_ = recordBlock(ctx, a, scope, blockMarks{session: session, roster: true}, reads)
 	noteRecalled(skip, a, covered, chosen)
 	// An index can finish while the marks wait for its writer; only the one
 	// lines change, so the marks just written still match.
@@ -461,9 +460,10 @@ func sharedBlock(ctx, skip context.Context, a *app.App, now int64, scope string,
 
 // shareSources gathers what share divides: the workspace's ranked memories,
 // and each covered repo's ranked memories and, for a full block, its map,
-// bugs and changes. empty reports that no source holds a memory.
+// bugs and changes. reads are the journal marks the full block read per repo.
+// empty reports that no source holds a memory.
 func shareSources(ctx, skip context.Context, a *app.App, now int64, resumed bool, session string, since int64,
-	covered []coveredRepo, tiers []*mapTier, f features.Set) (ws *shareSource, srcs []*shareSource, empty bool, err error) {
+	covered []coveredRepo, tiers []*mapTier, f features.Set) (ws *shareSource, srcs []*shareSource, reads []repoRead, empty bool, err error) {
 	memories := a.Features.On(features.SessionMemories)
 	keep := func(rs []memory.RecallResult) []memory.RecallResult {
 		if a.Features.On(features.Todos) {
@@ -485,7 +485,7 @@ func shareSources(ctx, skip context.Context, a *app.App, now int64, resumed bool
 		if memories {
 			ranked, err := c.Engine.Ranked(skip, memory.RecallQuery{Branch: c.Git.Branch, Worktree: c.Git.Worktree, Baseline: true})
 			if err != nil {
-				return nil, nil, false, err
+				return nil, nil, nil, false, err
 			}
 			src.ranked = keep(ranked)
 			empty = empty && len(src.ranked) == 0
@@ -494,7 +494,10 @@ func shareSources(ctx, skip context.Context, a *app.App, now int64, resumed bool
 		if c.sel == "" {
 			fr = withoutTools(f)
 		}
-		deltas, total, baseline := recentChanges(ctx, skip, a, c.RepoContext, session, since, now, c.upto)
+		r, read := recentChanges(ctx, skip, a, c.RepoContext, graph.Session{ID: session, StartedAt: since, Mark: c.blockMark}, now)
+		if read && r.Base != session {
+			reads = append(reads, repoRead{wt: c.Git.Worktree, mark: r.Read})
+		}
 		if !resumed {
 			arch, line := tiers[i].result()
 			if line == "" && len(arch.Modules) > 0 {
@@ -504,11 +507,11 @@ func shareSources(ctx, skip context.Context, a *app.App, now int64, resumed bool
 				bugs, _ := c.Engine.RecentBugs(ctx, c.Git.Branch, -1)
 				bugSteps(src, bugs, fr.On(features.MemoryTools))
 			}
-			changeSteps(src, buildDeltaTier(deltas, total, baseline, fr.On(features.GraphTools)))
+			changeSteps(src, buildDeltaTier(r.Deltas, r.Total, r.Since, fr.On(features.GraphTools)))
 		}
 		srcs[i] = src
 	}
-	return ws, srcs, empty, nil
+	return ws, srcs, reads, empty, nil
 }
 
 // sharedFraming returns the several-repo block's header and closing texts,

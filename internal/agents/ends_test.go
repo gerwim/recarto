@@ -726,17 +726,12 @@ type deferredEndReport struct {
 }
 
 // editIn appends function name to file and reports the edit in session.
+// editIn appends an empty function name to file, starts a second later, and
+// reports the edit in session.
 func editIn(t *testing.T, s *scratch, a *app.App, session, file, name string) {
 	t.Helper()
 	s.clk.Advance(time.Second)
-	f, err := os.OpenFile(file, os.O_APPEND|os.O_WRONLY, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := fmt.Fprintf(f, "\nfunc %s() {}\n", name); err != nil {
-		t.Fatal(err)
-	}
-	_ = f.Close()
+	appendFunc(t, file, name)
 	res, err := Handle(context.Background(), a, Event{Kind: KindPostEdit, SessionID: session, FilePath: file})
 	if err != nil || res.Failure != nil {
 		t.Fatalf("edit %s: result %+v, err %v", name, res, err)

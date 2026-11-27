@@ -190,7 +190,7 @@ func insertDeltas(ctx context.Context, c store.Conn, worktree, path string, rows
 
 // moveBackLaterRows readies path's journal on c for a write credited to an
 // earlier edit (ts.at < ts.now). Its rows that count after ts.at belong to
-// versions the index saw before that edit; DeltasSince folds rows in at
+// versions the index saw before that edit; a range folds rows in at
 // order and a session's listing starts at the latest session holding any,
 // so they move to just before their version was seen, ahead of the edit
 // and its session. A row without seen_at (written before it existed), or one
@@ -229,28 +229,26 @@ func splitDeltaKey(key string) (qn, kind string) {
 	return key, ""
 }
 
-// DeltasIn returns r's folded symbol-level changes, as DeltasSince folds them:
-// one entry per (path, qualified_name, kind), with the disposition read
-// relative to the range, not as a raw event log. The first event in the range
-// tells whether the symbol existed at its start (anything but "added" means it
-// did); the last tells whether it exists now (anything but "removed" means it
-// does). Born-and-gone within the window nets out entirely;
-// existed-then-recreated reads as "changed" (it is present, content unknown),
-// never "removed". total is the folded count before limit.
-func (e *Engine) DeltasIn(ctx context.Context, worktree string, r ChangeRange, limit int) ([]Delta, int, error) {
+// foldDeltas returns worktree's changes from since on, and those written after
+// mark (none when invalid), read on c and folded: one entry per (path,
+// qualified_name, kind), with the disposition read relative to the range, not
+// as a raw event log. The first event in the range tells whether the symbol
+// existed at its start (anything but "added" means it did); the last tells
+// whether it exists now (anything but "removed" means it does). Born-and-gone
+// within the window nets out entirely; existed-then-recreated reads as
+// "changed" (it is present, content unknown), never "removed". total is the
+// folded count before limit.
+func foldDeltas(ctx context.Context, c store.Conn, worktree string, since int64, mark sql.NullInt64, limit int) ([]Delta, int, error) {
 	if limit <= 0 {
 		limit = DefaultListLimit
 	}
 	// at ties are common (one transaction stamps a whole batch); id is UUIDv7,
 	// monotonic with insertion, so it pins chronological order within a tie.
 	// seq > a NULL mark is NULL: no late part without a mark.
-	rows, err := e.st.DB.QueryContext(ctx,
+	rows, err := c.QueryContext(ctx,
 		`SELECT path, qualified_name, kind, change FROM graph_deltas
-		  WHERE worktree = ?1
-		    AND (at >= ?2 OR seq > ?3)
-		    AND (?4 IS NULL OR seq IS NULL OR seq <= ?4)
-		  ORDER BY at, id`,
-		worktree, r.Since, r.Mark, r.Upto)
+		  WHERE worktree = ?1 AND (at >= ?2 OR seq > ?3) ORDER BY at, id`,
+		worktree, since, mark)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -313,10 +311,10 @@ func (e *Engine) DeltasIn(ctx context.Context, worktree string, r ChangeRange, l
 	return out, total, nil
 }
 
-// DeltasSince returns the changes journaled at or after sinceMs, as DeltasIn
-// folds a range with no late part and no cap.
+// DeltasSince returns the changes journaled at or after sinceMs, folded as a
+// range with no late part.
 func (e *Engine) DeltasSince(ctx context.Context, worktree string, sinceMs int64, limit int) ([]Delta, int, error) {
-	return e.DeltasIn(ctx, worktree, ChangeRange{Since: sinceMs}, limit)
+	return foldDeltas(ctx, e.st.DB, worktree, sinceMs, sql.NullInt64{}, limit)
 }
 
 // DeltaBaseline returns the started_at of the most recent session (for this
@@ -342,15 +340,17 @@ func (e *Engine) DeltaBaselineWith(ctx context.Context, worktree, id string, sta
 }
 
 func deltaBaselineWith(ctx context.Context, c store.Conn, worktree, id string, startedAt, nowMs int64) (int64, bool, error) {
-	of := RangeOf{}
+	var pending []Session
 	if id != "" {
-		of.Pending = []Session{{ID: id, StartedAt: startedAt}}
+		pending = []Session{{ID: id, StartedAt: startedAt}}
 	}
-	return baselineOf(ctx, c, worktree, of, nowMs)
+	b, ok, err := baselineOf(ctx, c, worktree, pending, nowMs)
+	return b.since, ok, err
 }
 
-// Session is a session counted in a worktree while its row is not written: a
-// session start's own conversation, or one whose row waits in a pending end.
+// Session is a session counted in a worktree while its row is not written, or
+// whose end is not: a session start's own conversation, or one whose row waits
+// in a pending end.
 type Session struct {
 	ID        string
 	StartedAt int64
@@ -358,13 +358,16 @@ type Session struct {
 	Mark      sql.NullInt64 // the mark of its latest full block; invalid: none
 }
 
-// sessionsOf is worktree ?1's sessions, each with the higher of its row's mark
-// and its recorded one (?3, a JSON object of id: mark), plus the pending ones
-// (?2, a JSON array of {id, started_at, ended_at, mark}); each pending one
-// counts only while no row of its id exists.
-const sessionsOf = `(SELECT s.id, s.started_at, s.ended_at,
-         CASE WHEN r.value > COALESCE(s.delta_mark, -1) THEN r.value ELSE s.delta_mark END AS delta_mark
-    FROM sessions s LEFT JOIN json_each(?3) r ON r.key = s.id
+// sessionsOf is worktree ?1's sessions and the pending ones (?2, a JSON array
+// of {id, started_at, ended_at, mark}), as recovery will leave them: a pending
+// one without a row counts as itself; one whose row is open gives that row its
+// end and the higher of the two marks, as writeRepoEnd writes them; one whose
+// row is ended changes nothing, as writeRepoEnd leaves an ended row.
+const sessionsOf = `(SELECT s.id, s.started_at,
+         CASE WHEN s.ended_at IS NULL THEN json_extract(p.value, '$.ended_at') ELSE s.ended_at END AS ended_at,
+         CASE WHEN s.ended_at IS NULL AND json_extract(p.value, '$.mark') > COALESCE(s.delta_mark, -1)
+              THEN json_extract(p.value, '$.mark') ELSE s.delta_mark END AS delta_mark
+    FROM sessions s LEFT JOIN json_each(?2) p ON json_extract(p.value, '$.id') = s.id
    WHERE s.worktree = ?1
   UNION ALL
   SELECT json_extract(p.value, '$.id'), json_extract(p.value, '$.started_at'),
@@ -401,101 +404,92 @@ func sessionsJSON(sessions []Session) (string, error) {
 	return string(b), err
 }
 
-func recordedJSON(marks map[string]int64) (string, error) {
-	if len(marks) == 0 {
-		return "{}", nil
-	}
-	b, err := json.Marshal(marks)
-	return string(b), err
+// baseline is the session a range starts at: the last session before the
+// latest one that journaled a delta in its span.
+type baseline struct {
+	since int64         // its start
+	id    string        // its id
+	mark  sql.NullInt64 // its mark; invalid: none
 }
 
-// RangeOf says whose range RecentRange returns.
-type RangeOf struct {
-	Pending  []Session        // sessions counted while their rows are not written, the caller's included
-	Recorded map[string]int64 // marks recorded outside the store (a folder's ledger), by session id; each raises its row's mark
-	Upto     sql.NullInt64    // a block's own mark: its baseline and rows are taken as the journal stood then; invalid for a live read
-}
-
-// ChangeRange is the part of a worktree's journal that a session start's block
-// reports, and get_graph_delta with it: the rows counting from Since on, and
-// the rows written after Mark, which no block but the last one reported, as
-// the journal stood at Upto.
+// ChangeRange is what a session-start block built now in a worktree's latest
+// session reports, and get_graph_delta with it: the rows counting from Since
+// on and the rows written after the baseline session's mark, folded, as one
+// state of the journal holds them.
 type ChangeRange struct {
-	Since int64         // the baseline: the start of the last earlier session that changed the graph
-	Mark  sql.NullInt64 // the highest mark among the sessions but the last block (the highest mark, a tie to the later start); invalid when none has one
-	Upto  sql.NullInt64 // copied from RangeOf.Upto
+	Since  int64         // the baseline: the start of the last session before the latest one that changed the graph
+	Base   string        // that session's id
+	Mark   sql.NullInt64 // that session's mark; invalid: no late part
+	Read   int64         // the journal mark the range was read at; set even when there is no baseline
+	Deltas []Delta       // folded, sorted by path and name, at most limit
+	Total  int           // the folded count before limit
 }
 
-// RecentRange returns the range of a block built now in the latest session of
-// worktree, counting of.Pending. ok=false when no baseline exists: then nothing
-// is listed, as before.
-func (e *Engine) RecentRange(ctx context.Context, worktree string, of RangeOf, nowMs int64) (ChangeRange, bool, error) {
-	since, ok, err := baselineOf(ctx, e.st.DB, worktree, of, nowMs)
-	r := ChangeRange{Since: since, Upto: of.Upto}
-	if err != nil || !ok {
-		return r, false, err
-	}
-	pending, err := sessionsJSON(of.Pending)
+// afterRangeBaseline runs inside RecentRange's read, between its baseline and
+// its listing. A var so a test can commit a write there.
+var afterRangeBaseline = func() {}
+
+// RecentRange reads, in one read transaction, the range of a block built now
+// in the latest session of worktree, counting the pending sessions, up to
+// limit changes. ok=false when no baseline exists: nothing is listed, and Read
+// is still set.
+func (e *Engine) RecentRange(ctx context.Context, worktree string, pending []Session, nowMs int64, limit int) (ChangeRange, bool, error) {
+	var r ChangeRange
+	ok := false
+	err := e.st.ReadTx(ctx, func(c store.Conn) error {
+		read, err := JournalMark(ctx, c)
+		if err != nil {
+			return err
+		}
+		r.Read = read
+		b, found, err := baselineOf(ctx, c, worktree, pending, nowMs)
+		if err != nil || !found {
+			return err
+		}
+		ok = true
+		r.Since, r.Base, r.Mark = b.since, b.id, b.mark
+		afterRangeBaseline()
+		r.Deltas, r.Total, err = foldDeltas(ctx, c, worktree, r.Since, r.Mark, limit)
+		return err
+	})
 	if err != nil {
 		return ChangeRange{}, false, err
 	}
-	recorded, err := recordedJSON(of.Recorded)
-	if err != nil {
-		return ChangeRange{}, false, err
-	}
-	// The last block is the session with the highest mark; a tie goes to the
-	// later start. Its own rows are left out of Mark so a block never hides a
-	// change behind the mark it is recording, and the tool, which cannot name
-	// its caller, reports the same range.
-	const s = sessionsOf
-	err = e.st.DB.QueryRowContext(ctx, `
-SELECT MAX(s.delta_mark) FROM `+s+` s
- WHERE s.id IS NOT (SELECT b.id FROM `+s+` b WHERE b.delta_mark IS NOT NULL
-                     ORDER BY b.delta_mark DESC, b.started_at DESC, b.id DESC LIMIT 1)`,
-		worktree, pending, recorded).Scan(&r.Mark)
-	if err != nil {
-		return ChangeRange{}, false, err
-	}
-	return r, true, nil
+	return r, ok, nil
 }
 
-// baselineOf returns the start of the last session before the latest one that
-// journaled a delta in its span, as the journal stood at of.Upto. ok=false when
-// there is no such session.
-func baselineOf(ctx context.Context, c store.Conn, worktree string, of RangeOf, nowMs int64) (int64, bool, error) {
-	pending, err := sessionsJSON(of.Pending)
+// baselineOf returns the session a range starts at, as the journal stands on
+// c: the last session before the latest one that journaled a delta in its
+// span. ok=false when there is no such session.
+func baselineOf(ctx context.Context, c store.Conn, worktree string, pending []Session, nowMs int64) (baseline, bool, error) {
+	pendingJSON, err := sessionsJSON(pending)
 	if err != nil {
-		return 0, false, err
-	}
-	recorded, err := recordedJSON(of.Recorded)
-	if err != nil {
-		return 0, false, err
+		return baseline{}, false, err
 	}
 	var latest int64
 	if err := c.QueryRowContext(ctx,
 		`SELECT COALESCE(MAX(started_at), 0) FROM `+sessionsOf+` s`,
-		worktree, pending, recorded).Scan(&latest); err != nil {
-		return 0, false, err
+		worktree, pendingJSON).Scan(&latest); err != nil {
+		return baseline{}, false, err
 	}
 	if latest == 0 {
-		return 0, false, nil
+		return baseline{}, false, nil
 	}
-	var baseline int64
+	var b baseline
 	err = c.QueryRowContext(ctx, `
-SELECT s.started_at FROM `+sessionsOf+` s
- WHERE s.started_at < ?4
+SELECT s.id, s.started_at, s.delta_mark FROM `+sessionsOf+` s
+ WHERE s.started_at < ?3
    AND EXISTS (SELECT 1 FROM graph_deltas d
                 WHERE d.worktree = ?1
-                  AND d.at >= s.started_at AND d.at <= COALESCE(s.ended_at, ?5)
-                  AND (?6 IS NULL OR d.seq IS NULL OR d.seq <= ?6))
- ORDER BY s.started_at DESC LIMIT 1`, worktree, pending, recorded, latest, nowMs, of.Upto).Scan(&baseline)
+                  AND d.at >= s.started_at AND d.at <= COALESCE(s.ended_at, ?4))
+ ORDER BY s.started_at DESC, s.id DESC LIMIT 1`, worktree, pendingJSON, latest, nowMs).Scan(&b.id, &b.since, &b.mark)
 	if errors.Is(err, sql.ErrNoRows) {
-		return 0, false, nil
+		return baseline{}, false, nil
 	}
 	if err != nil {
-		return 0, false, err
+		return baseline{}, false, err
 	}
-	return baseline, true, nil
+	return b, true, nil
 }
 
 // tenthSessionStart returns the started_at of the worktree's 10th-most-recent

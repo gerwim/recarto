@@ -660,13 +660,20 @@ func endTargets(roster []rosterRepo, covered []coveredRepo) ([]endTarget, error)
 }
 
 // writeRepoEnd writes rec's session end into st: the row the Stop would have
-// written, or only its end when the row exists and is open.
+// written, or only its end when the row exists and is open. The record's mark
+// is the conversation's latest block mark, and a row written before that block
+// read the journal holds a lower one, so an open row also takes the higher
+// mark. sessionsOf reads an open row a pending entry covers the same two ways,
+// so a range is the same before and after this write.
 func writeRepoEnd(ctx context.Context, st *store.Store, rec repoEndRecord) error {
 	return st.WriteTx(ctx, func(c store.Conn) error {
 		_, err := c.ExecContext(ctx,
 			`INSERT INTO sessions(id, agent, branch, worktree, started_at, ended_at, delta_mark)
 			 VALUES (?, ?, ?, ?, ?, ?, ?)
-			 ON CONFLICT(id) DO UPDATE SET ended_at = excluded.ended_at WHERE sessions.ended_at IS NULL`,
+			 ON CONFLICT(id) DO UPDATE SET ended_at = excluded.ended_at,
+			   delta_mark = CASE WHEN excluded.delta_mark > COALESCE(sessions.delta_mark, -1)
+			                     THEN excluded.delta_mark ELSE sessions.delta_mark END
+			 WHERE sessions.ended_at IS NULL`,
 			rec.Session, rec.Agent, nullable(rec.Branch), rec.Worktree, rec.StartedAt, rec.EndedAt, rec.BlockMark)
 		return err
 	})

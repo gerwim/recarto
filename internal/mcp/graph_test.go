@@ -817,10 +817,10 @@ func TestGetGraphDeltaListsALateChange(t *testing.T) {
 			id, name string
 			at, seq  int64
 		}{
-			{"x", "X", priorStart + 100, 6}, // late: written after S2's mark
+			{"x", "X", priorStart + 100, 6}, // written after S2's mark 5: late
 			{"y", "Y", s2Start + 100, 7},
-			{"z", "Z", priorStart + 200, 4},
-			{"w", "W", priorStart + 300, 8}, // written after current's mark
+			{"z", "Z", priorStart + 200, 4}, // covered by S2's mark 5
+			{"w", "W", priorStart + 300, 8}, // written after current's mark: late against S2's
 		}
 		for _, r := range rows {
 			if _, err := rc.Store.DB.ExecContext(ctx,

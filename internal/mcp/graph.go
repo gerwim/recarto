@@ -912,7 +912,7 @@ func getGraphDelta(ctx context.Context, a *app.App, in GetGraphDeltaInput) (GetG
 }
 
 func graphDeltaIn(ctx context.Context, a *app.App, t *app.RepoContext, in GetGraphDeltaInput, fresh string) (GetGraphDeltaOutput, error) {
-	r, ok, err := agents.LiveRange(ctx, a, t)
+	r, ok, err := agents.LiveRange(ctx, a, t, in.Limit)
 	if err != nil {
 		return GetGraphDeltaOutput{}, err
 	}
@@ -922,10 +922,7 @@ func graphDeltaIn(ctx context.Context, a *app.App, t *app.RepoContext, in GetGra
 			Hint: fresh, Deltas: []GraphDeltaEntry{},
 		}, nil
 	}
-	deltas, total, err := t.Graph.DeltasIn(ctx, t.Git.Worktree, r, in.Limit)
-	if err != nil {
-		return GetGraphDeltaOutput{}, err
-	}
+	deltas, total := r.Deltas, r.Total
 	out := GetGraphDeltaOutput{
 		BaselineAt: time.UnixMilli(r.Since).Format(time.RFC3339),
 		Count:      len(deltas), Total: total, Truncated: total > len(deltas),

@@ -194,22 +194,6 @@ func raiseMark(ctx context.Context, c store.Conn, id string, mark int64) error {
 	return err
 }
 
-// markBlock reads the store's journal mark for the full block a later start of
-// session id builds in its own worktree, and raises the row's mark to it. The
-// block takes its range as of the mark whether or not the write is done. A busy
-// writer is not reported: a mark that is not recorded only lets the next start
-// list a late change again.
-func markBlock(ctx, skip context.Context, st *store.Store, id string) (sql.NullInt64, error) {
-	mark, err := graph.JournalMark(ctx, st.DB)
-	if err != nil {
-		return sql.NullInt64{}, err
-	}
-	if err := st.WriteTx(skip, func(c store.Conn) error { return raiseMark(ctx, c, id, mark) }); err != nil && !store.IsBusy(err) {
-		return sql.NullInt64{Int64: mark, Valid: true}, err
-	}
-	return sql.NullInt64{Int64: mark, Valid: true}, nil
-}
-
 type folderRow struct {
 	startedAt int64
 	agent     string
@@ -267,12 +251,11 @@ func conversationApp(ctx context.Context, a *app.App, sessionID string) (*app.Ap
 
 // conversationStart is what a session start knows of its conversation.
 type conversationStart struct {
-	roster    []rosterRepo  // the repos it covers, in order; nil: the block of the session's own worktree
-	first     bool          // this start is the first Recarto sees of the conversation
-	startedAt int64         // the folder session's start
-	agent     string        // the folder session's agent, for its roster repo sessions
-	mark      sql.NullInt64 // the mark of the row this start wrote in its own worktree, when roster is nil
-	markErr   error         // why a covered repo's mark could not be read
+	roster    []rosterRepo // the repos it covers, in order; nil: the block of the session's own worktree
+	first     bool         // this start is the first Recarto sees of the conversation
+	startedAt int64        // the folder session's start
+	agent     string       // the folder session's agent, for its roster repo sessions
+	markErr   error        // why a covered repo's mark could not be read
 }
 
 // journalMarks sets each roster entry's mark to its repo's journal mark now,
@@ -352,7 +335,7 @@ func startConversation(ctx context.Context, a *app.App, ev Event, now int64, wai
 		// Another process recorded the conversation first; its roster and marks count.
 		return known()
 	}
-	return conversationStart{roster: roster, first: true, startedAt: now, agent: agent, mark: mark, markErr: markErr}, nil
+	return conversationStart{roster: roster, first: true, startedAt: now, agent: agent, markErr: markErr}, nil
 }
 
 // codeless reports whether a's session folder is a code-less folder serving
@@ -374,8 +357,7 @@ type coveredRepo struct {
 	mark      string // "" with a selector, else why it has none
 	root      string // the roster's root commit for it
 	roster    func() bool
-	blockMark sql.NullInt64 // the mark recorded in the folder's ledger: rows are raised to it
-	upto      sql.NullInt64 // the mark this start's block reads up to
+	blockMark sql.NullInt64 // the conversation's mark there, as its folder's roster records it: its repo row, its records, its pending entry in a range and the block it writes take it
 }
 
 // isRoster reports whether the open checkout is still the roster's repository.
@@ -400,7 +382,9 @@ func (c coveredRepo) label() string {
 // subject is the one-repo block's subject for c, in the conversation session
 // started at since.
 func (c coveredRepo) subject(session string, since int64) subject {
-	s := subject{rc: c.RepoContext, served: c.served, session: session, since: since, upto: c.upto}
+	s := subject{rc: c.RepoContext, served: c.served,
+		caller: graph.Session{ID: session, StartedAt: since, Mark: c.blockMark},
+		marks:  blockMarks{session: session, roster: true}}
 	if c.sel != "" {
 		s.tools, s.header, s.reposLine = true, memoryHeader, alsoServing([]string{c.sel})
 		return s
@@ -493,47 +477,11 @@ func ensureRosterSessions(ctx context.Context, covered []coveredRepo, ev Event, 
 	return errors.Join(errs...)
 }
 
-// refreshMarks reads each covered repo's journal mark for the full block a
-// later start of the conversation builds, and records it as the conversation's
-// mark there in the folder's ledger. Its repo rows get it from
-// ensureRosterSessions, the background warm or the conversation's Stop. A busy
-// ledger write is not reported: the recorded marks stay the earlier ones, and
-// rows and ranges keep agreeing with them.
-func refreshMarks(ctx, skip context.Context, a *app.App, sessionID string, covered []coveredRepo) error {
-	marks := make([]sql.NullInt64, len(covered))
-	roster := make([]rosterRepo, len(covered))
-	var errs []error
-	for i, c := range covered {
-		mark, err := graph.JournalMark(ctx, c.Store.DB)
-		if err != nil {
-			errs = append(errs, fmt.Errorf("read the journal mark of %s: %w", c.Git.Worktree, err))
-			continue
-		}
-		marks[i] = sql.NullInt64{Int64: mark, Valid: true}
-		covered[i].upto = marks[i]
-		roster[i] = rosterRepo{wt: c.Git.Worktree, blockMark: marks[i]}
-	}
-	err := a.Store.WriteTx(skip, func(c store.Conn) error {
-		return putRosterMarks(ctx, c, sessionID, roster)
-	})
-	if err != nil {
-		if !store.IsBusy(err) {
-			errs = append(errs, err)
-		}
-		return errors.Join(errs...)
-	}
-	for i := range covered {
-		if marks[i].Valid {
-			covered[i].blockMark = marks[i]
-		}
-	}
-	return errors.Join(errs...)
-}
-
 // rosterSession returns the conversation counted in rc as a session before its
 // row there is written, as its session start counts it: the latest
 // conversation of the folder outside git a runs in, when its roster covers
-// rc's worktree, with its start. ok is false otherwise.
+// rc's worktree, with its start and its roster mark there. ok is false
+// otherwise.
 func rosterSession(ctx context.Context, a *app.App, rc *app.RepoContext) (s graph.Session, ok bool, err error) {
 	if !a.Git.NonGit {
 		return graph.Session{}, false, nil
@@ -554,36 +502,10 @@ func rosterSession(ctx context.Context, a *app.App, rc *app.RepoContext) (s grap
 	}
 	for _, e := range roster {
 		if e.wt == rc.Git.Worktree {
-			return graph.Session{ID: id, StartedAt: startedAt}, true, nil
+			return graph.Session{ID: id, StartedAt: startedAt, Mark: e.blockMark}, true, nil
 		}
 	}
 	return graph.Session{}, false, nil
-}
-
-// recordedMarks returns the marks a's folder ledger records for rc's worktree,
-// by conversation id: the mark of each conversation's latest full block there,
-// written before that block read the journal. Empty outside a folder.
-func recordedMarks(ctx context.Context, a *app.App, rc *app.RepoContext) (map[string]int64, error) {
-	if !a.Git.NonGit {
-		return nil, nil
-	}
-	rows, err := a.Store.DB.QueryContext(ctx,
-		`SELECT scope, value FROM counters WHERE metric = ?`, rosterMarkMetric+rc.Git.Worktree)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = rows.Close() }() // a read-only cursor: closing it cannot lose data
-	prefix := rosterScope("")
-	out := map[string]int64{}
-	for rows.Next() {
-		var scope string
-		var value int64
-		if err := rows.Scan(&scope, &value); err != nil {
-			return nil, err
-		}
-		out[strings.TrimPrefix(scope, prefix)] = value
-	}
-	return out, rows.Err()
 }
 
 // rosterRetryWait waits before RecordRosterSessions tries a busy repo again.

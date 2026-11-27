@@ -631,9 +631,10 @@ DROP TABLE _v27;
 		return err
 	}},
 	// v29: seq orders journal writes (the counter is meta graph_delta_seq);
-	// delta_mark is the journal seq a session's latest full block took its range
-	// at (see graph.RecentRange). Existing rows stay NULL: an older binary's rows
-	// are never late and its sessions never cap a listing.
+	// delta_mark is a journal seq every row up to which a full block of the
+	// session had in its range, or a lower one (see graph.ChangeRange). Existing
+	// rows stay NULL: an older binary's rows are never late, and its sessions add
+	// no late part.
 	{run: func(ctx context.Context, c Conn) error {
 		for _, col := range []struct{ table, name string }{
 			{"graph_deltas", "seq"},
